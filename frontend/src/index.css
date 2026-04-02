@@ -1,0 +1,357 @@
+@import "tailwindcss";
+
+/* ══════════════════════════════════════════════════════════════
+   PLAYARR — Rock-themed Design System
+   Inspired by Plex / Sonarr / Radarr / Jellyfin
+   ══════════════════════════════════════════════════════════════ */
+
+@theme {
+  /* ── Surfaces ── */
+  --color-surface:         #0f1117;
+  --color-surface-light:   #151923;
+  --color-surface-lighter: #1c2230;
+  --color-surface-border:  #2b3245;
+  --color-surface-hover:   #232a3a;
+
+  /* ── Primary (rock red) ── */
+  --color-accent:          #e11d2e;
+  --color-accent-hover:    #ff3b3b;
+  --color-accent-muted:    #3d1520;
+
+  /* ── Secondary accent (flame orange) ── */
+  --color-orange:          #ff6a00;
+  --color-orange-muted:    #3d2a10;
+
+  /* ── Text ── */
+  --color-text-primary:    #e5e7eb;
+  --color-text-secondary:  #b8bcc7;
+  --color-text-muted:      #8b93a7;
+
+  /* ── Status ── */
+  --color-success:         #22c55e;
+  --color-warning:         #f59e0b;
+  --color-danger:          #ef4444;
+}
+
+/* ── Base resets ── */
+@layer base {
+  body {
+    @apply bg-surface text-text-primary antialiased;
+    font-family: "Inter", system-ui, -apple-system, sans-serif;
+  }
+
+  /* Monospace for technical metadata */
+  code, .font-mono {
+    font-family: "Roboto Mono", "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  ::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--color-surface);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-surface-lighter);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-surface-border);
+  }
+
+  /* Editor preview scroll — wider, more visible scrollbars */
+  .editor-preview-scroll::-webkit-scrollbar {
+    width: 1400px;
+    height: 1400px;
+  }
+  .editor-preview-scroll::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 7px;
+  }
+  .editor-preview-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.4);
+    border-radius: 7px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  .editor-preview-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.6);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  .editor-preview-scroll::-webkit-scrollbar-corner {
+    background: rgba(0, 0, 0, 0.3);
+  }
+
+  /* Selection colour */
+  ::selection {
+    background-color: rgba(225, 29, 46, 0.3);
+    color: #fff;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Utility Components
+   ══════════════════════════════════════════════════════════════ */
+
+@utility btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.5rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  font-weight: 500;
+  transition-property: color, background-color, border-color, box-shadow;
+  transition-duration: 150ms;
+  cursor: pointer;
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
+  }
+  &:disabled {
+    pointer-events: none;
+    opacity: 0.5;
+  }
+}
+
+@utility btn-primary {
+  @apply btn;
+  background: linear-gradient(135deg, var(--color-accent) 0%, #c9182a 100%);
+  color: white;
+  box-shadow: 0 0 12px rgba(225, 29, 46, 0.25);
+  &:hover {
+    background: linear-gradient(135deg, var(--color-accent-hover) 0%, var(--color-accent) 100%);
+    box-shadow: 0 0 20px rgba(225, 29, 46, 0.4);
+  }
+}
+@utility btn-secondary {
+  @apply btn;
+  background-color: var(--color-surface-lighter);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-surface-border);
+  &:hover {
+    background-color: var(--color-surface-hover);
+    border-color: var(--color-accent);
+    box-shadow: 0 0 8px rgba(225, 29, 46, 0.15);
+  }
+}
+@utility btn-ghost {
+  @apply btn;
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  &:hover {
+    background-color: var(--color-surface-lighter);
+    color: var(--color-text-primary);
+  }
+}
+@utility btn-danger {
+  @apply btn;
+  background-color: rgba(239, 68, 68, 0.1);
+  color: var(--color-danger);
+  &:hover {
+    background-color: rgba(239, 68, 68, 0.2);
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.2);
+  }
+}
+@utility btn-sm {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+@utility btn-icon {
+  @apply btn;
+  padding: 0.5rem;
+}
+
+@utility input-field {
+  width: 100%;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-surface-border);
+  background-color: var(--color-surface-light);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: var(--color-text-primary);
+  transition: border-color 150ms, box-shadow 150ms;
+  &::placeholder { color: var(--color-text-muted); }
+  &:focus {
+    border-color: var(--color-accent);
+    outline: none;
+    box-shadow: 0 0 0 1px var(--color-accent), 0 0 12px rgba(225, 29, 46, 0.15);
+  }
+}
+
+@utility card {
+  border-radius: 0.75rem;
+  border: 1px solid var(--color-surface-border);
+  background-color: var(--color-surface-light);
+  padding: 1rem;
+  transition: border-color 200ms, box-shadow 200ms;
+}
+
+@utility card-glow {
+  @apply card;
+  &:hover {
+    border-color: rgba(225, 29, 46, 0.3);
+    box-shadow: 0 0 20px rgba(225, 29, 46, 0.08);
+  }
+}
+
+@utility badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.375rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+}
+@utility badge-blue   { @apply badge; background-color: rgba(59, 130, 246, 0.15);  color: #60a5fa; }
+@utility badge-green  { @apply badge; background-color: rgba(34, 197, 94, 0.15);   color: #4ade80; }
+@utility badge-yellow { @apply badge; background-color: rgba(234, 179, 8, 0.15);   color: #facc15; }
+@utility badge-red    { @apply badge; background-color: rgba(225, 29, 46, 0.15);   color: #ff6b6b; }
+@utility badge-purple { @apply badge; background-color: rgba(168, 85, 247, 0.15);  color: #c084fc; }
+@utility badge-gray   { @apply badge; background-color: rgba(107, 114, 128, 0.15); color: #9ca3af; }
+@utility badge-orange { @apply badge; background-color: rgba(255, 106, 0, 0.15);   color: #ff9a40; }
+
+@utility skeleton {
+  @apply animate-pulse rounded;
+  background-color: var(--color-surface-lighter);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Custom Animations
+   ══════════════════════════════════════════════════════════════ */
+
+/* Vinyl spin — used for loading states */
+@keyframes vinyl-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Pulse glow — used for active/processing elements */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 8px rgba(225, 29, 46, 0.3); }
+  50%      { box-shadow: 0 0 20px rgba(225, 29, 46, 0.6); }
+}
+
+/* Slide up fade in */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@utility animate-vinyl-spin {
+  animation: vinyl-spin 3s linear infinite;
+}
+
+@utility animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@utility animate-slide-up {
+  animation: slide-up 0.3s ease-out both;
+}
+
+/* Artwork grid scroll — seamless downward drift */
+@keyframes scroll-down {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-50%); }
+}
+
+@utility animate-scroll-down {
+  animation: scroll-down 60s linear infinite;
+}
+
+/* Artwork cell crossfade */
+@keyframes artwork-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Artwork cell flip (Y-axis card flip) */
+@keyframes artwork-flip {
+  0%   { transform: rotateY(0deg); }
+  50%  { transform: rotateY(90deg); }
+  100% { transform: rotateY(0deg); }
+}
+
+/* Artwork cell spin (360° spin) */
+@keyframes artwork-spin {
+  0%   { transform: rotate(0deg) scale(1); }
+  25%  { transform: rotate(180deg) scale(0.7); }
+  50%  { transform: rotate(360deg) scale(1); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+
+/* Image swap helpers: hide old / show new at 50% (for flip) */
+@keyframes artwork-flip-hide {
+  0%   { opacity: 1; }
+  50%  { opacity: 0; }
+  100% { opacity: 0; }
+}
+@keyframes artwork-flip-show {
+  0%   { opacity: 0; }
+  50%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+
+/* Image swap helpers: hide old / show new at 25% (for spin) */
+@keyframes artwork-spin-hide {
+  0%   { opacity: 1; }
+  25%  { opacity: 0; }
+  100% { opacity: 0; }
+}
+@keyframes artwork-spin-show {
+  0%   { opacity: 0; }
+  25%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+
+/* ── Larger number input spinners ── */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+@utility animate-fade-in {
+  animation: artwork-fade-in 1s ease-in-out forwards;
+}
+
+/* ── Glass panel effect ── */
+@utility glass-panel {
+  background: linear-gradient(
+    135deg,
+    rgba(21, 25, 35, 0.95) 0%,
+    rgba(28, 34, 48, 0.85) 100%
+  );
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-surface-border);
+  border-radius: 0.75rem;
+}
+
+/* ── Accent underline for active nav items ── */
+@utility nav-active-bar {
+  position: relative;
+  &::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0.75rem;
+    right: 0.75rem;
+    height: 2px;
+    background: linear-gradient(90deg, var(--color-accent), var(--color-orange));
+    border-radius: 1px;
+  }
+}

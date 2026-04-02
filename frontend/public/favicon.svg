@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1c2230"/>
+      <stop offset="100%" stop-color="#0f1117"/>
+    </linearGradient>
+    <linearGradient id="play" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff3b3b"/>
+      <stop offset="100%" stop-color="#e11d2e"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff6a00" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#e11d2e" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <!-- Background rounded square -->
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- Subtle border -->
+  <rect width="62" height="62" x="1" y="1" rx="13" fill="none" stroke="#2b3245" stroke-width="1"/>
+  <!-- Glow circle behind play -->
+  <circle cx="32" cy="32" r="22" fill="url(#glow)" opacity="0.3"/>
+  <!-- Play triangle -->
+  <path d="M25 18 L47 32 L25 46 Z" fill="url(#play)"/>
+  <!-- Subtle shine on triangle -->
+  <path d="M25 18 L47 32 L25 32 Z" fill="white" opacity="0.1"/>
+</svg>

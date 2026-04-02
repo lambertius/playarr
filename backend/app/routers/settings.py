@@ -1,0 +1,556 @@
+"""
+Settings API — Read/write global and per-user settings.
+"""
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import threading
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models import AppSetting, NormalizationHistory
+from app.schemas import SettingOut, SettingUpdate, NormalizationHistoryOut
+
+router = APIRouter(prefix="/api/settings", tags=["Settings"])
+
+# Default settings with their types
+DEFAULT_SETTINGS = {
+    "library_dir": ("D:\\MusicVideos\\Library", "string"),
+    "library_source_dirs": ("[]", "json"),
+    "archive_dir": ("D:\\MusicVideos\\Archive", "string"),
+    "normalization_target_lufs": ("-14.0", "float"),
+    "normalization_lra": ("7.0", "float"),
+    "normalization_tp": ("-1.5", "float"),
+    "preview_duration_sec": ("8", "int"),
+    "preview_start_percent": ("30", "int"),
+    "ai_provider": ("none", "string"),
+    "auto_normalize_on_import": ("true", "bool"),
+    "preferred_container": ("mkv", "string"),
+    "transcode_audio_bitrate": ("256", "int"),
+    "server.port": ("6969", "int"),
+    "ai_source_resolution": ("true", "bool"),
+    "ai_final_review": ("true", "bool"),
+    "import_scrape_wikipedia": ("true", "bool"),
+    "import_scrape_musicbrainz": ("true", "bool"),
+    "import_ai_auto": ("false", "bool"),
+    "import_ai_only": ("false", "bool"),
+    "import_find_source_video": ("false", "bool"),
+    "max_concurrent_downloads": ("4", "int"),
+    "party_mode_exclusions": ('{"version_types":[],"artists":[],"genres":[],"albums":[],"min_song_rating":null,"min_video_rating":null}', "json"),
+    "library_naming_pattern": ("{artist} - {title} [{quality}]", "string"),
+    "library_folder_structure": ("{artist}/{file_folder}", "string"),
+    # TMVDB integration
+    "tmvdb_enabled": ("false", "bool"),
+    "tmvdb_api_key": ("", "string"),
+    "tmvdb_auto_pull": ("false", "bool"),
+    "tmvdb_auto_push": ("false", "bool"),
+    "import_scrape_tmvdb": ("false", "bool"),
+}
+
+
+@router.get("/", response_model=List[SettingOut])
+def list_settings(user_id: Optional[str] = None, db: Session = Depends(get_db)):
+    """List all settings (global or per-user)."""
+    query = db.query(AppSetting)
+    if user_id:
+        query = query.filter(
+            (AppSetting.user_id == user_id) | (AppSetting.user_id.is_(None))
+        )
+    else:
+        query = query.filter(AppSetting.user_id.is_(None))
+
+    settings = query.all()
+
+    # Merge defaults for any missing keys
+    existing_keys = {s.key for s in settings}
+    result = [SettingOut(key=s.key, value=s.value, value_type=s.value_type) for s in settings]
+
+    for key, (default_val, val_type) in DEFAULT_SETTINGS.items():
+        if key not in existing_keys:
+            result.append(SettingOut(key=key, value=default_val, value_type=val_type))
+
+    return result
+
+
+@router.put("/", response_model=SettingOut)
+def update_setting(update: SettingUpdate, user_id: Optional[str] = None, db: Session = Depends(get_db)):
+    """Update or create a setting."""
+    setting = db.query(AppSetting).filter(
+        AppSetting.key == update.key,
+        AppSetting.user_id == user_id,
+    ).first()
+
+    if setting:
+        setting.value = update.value
+        setting.value_type = update.value_type
+    else:
+        setting = AppSetting(
+            user_id=user_id,
+            key=update.key,
+            value=update.value,
+            value_type=update.value_type,
+        )
+        db.add(setting)
+
+    db.commit()
+    db.refresh(setting)
+
+    # Sync directory settings to the pydantic config singleton
+    _sync_dir_setting_to_config(update.key, update.value)
+
+    return SettingOut(key=setting.key, value=setting.value, value_type=setting.value_type)
+
+
+def _sync_dir_setting_to_config(key: str, value: str) -> None:
+    """Keep the cached pydantic Settings in sync with DB for directory/naming keys."""
+    from app.config import get_settings
+    _sync_keys = {"library_dir", "library_source_dirs", "archive_dir",
+                  "library_naming_pattern", "library_folder_structure"}
+    if key in _sync_keys:
+        settings = get_settings()
+        setattr(settings, key, value)
+
+
+# ---------------------------------------------------------------------------
+# Source directories — save, auto-import new, auto-clean removed
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+
+class SourceDirsUpdate(BaseModel):
+    dirs: List[str]
+
+
+class SourceDirsResponse(BaseModel):
+    saved: bool
+    added_dirs: List[str]
+    removed_dirs: List[str]
+    import_job_id: Optional[int] = None
+    cleaned_count: int = 0
+
+
+@router.put("/source-directories", response_model=SourceDirsResponse)
+def update_source_directories(body: SourceDirsUpdate, db: Session = Depends(get_db)):
+    """
+    Save source directories, auto-import videos from newly added dirs,
+    and auto-clean videos from removed dirs.
+    """
+    from app.config import get_settings
+    from app.models import ProcessingJob, JobStatus, VideoItem, MediaAsset, Source, Genre
+    from app.services.file_organizer import parse_folder_name
+    from app.services.nfo_parser import find_nfo_for_video, parse_nfo_file, find_artwork_for_video
+    from app.tasks import extract_quality_signature, derive_resolution_label, _get_or_create_genre
+    from app.models import QualitySignature
+    from datetime import datetime, timezone
+
+    new_dirs = [d.strip() for d in body.dirs if d.strip()]
+
+    # Read the old value from DB
+    old_setting = db.query(AppSetting).filter(
+        AppSetting.key == "library_source_dirs",
+        AppSetting.user_id.is_(None),
+    ).first()
+    old_dirs: List[str] = []
+    if old_setting:
+        try:
+            old_dirs = json.loads(old_setting.value)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Persist to DB
+    new_value = json.dumps(new_dirs)
+    if old_setting:
+        old_setting.value = new_value
+        old_setting.value_type = "json"
+    else:
+        old_setting = AppSetting(
+            user_id=None,
+            key="library_source_dirs",
+            value=new_value,
+            value_type="json",
+        )
+        db.add(old_setting)
+    db.flush()
+
+    # Sync to the pydantic config singleton so get_all_library_dirs() works
+    settings = get_settings()
+    settings.library_source_dirs = new_value
+
+    # Compute diffs
+    old_set = set(os.path.normcase(os.path.normpath(d)) for d in old_dirs)
+    new_set = set(os.path.normcase(os.path.normpath(d)) for d in new_dirs)
+    added = [d for d in new_dirs if os.path.normcase(os.path.normpath(d)) not in old_set]
+    removed = [d for d in old_dirs if os.path.normcase(os.path.normpath(d)) not in new_set]
+
+    import_job_id = None
+    cleaned_count = 0
+
+    # --- Auto-import from newly added directories ---
+    if added:
+        video_extensions = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".mpg"}
+        new_count = 0
+        for add_dir in added:
+            if not os.path.isdir(add_dir):
+                logger.warning(f"Source directory not found: {add_dir}")
+                continue
+            for entry_name in os.listdir(add_dir):
+                folder_path = os.path.join(add_dir, entry_name)
+                if not os.path.isdir(folder_path):
+                    continue
+                # Already tracked?
+                existing = db.query(VideoItem).filter(
+                    VideoItem.folder_path == folder_path,
+                ).first()
+                if existing:
+                    continue
+                # Find a video file in the folder
+                video_file = None
+                for fname in os.listdir(folder_path):
+                    if os.path.splitext(fname)[1].lower() in video_extensions:
+                        video_file = os.path.join(folder_path, fname)
+                        break
+                if not video_file:
+                    continue
+                # Parse folder name for metadata (baseline)
+                artist, title, res_label = parse_folder_name(entry_name)
+                if not artist:
+                    artist = "Unknown Artist"
+                if not title:
+                    title = entry_name
+
+                # Enrich from local NFO if available
+                album = None
+                year = None
+                genres: List[str] = []
+                plot = None
+                source_url = None
+                nfo_path = find_nfo_for_video(video_file)
+                if nfo_path:
+                    nfo = parse_nfo_file(nfo_path)
+                    if nfo:
+                        if nfo.artist:
+                            artist = nfo.artist
+                        if nfo.title:
+                            title = nfo.title
+                        album = nfo.album
+                        year = nfo.year
+                        genres = nfo.genres or []
+                        plot = nfo.plot
+                        source_url = nfo.source_url
+                        logger.info(f"Enriched from NFO: {nfo_path}")
+
+                # Create VideoItem (local-only, no scraping)
+                video_item = VideoItem(
+                    artist=artist,
+                    title=title,
+                    album=album,
+                    year=year,
+                    plot=plot,
+                    folder_path=folder_path,
+                    file_path=video_file,
+                    resolution_label=res_label,
+                    file_size_bytes=os.path.getsize(video_file) if os.path.isfile(video_file) else None,
+                    import_method="scanned",
+                    song_rating=3,
+                    video_rating=3,
+                )
+                db.add(video_item)
+                db.flush()
+
+                # Genres
+                for g in genres:
+                    genre_obj = _get_or_create_genre(db, g)
+                    if genre_obj not in video_item.genres:
+                        video_item.genres.append(genre_obj)
+
+                # Source link from NFO
+                if source_url:
+                    try:
+                        from app.services.url_utils import identify_provider, canonicalize_url
+                        provider, vid_id = identify_provider(source_url)
+                        canonical = canonicalize_url(provider, vid_id)
+                        existing_source = db.query(Source).filter(
+                            Source.provider == provider,
+                            Source.source_video_id == vid_id,
+                        ).first()
+                        if not existing_source:
+                            db.add(Source(
+                                video_id=video_item.id,
+                                provider=provider,
+                                source_video_id=vid_id,
+                                original_url=source_url,
+                                canonical_url=canonical,
+                                provenance="nfo_import",
+                                source_type="single",
+                            ))
+                    except Exception:
+                        pass  # URL may not be a recognised provider
+
+                # Local artwork → MediaAsset records
+                artwork = find_artwork_for_video(video_file)
+                for asset_type in ("poster", "thumb"):
+                    art_path = artwork.get(asset_type)
+                    if art_path and os.path.isfile(art_path):
+                        db.add(MediaAsset(
+                            video_id=video_item.id,
+                            asset_type=asset_type,
+                            file_path=art_path,
+                            provenance="local_file",
+                            status="valid",
+                        ))
+
+                # Analyze quality via ffprobe
+                try:
+                    sig = extract_quality_signature(video_file)
+                    qs = QualitySignature(video_id=video_item.id)
+                    for k, v in sig.items():
+                        if hasattr(qs, k):
+                            setattr(qs, k, v)
+                    db.add(qs)
+                    video_item.resolution_label = derive_resolution_label(sig.get("height"))
+                except Exception as e:
+                    logger.warning(f"Quality analysis failed for {entry_name}: {e}")
+                new_count += 1
+                logger.info(f"Auto-imported from new source dir: {artist} - {title}")
+        if new_count:
+            logger.info(f"Auto-imported {new_count} video(s) from {len(added)} new source dir(s)")
+
+    # --- Auto-clean videos from removed directories ---
+    if removed:
+        from app.routers.library import _robust_rmtree, _delete_video_thumbnail_dir, _delete_video_previews
+        norm_removed = [os.path.normcase(os.path.normpath(d)) for d in removed]
+        # Find all videos whose folder_path is inside a removed dir
+        all_videos = db.query(VideoItem).all()
+        to_delete = []
+        for v in all_videos:
+            if not v.folder_path:
+                continue
+            norm_fp = os.path.normcase(os.path.normpath(v.folder_path))
+            for nr in norm_removed:
+                if norm_fp.startswith(nr + os.sep) or norm_fp == nr:
+                    to_delete.append(v)
+                    break
+        for v in to_delete:
+            vid = v.id
+            folder = v.folder_path
+            file_base = os.path.splitext(os.path.basename(v.file_path))[0] if v.file_path else None
+            db.delete(v)
+            db.flush()
+            _delete_video_thumbnail_dir(vid)
+            _delete_video_previews(vid, file_base)
+            logger.info(f"Auto-cleaned video {vid} from removed source dir: {folder}")
+        cleaned_count = len(to_delete)
+        if cleaned_count:
+            logger.info(f"Auto-cleaned {cleaned_count} video(s) from {len(removed)} removed source dir(s)")
+
+    db.commit()
+    return SourceDirsResponse(
+        saved=True,
+        added_dirs=added,
+        removed_dirs=removed,
+        cleaned_count=cleaned_count,
+    )
+
+
+@router.get("/normalization-history", response_model=List[NormalizationHistoryOut])
+def get_all_normalization_history(db: Session = Depends(get_db)):
+    """Get all normalization history records (most recent first)."""
+    records = (
+        db.query(NormalizationHistory)
+        .order_by(NormalizationHistory.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return records
+
+
+@router.get("/normalization-history/{video_id}", response_model=List[NormalizationHistoryOut])
+def get_normalization_history(video_id: int, db: Session = Depends(get_db)):
+    """Get normalization history for a video item."""
+    records = (
+        db.query(NormalizationHistory)
+        .filter(NormalizationHistory.video_id == video_id)
+        .order_by(NormalizationHistory.created_at.desc())
+        .all()
+    )
+    return records
+
+
+@router.get("/browse-directories")
+def browse_directories():
+    """Open a native OS folder picker dialog and return the selected path."""
+    script = (
+        "import tkinter as tk\n"
+        "from tkinter import filedialog\n"
+        "root = tk.Tk()\n"
+        "root.withdraw()\n"
+        "root.attributes('-topmost', True)\n"
+        "path = filedialog.askdirectory(title='Select Directory')\n"
+        "print(path)\n"
+        "root.destroy()\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=120,
+        )
+        selected = result.stdout.strip()
+        if not selected:
+            return {"path": ""}
+        return {"path": os.path.normpath(selected)}
+    except subprocess.TimeoutExpired:
+        return {"path": ""}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to open folder picker")
+
+
+# ---------------------------------------------------------------------------
+# Naming convention preview
+# ---------------------------------------------------------------------------
+
+class NamingPreviewRequest(BaseModel):
+    naming_pattern: str = "{artist} - {title} [{quality}]"
+    folder_structure: str = "{artist}/{file_folder}"
+
+
+class NamingPreviewResponse(BaseModel):
+    examples: List[dict]
+
+
+@router.post("/naming-preview", response_model=NamingPreviewResponse)
+def naming_preview(body: NamingPreviewRequest):
+    """Generate example paths using the given naming pattern and folder structure."""
+    from app.services.file_organizer import apply_naming_pattern, sanitize_filename
+
+    sample_videos = [
+        {"artist": "Foo Fighters", "title": "Everlong", "album": "The Colour and the Shape",
+         "quality": "1080p", "year": 1997, "version_type": "normal", "ext": ".mkv"},
+        {"artist": "Daft Punk", "title": "Around the World", "album": "Homework",
+         "quality": "720p", "year": 1997, "version_type": "normal", "ext": ".mp4"},
+        {"artist": "Johnny Cash", "title": "Hurt", "album": "American IV",
+         "quality": "1080p", "year": 2002, "version_type": "cover", "ext": ".mkv"},
+    ]
+
+    examples = []
+    for v in sample_videos:
+        file_base = apply_naming_pattern(
+            body.naming_pattern, v["artist"], v["title"], v["quality"],
+            album=v["album"], year=v["year"], version_type=v["version_type"],
+        )
+
+        folder_structure = body.folder_structure.replace("{file_folder}", file_base)
+        folder_structure = folder_structure.replace("{artist}", sanitize_filename(v["artist"]))
+        folder_structure = folder_structure.replace("{album}", sanitize_filename(v["album"]) if v["album"] else "Unknown Album")
+        folder_structure = folder_structure.replace("\\", "/")
+
+        full_path = f"{folder_structure}/{file_base}{v['ext']}"
+
+        examples.append({
+            "artist": v["artist"],
+            "title": v["title"],
+            "version_type": v["version_type"],
+            "path": full_path,
+        })
+
+
+RESTART_EXIT_CODE = 75  # Special exit code that _start_server.py interprets as "restart"
+
+
+@router.post("/restart")
+def restart_server():
+    """Restart the Playarr server process."""
+    logger.info("Server restart requested via API")
+
+    def _do_exit():
+        import time
+        time.sleep(0.5)  # Allow response to flush
+        os._exit(RESTART_EXIT_CODE)
+
+    threading.Thread(target=_do_exit, daemon=True).start()
+    return {"status": "restarting"}
+
+    return NamingPreviewResponse(examples=examples)
+
+
+# ---------------------------------------------------------------------------
+# Genre Blacklist Management
+# ---------------------------------------------------------------------------
+
+class GenreBlacklistItem(BaseModel):
+    id: int
+    name: str
+    blacklisted: bool
+    video_count: int
+
+
+class GenreBlacklistUpdate(BaseModel):
+    genre_ids: List[int]
+    blacklisted: bool
+
+
+@router.get("/genre-blacklist", response_model=List[GenreBlacklistItem])
+def list_genre_blacklist(db: Session = Depends(get_db)):
+    """List all genres with their blacklist status and video count."""
+    from app.models import Genre, video_genres
+    from sqlalchemy import func
+
+    results = (
+        db.query(
+            Genre.id,
+            Genre.name,
+            Genre.blacklisted,
+            func.count(video_genres.c.video_id),
+        )
+        .outerjoin(video_genres, Genre.id == video_genres.c.genre_id)
+        .group_by(Genre.id, Genre.name, Genre.blacklisted)
+        .order_by(Genre.name)
+        .all()
+    )
+    return [
+        GenreBlacklistItem(id=r[0], name=r[1], blacklisted=bool(r[2]), video_count=r[3])
+        for r in results
+    ]
+
+
+@router.put("/genre-blacklist")
+def update_genre_blacklist(body: GenreBlacklistUpdate, db: Session = Depends(get_db)):
+    """Bulk update blacklist status for genres."""
+    from app.models import Genre
+
+    updated = (
+        db.query(Genre)
+        .filter(Genre.id.in_(body.genre_ids))
+        .update({Genre.blacklisted: body.blacklisted}, synchronize_session="fetch")
+    )
+    db.commit()
+    return {"updated": updated}
+
+
+class GenreCreateRequest(BaseModel):
+    name: str
+
+
+@router.post("/genre-blacklist", response_model=GenreBlacklistItem)
+def create_genre(body: GenreCreateRequest, db: Session = Depends(get_db)):
+    """Create a new genre (visible by default)."""
+    from app.models import Genre
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Genre name cannot be empty")
+    existing = db.query(Genre).filter(Genre.name == name).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Genre already exists")
+    genre = Genre(name=name, blacklisted=False)
+    db.add(genre)
+    db.commit()
+    db.refresh(genre)
+    return GenreBlacklistItem(id=genre.id, name=genre.name, blacklisted=False, video_count=0)

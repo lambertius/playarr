@@ -1,0 +1,513 @@
+"""
+Stage D — deferred enrichment tasks.
+
+These tasks run AFTER the core import (Stage C) completes.
+They may touch the DB but are individually short-lived and
+use their own sessions.  Failures here are non-fatal.
+"""
+import logging
+import queue
+import threading
+import time
+from typing import List
+
+from app.pipeline.workspace import ImportWorkspace
+
+logger = logging.getLogger(__name__)
+
+# ── Global deferred worker ──────────────────────────────────────────
+# A single background thread processes ALL deferred tasks across ALL
+# jobs.  This eliminates cross-job SQLite "database is locked" errors
+# that occurred when each job spawned its own thread.
+_deferred_q: queue.Queue = queue.Queue()
+_worker_lock = threading.Lock()
+_worker_started = False
+
+
+def _global_deferred_worker() -> None:
+    """Process the global deferred queue forever (daemon thread)."""
+    while True:
+        item = _deferred_q.get()
+        if item is None:
+            break
+        video_id, task_name, fn, ws, is_cleanup = item
+        if is_cleanup:
+            ws.cleanup_on_success()
+        else:
+            _run_safe(fn, video_id, ws, task_name)
+        _deferred_q.task_done()
+
+
+def _ensure_worker() -> None:
+    global _worker_started
+    with _worker_lock:
+        if not _worker_started:
+            t = threading.Thread(
+                target=_global_deferred_worker, daemon=True,
+                name="deferred-global",
+            )
+            t.start()
+            _worker_started = True
+
+
+def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> None:
+    """Enqueue deferred tasks into the global single-thread worker.
+
+    All deferred tasks across all jobs are serialised through one thread
+    to avoid SQLite "database is locked" errors.
+    """
+    if not tasks:
+        ws.log("No deferred tasks")
+        ws.cleanup_on_success()
+        return
+
+    ws.log(f"Dispatching deferred tasks: {tasks}")
+    _ensure_worker()
+
+    for task_name in tasks:
+        fn = _DISPATCH.get(task_name)
+        if fn:
+            _deferred_q.put((video_id, task_name, fn, ws, False))
+        else:
+            ws.log(f"Unknown deferred task: {task_name}", level="warning")
+    # Cleanup runs after all of this video's tasks complete
+    _deferred_q.put((video_id, "_cleanup", None, ws, True))
+
+
+# ── DB retry helper ─────────────────────────────────────────────────
+_MAX_DB_RETRIES = 3
+
+
+def _db_retry(db, ws, label: str) -> bool:
+    """Attempt ``db.commit()`` with retries on SQLite lock.
+
+    Returns True on success, False on permanent failure (rolls back).
+    """
+    for attempt in range(_MAX_DB_RETRIES + 1):
+        try:
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            if "database is locked" in str(e) and attempt < _MAX_DB_RETRIES:
+                delay = 2 ** attempt
+                ws.log(f"{label}: DB lock, retry {attempt + 1}/{_MAX_DB_RETRIES} in {delay}s",
+                       level="warning")
+                time.sleep(delay)
+            else:
+                ws.log(f"{label}: {e}", level="warning")
+                return False
+    return False
+
+
+def _run_safe(fn, video_id: int, ws: ImportWorkspace, task_name: str):
+    """Run a deferred task with error handling."""
+    try:
+        fn(video_id, ws)
+        ws.log(f"Deferred '{task_name}' completed")
+    except Exception as e:
+        logger.error(f"Deferred task '{task_name}' failed for video {video_id}: {e}",
+                     exc_info=True)
+        ws.log(f"Deferred '{task_name}' FAILED: {e}", level="error")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  DEFERRED TASK IMPLEMENTATIONS
+# ═══════════════════════════════════════════════════════════════════════
+
+def _deferred_preview(video_id: int, ws: ImportWorkspace) -> None:
+    """Generate video preview clip."""
+    from app.database import SessionLocal
+    from app.models import VideoItem
+    from app.services.preview_generator import generate_preview
+
+    db = SessionLocal()
+    try:
+        item = db.query(VideoItem).get(video_id)
+        if not item or not item.file_path:
+            return
+        file_path = item.file_path
+    finally:
+        db.close()
+
+    generate_preview(file_path, video_id=video_id)
+
+
+def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
+    """Run AI scene analysis if enabled."""
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        from app.ai.scene_analysis import analyze_scenes
+        analyze_scenes(db, video_id)
+        db.commit()
+    except ImportError:
+        pass
+    except Exception as e:
+        db.rollback()
+        ws.log(f"Scene analysis deferred error: {e}", level="warning")
+    finally:
+        db.close()
+
+
+def _deferred_kodi_export(video_id: int, ws: ImportWorkspace) -> None:
+    """Export Kodi-format NFO/artwork for video and its entities."""
+    from app.database import SessionLocal
+    from app.models import VideoItem
+
+    db = SessionLocal()
+    try:
+        item = db.query(VideoItem).get(video_id)
+        if not item:
+            return
+
+        from app.metadata.exporters.kodi import (
+            export_video, export_artist, export_album,
+        )
+
+        try:
+            export_video(
+                db, video_id, item.artist or "", item.title or "",
+                album=item.album or "",
+                year=item.year,
+                genres=[g.name for g in item.genres] if item.genres else [],
+            )
+        except Exception as e:
+            ws.log(f"Kodi video export: {e}", level="warning")
+
+        if item.artist_entity:
+            try:
+                export_artist(db, item.artist_entity)
+            except Exception:
+                pass
+        if item.album_entity:
+            try:
+                export_album(db, item.album_entity)
+            except Exception:
+                pass
+    finally:
+        db.close()
+
+
+def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
+    """Download entity artwork via the full artwork pipeline + resolver assets."""
+    import os
+    from datetime import datetime, timezone
+    from app.database import SessionLocal
+    from app.models import VideoItem, MediaAsset
+
+    db = SessionLocal()
+    try:
+        item = db.query(VideoItem).get(video_id)
+        if not item:
+            return
+
+        # ── 1. Download resolver asset candidates from workspace ─────
+        entity_res = ws.read_artifact("entity_resolution") or {}
+        from app.metadata.assets import download_entity_assets
+        from app.metadata.providers.base import AssetCandidate
+
+        def _download_assets(entity_type, entity_id, resolved_data):
+            assets_raw = (resolved_data or {}).get("assets") or {}
+            if not assets_raw or not isinstance(assets_raw, dict):
+                return
+            candidates = {}
+            for kind, info in assets_raw.items():
+                url = info.get("url") if isinstance(info, dict) else str(info)
+                if url:
+                    candidates[kind] = AssetCandidate(
+                        url=url,
+                        kind=info.get("kind", kind) if isinstance(info, dict) else kind,
+                    )
+            if candidates:
+                download_entity_assets(entity_type, entity_id, candidates)
+                ws.log(f"Downloaded {len(candidates)} {entity_type} asset(s)")
+
+        if item.artist_entity:
+            resolved_artist = entity_res.get("artist", {}).get("resolved") or {}
+            try:
+                _download_assets("artist", item.artist_entity.id, resolved_artist)
+            except Exception as e:
+                ws.log(f"Artist asset download: {e}", level="warning")
+
+        if item.album_entity:
+            resolved_album = entity_res.get("album", {}).get("resolved") or {}
+            try:
+                _download_assets("album", item.album_entity.id, resolved_album)
+            except Exception as e:
+                ws.log(f"Album asset download: {e}", level="warning")
+
+        # ── 2. Full artwork pipeline (CAA, Wikipedia, MB scraper) ────
+        metadata = ws.read_artifact("scraper_results") or {}
+        from app.services.source_validation import parse_multi_artist
+        primary_artist, _ = parse_multi_artist(item.artist or "")
+        album_name = metadata.get("album") or item.album
+        mb_album_release_id = metadata.get("mb_album_release_id")
+        mb_album_release_group_id = metadata.get("mb_album_release_group_id")
+
+        art_result = {}
+        try:
+            from app.services.artwork_manager import process_artist_album_artwork
+            art_result = process_artist_album_artwork(
+                artist=primary_artist,
+                album=album_name,
+                mb_artist_id=item.mb_artist_id,
+                mb_release_id=item.mb_release_id,
+                mb_album_release_id=mb_album_release_id,
+                mb_album_release_group_id=mb_album_release_group_id,
+                log_callback=lambda msg: ws.log(msg),
+                overwrite=False,
+            )
+        except Exception as e:
+            ws.log(f"Entity artwork download: {e}", level="warning")
+
+        # ── 2b. Persist entity artwork to DB (with retry) ────────────
+        from app.services.artwork_service import validate_file
+        for _attempt in range(_MAX_DB_RETRIES + 1):
+            try:
+                # Update entity image fields in DB
+                if art_result.get("artist_image_url") and item.artist_entity:
+                    if not item.artist_entity.artist_image:
+                        item.artist_entity.artist_image = art_result["artist_image_url"]
+                if art_result.get("album_image_url") and item.album_entity:
+                    if not item.album_entity.cover_image:
+                        item.album_entity.cover_image = art_result["album_image_url"]
+
+                # Store entity artwork as MediaAsset records
+                for art_key, asset_type in [("artist_poster", "artist_thumb"), ("album_poster", "album_thumb")]:
+                    art_path = art_result.get(art_key)
+                    if not art_path or not os.path.isfile(art_path):
+                        continue
+                    vr = validate_file(art_path)
+                    db.query(MediaAsset).filter(
+                        MediaAsset.video_id == video_id,
+                        MediaAsset.asset_type == asset_type,
+                        MediaAsset.status == "pending",
+                    ).delete(synchronize_session="fetch")
+                    db.add(MediaAsset(
+                        video_id=video_id, asset_type=asset_type,
+                        file_path=art_path, provenance="artwork_pipeline",
+                        status="valid" if (vr and vr.valid) else "invalid",
+                        width=vr.width if vr and vr.valid else None,
+                        height=vr.height if vr and vr.valid else None,
+                        file_size_bytes=vr.file_size_bytes if vr and vr.valid else None,
+                        file_hash=vr.file_hash if vr and vr.valid else None,
+                        last_validated_at=datetime.now(timezone.utc),
+                    ))
+
+                db.commit()
+                ws.log("Entity artwork pipeline complete")
+                break
+            except Exception as e:
+                db.rollback()
+                if "database is locked" in str(e) and _attempt < _MAX_DB_RETRIES:
+                    delay = 2 ** _attempt
+                    ws.log(f"Entity artwork DB: lock, retry {_attempt + 1}/{_MAX_DB_RETRIES} in {delay}s",
+                           level="warning")
+                    time.sleep(delay)
+                else:
+                    ws.log(f"Entity artwork pipeline: {e}", level="warning")
+                    break
+
+        # ── 3. Poster upgrade from CoverArtArchive ───────────────────
+        # Only attempt CoverArtArchive poster upgrade if there is NO existing
+        # valid poster from the scraper pipeline.  The scraper poster (from
+        # Wikipedia infobox / AI) is often more representative of the actual
+        # music video than the CoverArtArchive release cover, which may be
+        # a different regional edition or compilation cover.
+        _existing_poster = db.query(MediaAsset).filter(
+            MediaAsset.video_id == video_id,
+            MediaAsset.asset_type == "poster",
+        ).first()
+        _skip_poster_upgrade = bool(
+            _existing_poster
+            and _existing_poster.file_path
+            and os.path.isfile(_existing_poster.file_path)
+        )
+        if _skip_poster_upgrade:
+            ws.log("Poster upgrade: existing poster from scraper — keeping it")
+
+        _has_parent_album = bool(mb_album_release_id or mb_album_release_group_id)
+        _video_poster_url = None
+        _video_poster_source = None
+
+        try:
+            if not _skip_poster_upgrade and _has_parent_album:
+                # Try single's own CoverArtArchive cover (not album cover)
+                if item.mb_release_id:
+                    _skip_single = (
+                        mb_album_release_id
+                        and item.mb_release_id == mb_album_release_id
+                    )
+                    if _skip_single:
+                        ws.log(f"Poster guard: mb_release_id matches album release — skipping single cover")
+                    else:
+                        from app.metadata.providers.coverartarchive import _fetch_front_cover
+                        _single_cover = _fetch_front_cover(item.mb_release_id)
+                        if _single_cover:
+                            _video_poster_url = _single_cover
+                            _video_poster_source = "single_cover"
+                            ws.log(f"Using single cover art for video poster")
+            elif not _skip_poster_upgrade and not _has_parent_album and art_result.get("album_image_url"):
+                # No parent album → pipeline cover IS the single cover
+                _video_poster_url = art_result["album_image_url"]
+                _video_poster_source = "single_cover"
+
+            if _video_poster_url and item.folder_path:
+                from app.services.metadata_resolver import download_image
+                from app.services.artwork_service import guarded_copy, validate_file
+
+                folder_name = os.path.basename(item.folder_path)
+                ts = int(datetime.now(timezone.utc).timestamp())
+                poster_dst = os.path.join(item.folder_path, f"{folder_name}-poster-pending-{ts}.jpg")
+                thumb_dst = os.path.join(item.folder_path, f"{folder_name}-thumb-pending-{ts}.jpg")
+
+                poster_ok = False
+                album_art_path = art_result.get("album_poster")
+                if not _has_parent_album and album_art_path and os.path.isfile(album_art_path):
+                    import shutil
+                    shutil.copy2(album_art_path, poster_dst)
+                    poster_ok = True
+                else:
+                    poster_ok = download_image(_video_poster_url, poster_dst)
+
+                if poster_ok:
+                    guarded_copy(poster_dst, thumb_dst)
+                    vr = validate_file(poster_dst) if os.path.isfile(poster_dst) else None
+                    for vp_type, vp_path in [("poster", poster_dst), ("thumb", thumb_dst)]:
+                        db.query(MediaAsset).filter(
+                            MediaAsset.video_id == video_id,
+                            MediaAsset.asset_type == vp_type,
+                            MediaAsset.status == "pending",
+                        ).delete(synchronize_session="fetch")
+                        db.add(MediaAsset(
+                            video_id=video_id, asset_type=vp_type,
+                            file_path=vp_path, source_url=_video_poster_url,
+                            provenance="artwork_pipeline",
+                            status="valid" if (vr and vr.valid) else "invalid",
+                            width=vr.width if vr and vr.valid else None,
+                            height=vr.height if vr and vr.valid else None,
+                            file_size_bytes=vr.file_size_bytes if vr and vr.valid else None,
+                            file_hash=vr.file_hash if vr and vr.valid else None,
+                            last_validated_at=datetime.now(timezone.utc),
+                        ))
+                    db.commit()
+                    ws.log(f"Video poster upgraded from {_video_poster_source}")
+        except Exception as e:
+            db.rollback()
+            ws.log(f"Poster upgrade: {e}", level="warning")
+    finally:
+        db.close()
+
+
+def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
+    """Run AI metadata enrichment."""
+    from app.database import SessionLocal
+
+    for _attempt in range(_MAX_DB_RETRIES + 1):
+        db = SessionLocal()
+        try:
+            try:
+                from app.ai.metadata_service import enrich_video_metadata
+                enrich_video_metadata(db, video_id, auto_apply=True)
+                db.commit()
+                return
+            except ImportError:
+                return
+            except Exception as e:
+                db.rollback()
+                if "database is locked" in str(e) and _attempt < _MAX_DB_RETRIES:
+                    delay = 2 ** _attempt
+                    ws.log(f"AI enrichment: DB lock, retry {_attempt + 1}/{_MAX_DB_RETRIES} in {delay}s",
+                           level="warning")
+                    time.sleep(delay)
+                else:
+                    ws.log(f"AI enrichment: {e}", level="warning")
+                    return
+        finally:
+            db.close()
+
+
+def _deferred_matching(video_id: int, ws: ImportWorkspace) -> None:
+    """Run matching resolution for the video."""
+    from app.database import SessionLocal
+
+    for _attempt in range(_MAX_DB_RETRIES + 1):
+        db = SessionLocal()
+        try:
+            from app.matching.resolver import resolve_video
+            resolve_video(db, video_id)
+            db.commit()
+            return
+        except ImportError:
+            return
+        except Exception as e:
+            db.rollback()
+            if "database is locked" in str(e) and _attempt < _MAX_DB_RETRIES:
+                delay = 2 ** _attempt
+                ws.log(f"Matching resolution: DB lock, retry {_attempt + 1}/{_MAX_DB_RETRIES} in {delay}s",
+                       level="warning")
+                time.sleep(delay)
+            else:
+                ws.log(f"Matching resolution: {e}", level="warning")
+                return
+        finally:
+            db.close()
+
+
+def _deferred_orphan_cleanup(video_id: int, ws: ImportWorkspace) -> None:
+    """Clean up orphaned entities after import."""
+    from app.database import SessionLocal
+    from app.models import VideoItem
+    from app.metadata.models import ArtistEntity, AlbumEntity
+
+    for _attempt in range(_MAX_DB_RETRIES + 1):
+        db = SessionLocal()
+        try:
+            # Remove album entities with zero linked videos
+            orphan_albums = (
+                db.query(AlbumEntity)
+                .filter(~db.query(VideoItem).filter(VideoItem.album_entity_id == AlbumEntity.id).exists())
+                .all()
+            )
+            for orphan in orphan_albums:
+                ws.log(f"Removing orphan AlbumEntity: {orphan.title}")
+                db.delete(orphan)
+
+            # Remove artist entities with zero linked videos
+            orphan_artists = (
+                db.query(ArtistEntity)
+                .filter(~db.query(VideoItem).filter(VideoItem.artist_entity_id == ArtistEntity.id).exists())
+                .all()
+            )
+            for orphan in orphan_artists:
+                ws.log(f"Removing orphan ArtistEntity: {orphan.canonical_name}")
+                db.delete(orphan)
+
+            db.commit()
+            return
+        except Exception as e:
+            db.rollback()
+            if "database is locked" in str(e) and _attempt < _MAX_DB_RETRIES:
+                delay = 2 ** _attempt
+                ws.log(f"Orphan cleanup: DB lock, retry {_attempt + 1}/{_MAX_DB_RETRIES} in {delay}s",
+                       level="warning")
+                time.sleep(delay)
+            else:
+                ws.log(f"Orphan cleanup error: {e}", level="warning")
+                return
+        finally:
+            db.close()
+
+
+# Dispatch table
+_DISPATCH = {
+    "preview": _deferred_preview,
+    "scene_analysis": _deferred_scene_analysis,
+    "kodi_export": _deferred_kodi_export,
+    "entity_artwork": _deferred_entity_artwork,
+    "ai_enrichment": _deferred_ai_enrichment,
+    "matching": _deferred_matching,
+    "orphan_cleanup": _deferred_orphan_cleanup,
+}
