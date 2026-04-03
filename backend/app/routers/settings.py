@@ -392,6 +392,69 @@ def get_normalization_history(video_id: int, db: Session = Depends(get_db)):
 @router.get("/browse-directories")
 def browse_directories():
     """Open a native OS folder picker dialog and return the selected path."""
+    if sys.platform == "win32":
+        selected = _win32_browse_folder()
+    else:
+        selected = _tkinter_browse_folder()
+
+    if not selected:
+        return {"path": ""}
+    return {"path": os.path.normpath(selected)}
+
+
+def _win32_browse_folder() -> str:
+    """Native Windows folder picker using COM (works in frozen exe)."""
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        # Use SHBrowseForFolder via ctypes — no Tkinter needed
+        BIF_RETURNONLYFSDIRS = 0x0001
+        BIF_NEWDIALOGSTYLE = 0x0040
+
+        class BROWSEINFO(ctypes.Structure):
+            _fields_ = [
+                ("hwndOwner", ctypes.wintypes.HWND),
+                ("pidlRoot", ctypes.c_void_p),
+                ("pszDisplayName", ctypes.c_wchar_p),
+                ("lpszTitle", ctypes.c_wchar_p),
+                ("ulFlags", ctypes.c_uint),
+                ("lpfn", ctypes.c_void_p),
+                ("lParam", ctypes.c_void_p),
+                ("iImage", ctypes.c_int),
+            ]
+
+        shell32 = ctypes.windll.shell32
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize(None)
+
+        buf = ctypes.create_unicode_buffer(260)
+        bi = BROWSEINFO()
+        bi.hwndOwner = 0
+        bi.pidlRoot = None
+        bi.pszDisplayName = ctypes.cast(buf, ctypes.c_wchar_p)
+        bi.lpszTitle = "Select Directory"
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
+        bi.lpfn = None
+        bi.lParam = None
+
+        pidl = shell32.SHBrowseForFolderW(ctypes.byref(bi))
+        if pidl:
+            path_buf = ctypes.create_unicode_buffer(260)
+            shell32.SHGetPathFromIDListW(pidl, path_buf)
+            ole32.CoTaskMemFree(pidl)
+            ole32.CoUninitialize()
+            return path_buf.value
+
+        ole32.CoUninitialize()
+        return ""
+    except Exception:
+        # Fall back to Tkinter if COM fails
+        return _tkinter_browse_folder()
+
+
+def _tkinter_browse_folder() -> str:
+    """Tkinter folder picker fallback (for non-Windows or dev mode)."""
     script = (
         "import tkinter as tk\n"
         "from tkinter import filedialog\n"
@@ -407,14 +470,9 @@ def browse_directories():
             [sys.executable, "-c", script],
             capture_output=True, text=True, timeout=120,
         )
-        selected = result.stdout.strip()
-        if not selected:
-            return {"path": ""}
-        return {"path": os.path.normpath(selected)}
-    except subprocess.TimeoutExpired:
-        return {"path": ""}
+        return result.stdout.strip()
     except Exception:
-        raise HTTPException(status_code=500, detail="Failed to open folder picker")
+        return ""
 
 
 # ---------------------------------------------------------------------------

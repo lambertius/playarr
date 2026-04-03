@@ -92,3 +92,24 @@ begin
   Exec('taskkill', '/F /IM Playarr.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := True;
 end;
+
+// Check for ffmpeg after install and warn if missing
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+  Found: Boolean;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    Found := Exec('cmd.exe', '/C ffmpeg -version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if (not Found) or (ResultCode <> 0) then
+    begin
+      MsgBox('Playarr requires ffmpeg to process videos.' + #13#10 + #13#10 +
+             'ffmpeg was not detected on your system PATH.' + #13#10 + #13#10 +
+             'Please install ffmpeg and add it to your system PATH:' + #13#10 +
+             'https://ffmpeg.org/download.html' + #13#10 + #13#10 +
+             'Playarr will not be able to process videos until ffmpeg is installed.',
+             mbInformation, MB_OK);
+    end;
+  end;
+end;
