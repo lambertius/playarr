@@ -33,6 +33,14 @@ import time
 # ---------------------------------------------------------------------------
 _IS_FROZEN = getattr(sys, "frozen", False)
 
+# Windowed mode (console=False) sets stdout/stderr to None — redirect to
+# devnull so logging / uvicorn don't crash on .isatty() / .write() calls.
+if _IS_FROZEN:
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+
 if _IS_FROZEN:
     # PyInstaller bundle — exe lives in dist/Playarr/, code in _internal/
     _SCRIPT_DIR = os.path.dirname(sys.executable)
