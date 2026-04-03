@@ -5,8 +5,11 @@ upload artwork.
 import logging
 import os
 import subprocess
+import sys
 import threading
 from typing import Optional
+
+_POPEN_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -480,6 +483,7 @@ def _stream_remuxed(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **_POPEN_FLAGS,
     )
     _register_stream(file_path, process)
 
@@ -537,6 +541,7 @@ def _stream_transcoded(file_path: str, audio_bitrate: str = "256k") -> Streaming
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **_POPEN_FLAGS,
     )
     _register_stream(file_path, process)
 

@@ -1392,8 +1392,11 @@ def _rescan_from_disk(job_id: int, video_id: int,
             _save_metadata_snapshot(db, video_item, "rescan_from_disk_complete")
 
             # Rewrite NFO with restored data
+            # Set xml_exported flag (the XML already existed before rescan)
+            _set_processing_flag(db, video_item, "xml_exported", method="rescan_from_disk")
+
             try:
-                from app.services.nfo_writer import write_nfo_file
+                from app.services.file_organizer import write_nfo_file
                 if folder_path:
                     write_nfo_file(
                         folder_path,
@@ -4317,11 +4320,14 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
 
     For each folder in the library that isn't already tracked by a VideoItem:
     1. Check for an NFO file and parse metadata from it.
-    2. Fall back to parsing the folder name (``Artist - Title [Resolution]``).
-    3. Create a VideoItem with ``import_method='scanned'``.
-    4. Analyse quality signature (resolution, codecs) via ffprobe.
+    2. Check for a .playarr.xml sidecar and apply all metadata from it.
+    3. Fall back to parsing the folder name (``Artist - Title [Resolution]``).
+    4. Create a VideoItem with ``import_method='scanned'``.
+    5. Analyse quality signature (resolution, codecs) via ffprobe.
     """
     from app.services.nfo_parser import find_nfo_for_video, parse_nfo_file
+    from app.services.playarr_xml import find_playarr_xml, parse_playarr_xml
+    from app.models import MediaAsset
 
     _update_job(job_id, status=JobStatus.analyzing, started_at=datetime.now(timezone.utc),
                 celery_task_id=getattr(getattr(self, 'request', None), 'id', None))
@@ -4341,6 +4347,12 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
             existing = db.query(VideoItem).filter(
                 VideoItem.folder_path == entry["folder_path"]
             ).first()
+
+            # Also check by file_path for extra safety
+            if not existing:
+                existing = db.query(VideoItem).filter(
+                    VideoItem.file_path == entry["file_path"]
+                ).first()
 
             if not existing and os.name == "nt":
                 # Fallback: check all tracked folder_paths via samefile
@@ -4381,6 +4393,21 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                             res_label = derive_resolution_label(nfo.video_height)
                         _append_job_log(job_id, f"NFO found for {entry['folder_name']}: {artist} - {title}")
 
+                # 1b. Check for .playarr.xml sidecar — overrides NFO
+                xml_sidecar_data = None
+                xml_path = find_playarr_xml(entry["folder_path"])
+                if xml_path:
+                    xml_sidecar_data = parse_playarr_xml(xml_path)
+                    if xml_sidecar_data:
+                        artist = xml_sidecar_data.get("artist") or artist
+                        title = xml_sidecar_data.get("title") or title
+                        album = xml_sidecar_data.get("album") or album
+                        year = xml_sidecar_data.get("year") or year
+                        plot = xml_sidecar_data.get("plot") or plot
+                        genres = xml_sidecar_data.get("genres") or genres
+                        res_label = xml_sidecar_data.get("resolution_label") or res_label
+                        _append_job_log(job_id, f"XML sidecar found for {entry['folder_name']}: {artist} - {title}")
+
                 # 2. Fall back to folder name
                 if not artist or not title:
                     fn_artist, fn_title, fn_res = parse_folder_name(entry["folder_name"])
@@ -4408,6 +4435,37 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                     review_category="scanned",
                     review_reason="Untracked file found in library (imported via scan)",
                 )
+
+                # If XML sidecar exists, apply additional metadata
+                if xml_sidecar_data:
+                    video_item.review_status = xml_sidecar_data.get("review_status") or "needs_human_review"
+                    video_item.review_category = xml_sidecar_data.get("review_category") or "scanned"
+                    video_item.review_reason = xml_sidecar_data.get("review_reason") or video_item.review_reason
+                    video_item.mb_artist_id = xml_sidecar_data.get("mb_artist_id")
+                    video_item.mb_recording_id = xml_sidecar_data.get("mb_recording_id")
+                    video_item.mb_release_id = xml_sidecar_data.get("mb_release_id")
+                    video_item.mb_release_group_id = xml_sidecar_data.get("mb_release_group_id")
+                    video_item.version_type = xml_sidecar_data.get("version_type", "normal")
+                    video_item.alternate_version_label = xml_sidecar_data.get("alternate_version_label")
+                    video_item.original_artist = xml_sidecar_data.get("original_artist")
+                    video_item.original_title = xml_sidecar_data.get("original_title")
+                    video_item.audio_fingerprint = xml_sidecar_data.get("audio_fingerprint")
+                    video_item.acoustid_id = xml_sidecar_data.get("acoustid_id")
+                    video_item.processing_state = xml_sidecar_data.get("processing_state")
+                    video_item.locked_fields = xml_sidecar_data.get("locked_fields")
+                    video_item.exclude_from_editor_scan = xml_sidecar_data.get("exclude_from_editor_scan", False)
+                    video_item.field_provenance = xml_sidecar_data.get("field_provenance")
+                    video_item.related_versions = xml_sidecar_data.get("related_versions")
+                    xml_import_method = xml_sidecar_data.get("import_method")
+                    if xml_import_method:
+                        video_item.import_method = xml_import_method
+                    # Ratings
+                    if xml_sidecar_data.get("song_rating_set"):
+                        video_item.song_rating = xml_sidecar_data.get("song_rating", 3)
+                        video_item.song_rating_set = True
+                    if xml_sidecar_data.get("video_rating_set"):
+                        video_item.video_rating = xml_sidecar_data.get("video_rating", 3)
+                        video_item.video_rating_set = True
                 db.add(video_item)
                 db.flush()
 
@@ -4429,6 +4487,53 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                 except Exception as e:
                     _append_job_log(job_id, f"Analysis failed for {entry['folder_name']}: {e}")
 
+                # Apply XML quality overrides (loudness etc.)
+                if xml_sidecar_data:
+                    xml_q = xml_sidecar_data.get("quality", {})
+                    if xml_q and video_item.quality_signature:
+                        qs_obj = video_item.quality_signature
+                        for qf in ("loudness_lufs", "fps", "video_codec", "video_bitrate",
+                                    "hdr", "audio_codec", "audio_bitrate",
+                                    "audio_sample_rate", "audio_channels",
+                                    "container", "duration_seconds"):
+                            qv = xml_q.get(qf)
+                            if qv is not None:
+                                setattr(qs_obj, qf, qv)
+
+                    # Restore sources
+                    xml_sources = xml_sidecar_data.get("sources", [])
+                    for src_data in xml_sources:
+                        _upsert_source(db, video_item.id, {
+                            "provider": src_data.get("provider", ""),
+                            "source_video_id": src_data.get("source_video_id", ""),
+                            "original_url": src_data.get("original_url", ""),
+                            "canonical_url": src_data.get("canonical_url", ""),
+                            "source_type": src_data.get("source_type", "video"),
+                            "provenance": src_data.get("provenance", "xml_import"),
+                            "channel_name": src_data.get("channel_name"),
+                            "platform_title": src_data.get("platform_title"),
+                            "upload_date": src_data.get("upload_date"),
+                        })
+
+                    # Restore artwork references
+                    xml_art = xml_sidecar_data.get("artwork", [])
+                    for art in xml_art:
+                        art_path = art.get("file_path")
+                        if art_path and os.path.isfile(art_path):
+                            db.add(MediaAsset(
+                                video_id=video_item.id,
+                                asset_type=art["asset_type"],
+                                file_path=art_path,
+                                source_url=art.get("source_url"),
+                                provenance=art.get("provenance", "xml_import"),
+                                source_provider=art.get("source_provider"),
+                                file_hash=art.get("file_hash"),
+                                status=art.get("status", "valid"),
+                                width=art.get("width"),
+                                height=art.get("height"),
+                                last_validated_at=datetime.now(timezone.utc),
+                            ))
+
                 # Commit each item individually to release the DB write lock
                 # between iterations â€” prevents blocking other operations.
                 db.commit()
@@ -4438,6 +4543,9 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                 _set_processing_flag(db, video_item, "file_organized", method="library_scan")
                 _set_processing_flag(db, video_item, "filename_checked", method="library_scan")
                 _set_processing_flag(db, video_item, "imported", method="library_scan")
+                if xml_sidecar_data:
+                    _set_processing_flag(db, video_item, "xml_exported", method="library_scan")
+                    _set_processing_flag(db, video_item, "nfo_exported", method="library_scan")
                 db.commit()
                 new_count += 1
                 _append_job_log(job_id, f"Imported: {artist} - {title}")
