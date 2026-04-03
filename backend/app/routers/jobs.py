@@ -339,7 +339,7 @@ def redownload_video(video_id: int, format_spec: Optional[str] = Query(None),
         job_type="redownload",
         status=JobStatus.queued,
         input_url=source.original_url,
-        display_name=f"Redownload: {item.artist} - {item.title}",
+        display_name=f"{item.artist} – {item.title} › Redownload",
         action_label="Redownload",
         input_params=input_params,
         video_id=video_id,
@@ -370,6 +370,7 @@ def rescan_metadata(video_id: int, db: Session = Depends(get_db)):
         status=JobStatus.queued,
         video_id=video_id,
         action_label="Rescan",
+        display_name=f"{item.artist} \u2013 {item.title} \u203a Rescan" if item.artist and item.title else None,
     )
     db.add(job)
     db.commit()
@@ -381,7 +382,13 @@ def rescan_metadata(video_id: int, db: Session = Depends(get_db)):
 
 @router.post("/rescan-batch", response_model=BatchActionResponse)
 def rescan_batch(req: BatchRescanRequest, db: Session = Depends(get_db)):
-    """Force rescan metadata for multiple videos or entire library."""
+    """Force rescan metadata for multiple videos or entire library.
+
+    Re-runs the metadata pipeline on each video.  Locked fields are
+    respected — any field listed in a video's ``locked_fields`` will
+    not be overwritten.  Videos with ``_all`` locked will have all
+    text fields, entity links, and source links preserved.
+    """
 
     # Block AI modes when no AI provider is configured
     if req.ai_auto or req.ai_only:
@@ -392,10 +399,7 @@ def rescan_batch(req: BatchRescanRequest, db: Session = Depends(get_db)):
     else:
         videos = db.query(VideoItem).all()
 
-    # Exclude videos with locked metadata
-    unlocked = [v for v in videos if "_all" not in (v.locked_fields or [])]
-    locked_count = len(videos) - len(unlocked)
-    ids = [v.id for v in unlocked]
+    ids = [v.id for v in videos]
 
     # Create a parent job for tracking
     _batch_label = _rescan_action_label(
@@ -407,8 +411,9 @@ def rescan_batch(req: BatchRescanRequest, db: Session = Depends(get_db)):
     job = ProcessingJob(
         job_type="batch_rescan",
         status=JobStatus.queued,
+        display_name=f"Batch Rescan ({len(ids)} videos)",
         action_label=f"Batch {_batch_label}",
-        input_params={"video_ids": ids, "count": len(ids), "locked_skipped": locked_count},
+        input_params={"video_ids": ids, "count": len(ids)},
     )
     db.add(job)
     db.commit()
@@ -428,8 +433,15 @@ def rescan_batch(req: BatchRescanRequest, db: Session = Depends(get_db)):
             "find_source_video": req.find_source_video,
         }.items() if v is not None
     }
+    # Pre-fetch display names for all videos in the batch
+    _vid_names = {v.id: f"{v.artist} \u2013 {v.title}" for v in videos if v.artist and v.title}
     for vid in ids:
-        sub_job = ProcessingJob(job_type="rescan", status=JobStatus.queued, video_id=vid, action_label=_batch_label)
+        _vn = _vid_names.get(vid)
+        sub_job = ProcessingJob(
+            job_type="rescan", status=JobStatus.queued, video_id=vid,
+            action_label=_batch_label,
+            display_name=f"{_vn} \u203a {_batch_label}" if _vn else None,
+        )
         db.add(sub_job)
         db.flush()
         sub_job_ids.append(sub_job.id)
@@ -443,10 +455,7 @@ def rescan_batch(req: BatchRescanRequest, db: Session = Depends(get_db)):
     db.commit()
 
     dispatch_task(complete_batch_job_task, parent_job_id=job.id, sub_job_ids=sub_job_ids)
-    msg = f"Queued rescan for {len(ids)} items"
-    if locked_count:
-        msg += f" ({locked_count} locked video(s) excluded)"
-    return BatchActionResponse(job_id=job.id, message=msg, locked_skipped=locked_count)
+    return BatchActionResponse(job_id=job.id, message=f"Queued rescan for {len(ids)} items")
 
 
 @router.post("/normalize", response_model=BatchActionResponse)
@@ -460,15 +469,21 @@ def normalize_videos(req: NormalizeRequest, db: Session = Depends(get_db)):
     job = ProcessingJob(
         job_type="batch_normalize",
         status=JobStatus.queued,
+        display_name=f"Batch Normalize ({len(ids)} videos)",
         action_label="Batch Normalize",
         input_params={"video_ids": ids, "target_lufs": req.target_lufs, "count": len(ids)},
     )
     db.add(job)
     db.commit()
 
+    # Pre-fetch display names for normalize children
+    _norm_vids = db.query(VideoItem).filter(VideoItem.id.in_(ids)).all()
+    _norm_names = {v.id: f"{v.artist} \u2013 {v.title}" for v in _norm_vids if v.artist and v.title}
     sub_job_ids = []
     for vid in ids:
-        sub_job = ProcessingJob(job_type="normalize", status=JobStatus.queued, video_id=vid, action_label="Normalize")
+        _nn = _norm_names.get(vid)
+        sub_job = ProcessingJob(job_type="normalize", status=JobStatus.queued, video_id=vid, action_label="Normalize",
+                                display_name=f"{_nn} \u203a Normalize" if _nn else None)
         db.add(sub_job)
         db.flush()
         sub_job_ids.append(sub_job.id)
@@ -491,6 +506,7 @@ def scan_library(req: LibraryScanRequest = LibraryScanRequest(), db: Session = D
     job = ProcessingJob(
         job_type="library_scan",
         status=JobStatus.queued,
+        display_name="Library Scan",
         action_label="Library Scan",
         input_params={"import_new": req.import_new},
     )
@@ -517,10 +533,12 @@ def export_library(req: LibraryExportRequest = LibraryExportRequest(), db: Sessi
         "overwrite_new": "Overwrite New",
         "overwrite_all": "Overwrite All",
     }
+    _export_label = f"Library Export ({MODE_LABELS[req.mode]})"
     job = ProcessingJob(
         job_type="library_export",
         status=JobStatus.queued,
-        action_label=f"Library Export ({MODE_LABELS[req.mode]})",
+        display_name=_export_label,
+        action_label=_export_label,
         input_params={"mode": req.mode},
     )
     db.add(job)

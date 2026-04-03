@@ -305,6 +305,7 @@ def batch_resolve(body: BatchResolveRequest, db: Session = Depends(_get_db)):
     # For larger batches, dispatch a background job
     from app.worker import celery_app as _app
     job = ProcessingJob(
+        job_type="batch_resolve",
         status=JobStatus.queued,
         display_name=f"Batch resolve ({len(video_ids)} videos)",
         action_label="Batch Resolve",
@@ -739,17 +740,22 @@ def batch_scrape_from_review(
     job = ProcessingJob(
         job_type="batch_rescan",
         status=JobStatus.queued,
+        display_name=f"Batch Scrape ({len(ids)} videos)",
         action_label="Batch Scrape (Review)",
         input_params={"video_ids": ids, "count": len(ids)},
     )
     db.add(job)
     db.commit()
 
+    # Pre-fetch display names for scrape children
+    _scrape_names = {v.id: f"{v.artist} \u2013 {v.title}" for v in items if v.artist and v.title}
     sub_job_ids = []
     for vid in ids:
+        _sn = _scrape_names.get(vid)
         sub_job = ProcessingJob(
             job_type="rescan", status=JobStatus.queued,
             video_id=vid, action_label="Scrape Metadata",
+            display_name=f"{_sn} \u203a Scrape Metadata" if _sn else None,
         )
         db.add(sub_job)
         db.flush()

@@ -8,10 +8,15 @@ from alembic import context
 # Import models so Alembic sees them
 from app.database import Base
 from app.models import *  # noqa
+from app.runtime_dirs import get_runtime_dirs
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Override the sqlalchemy URL with the runtime-resolved DB path
+# so migrations work in both dev and production modes.
+config.set_main_option("sqlalchemy.url", get_runtime_dirs().database_url)
 
 target_metadata = Base.metadata
 

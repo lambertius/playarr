@@ -171,8 +171,8 @@ export function QueuePage() {
   });
 
   // Separate active and history jobs
-  const { activeJobs, historyJobs } = useMemo(() => {
-    if (!jobs) return { activeJobs: [], historyJobs: [] };
+  const { activeJobs, allActiveCount, historyJobs } = useMemo(() => {
+    if (!jobs) return { activeJobs: [], allActiveCount: 0, historyJobs: [] };
 
     const sourceFiltered = sourceFilter === "all"
       ? jobs
@@ -193,6 +193,7 @@ export function QueuePage() {
     }
 
     let active = pool.filter((j) => isActiveJob(j.status) || isFinalizing(j));
+    const allActiveCount = active.length;
     // Apply status filter for active-tab sub-filtering (e.g. "downloading" only)
     if (statusFilter === "downloading") {
       active = active.filter((j) => j.status === "downloading");
@@ -204,7 +205,7 @@ export function QueuePage() {
       return aQueued - bQueued;
     });
     const history = pool.filter((j) => !isActiveJob(j.status) && !isFinalizing(j));
-    return { activeJobs: active, historyJobs: history };
+    return { activeJobs: active, allActiveCount, historyJobs: history };
   }, [jobs, sourceFilter, searchQuery, statusFilter]);
 
   // Filtered history (by status)
@@ -364,7 +365,7 @@ export function QueuePage() {
   }, [confirm, clearHistoryMutation, historyFilter, sourceFilter, toast, refetch]);
 
   // Auto-switch to active tab when jobs start processing
-  const hasActiveJobs = activeJobs.length > 0;
+  const hasActiveJobs = allActiveCount > 0;
 
   // ─── Bulk selection ─────────────────────────────────────
   const toggleSelect = useCallback((id: number) => {
@@ -528,7 +529,7 @@ export function QueuePage() {
 
       {/* Stats overview */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5 mb-5">
-        <StatCard icon={<Activity size={16} />} label="Active" value={activeJobs.length} active={activeJobs.length > 0} selected={statusFilter === "active"} color="bg-blue-500/10 text-blue-400"
+        <StatCard icon={<Activity size={16} />} label="Active" value={allActiveCount} active={allActiveCount > 0} selected={statusFilter === "active"} color="bg-blue-500/10 text-blue-400"
           onClick={() => { if (statusFilter === "active") { setStatusFilter(null); } else { setActiveTab("active"); setHistoryFilter("all"); setStatusFilter("active"); } }} />
         <StatCard icon={<Download size={16} />} label="Downloading" value={statusCounts.downloading} active={statusCounts.downloading > 0} selected={statusFilter === "downloading"} color="bg-sky-500/10 text-sky-400"
           onClick={() => { if (statusFilter === "downloading") { setStatusFilter(null); } else { setActiveTab("active"); setHistoryFilter("all"); setStatusFilter("downloading"); } }} />
@@ -575,7 +576,7 @@ export function QueuePage() {
             Active
             {hasActiveJobs && (
               <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold bg-accent/20 text-accent tabular-nums">
-                {activeJobs.length}
+                {allActiveCount}
               </span>
             )}
           </span>

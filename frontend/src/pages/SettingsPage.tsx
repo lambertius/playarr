@@ -197,6 +197,37 @@ const SETTING_META: Record<string, SettingMeta> = {
       "The TCP port the Playarr web server binds to. Default is 6969.\n\n" +
       "After changing, click 'Restart' under Server Management, then access the UI at the new port.",
   },
+  "startup_with_system": {
+    group: "server",
+    label: "Start with Windows",
+    description: "Automatically launch Playarr when you log in to Windows.",
+    tooltip:
+      "Adds Playarr to the Windows startup registry so it launches automatically on login.\n\n" +
+      "Uses pythonw.exe (no console window) when available.",
+  },
+  "startup_delay_seconds": {
+    group: "server",
+    label: "Startup Delay (seconds)",
+    description: "Wait this many seconds before launching the server on system start.",
+    tooltip:
+      "Useful to let other services (e.g. network, Redis) initialise first.\n\n" +
+      "0 — Start immediately.\n" +
+      "15–30 — Good for slower machines.\n" +
+      "60+ — Wait for heavy startup loads to settle.",
+  },
+  "auto_open_browser": {
+    group: "server",
+    label: "Open Browser on Launch",
+    description: "Automatically open the Playarr UI in your default browser when the server starts.",
+  },
+  "minimize_to_tray": {
+    group: "server",
+    label: "System Tray Icon",
+    description: "Show a Playarr icon in the system tray for quick access.",
+    tooltip:
+      "When enabled, a tray icon appears with Open and Quit actions.\n\n" +
+      "Requires pystray + Pillow (included by default). Takes effect on next server start.",
+  },
   "import_scrape_wikipedia": {
     group: "import",
     label: "Scrape Wikipedia",
@@ -602,6 +633,25 @@ export function SettingsPage() {
       );
     }
 
+    // Server — only render server.port; startup settings are handled by
+    // the dedicated StartupControls component via the "system" extras.
+    if (group === "server") {
+      const portOnly = (groups[group] || []).filter(s => s.key === "server.port");
+      if (portOnly.length === 0) return null;
+      return (
+        <section key={group}>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
+            {GROUP_LABELS[group] || group}
+          </h2>
+          <div className="card space-y-5">
+            <div className="space-y-4 pl-2 border-l-2 border-border">
+              {settingRows(portOnly)}
+            </div>
+          </div>
+        </section>
+      );
+    }
+
     // TMVDB — coming soon, greyed out
     if (group === "tmvdb") {
       return (
@@ -720,6 +770,24 @@ export function SettingsPage() {
         {currentTabDef.extras?.includes("system") && (
           <section>
             <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
+              Startup & Behaviour
+            </h2>
+            <div className="card space-y-5">
+              <StartupControls settings={settingsByKey} onSave={(key, value, valueType) => {
+                updateMutation.mutate(
+                  { key, value, value_type: valueType },
+                  {
+                    onSuccess: () => toast({ type: "success", title: `${SETTING_META[key]?.label || key} saved` }),
+                    onError: () => toast({ type: "error", title: `Failed to save ${SETTING_META[key]?.label || key}` }),
+                  }
+                );
+              }} />
+            </div>
+          </section>
+        )}
+        {currentTabDef.extras?.includes("system") && (
+          <section>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
               Server Management
             </h2>
             <div className="card space-y-5">
@@ -727,6 +795,163 @@ export function SettingsPage() {
             </div>
           </section>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Startup & Behaviour Controls ── */
+
+function StartupControls({
+  settings,
+  onSave,
+}: {
+  settings: Record<string, AppSetting>;
+  onSave: (key: string, value: string, valueType: string) => void;
+}) {
+  const { toast } = useToast();
+  const startupEnabled = settings["startup_with_system"]?.value === "true";
+  const delaySec = settings["startup_delay_seconds"]?.value ?? "0";
+  const autoOpen = settings["auto_open_browser"]?.value === "true";
+  const trayIcon = settings["minimize_to_tray"]?.value === "true";
+  const [delayInput, setDelayInput] = useState(delaySec);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => { setDelayInput(delaySec); }, [delaySec]);
+
+  /** After toggling startup or changing delay, sync the Windows registry. */
+  const syncStartup = async () => {
+    setSyncing(true);
+    try {
+      await settingsApi.configureStartup();
+    } catch {
+      toast({ type: "error", title: "Failed to configure Windows startup" });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const toggleStartup = () => {
+    const next = startupEnabled ? "false" : "true";
+    onSave("startup_with_system", next, "bool");
+    // Sync registry after a short delay so the DB write lands first
+    setTimeout(syncStartup, 600);
+  };
+
+  const saveDelay = () => {
+    const clamped = Math.max(0, Math.min(300, parseInt(delayInput) || 0));
+    setDelayInput(String(clamped));
+    onSave("startup_delay_seconds", String(clamped), "int");
+    if (startupEnabled) setTimeout(syncStartup, 600);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Start with Windows */}
+      <div className="flex items-center justify-between">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm font-medium text-text-primary">Start with Windows</p>
+            <Tooltip content="Adds Playarr to the Windows startup registry so it launches automatically on login. Uses pythonw.exe (no console window) when available.">
+              <Info size={13} className="text-text-muted cursor-help" />
+            </Tooltip>
+          </div>
+          <p className="text-xs text-text-muted mt-0.5">
+            Automatically launch Playarr when you log in to Windows
+          </p>
+        </div>
+        <button
+          onClick={toggleStartup}
+          disabled={syncing}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+            startupEnabled ? "bg-accent" : "bg-surface-3"
+          }`}
+        >
+          <span
+            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+              startupEnabled ? "translate-x-[18px]" : "translate-x-[3px]"
+            }`}
+          />
+        </button>
+      </div>
+
+      {/* Delayed Start */}
+      {startupEnabled && (
+        <div className="flex items-center justify-between pl-4 border-l-2 border-border">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <p className="text-sm font-medium text-text-primary">Startup Delay</p>
+              <Tooltip content="Useful to let other services (e.g. network, Redis) initialise first. Set to 0 for no delay.">
+                <Info size={13} className="text-text-muted cursor-help" />
+              </Tooltip>
+            </div>
+            <p className="text-xs text-text-muted mt-0.5">
+              Seconds to wait before launching the server on system start
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={300}
+              value={delayInput}
+              onChange={(e) => setDelayInput(e.target.value)}
+              onBlur={saveDelay}
+              onKeyDown={(e) => e.key === "Enter" && saveDelay()}
+              className="input-field w-20 text-center text-sm"
+            />
+            <span className="text-xs text-text-muted">sec</span>
+          </div>
+        </div>
+      )}
+
+      {/* Open Browser on Launch */}
+      <div className="flex items-center justify-between">
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-text-primary">Open Browser on Launch</p>
+          <p className="text-xs text-text-muted mt-0.5">
+            Automatically open the Playarr UI when the server starts
+          </p>
+        </div>
+        <button
+          onClick={() => onSave("auto_open_browser", autoOpen ? "false" : "true", "bool")}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+            autoOpen ? "bg-accent" : "bg-surface-3"
+          }`}
+        >
+          <span
+            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+              autoOpen ? "translate-x-[18px]" : "translate-x-[3px]"
+            }`}
+          />
+        </button>
+      </div>
+
+      {/* System Tray Icon */}
+      <div className="flex items-center justify-between">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm font-medium text-text-primary">System Tray Icon</p>
+            <Tooltip content="Show a Playarr icon in the system tray with Open and Quit actions. Takes effect on next server start.">
+              <Info size={13} className="text-text-muted cursor-help" />
+            </Tooltip>
+          </div>
+          <p className="text-xs text-text-muted mt-0.5">
+            Show a tray icon for quick access (requires restart)
+          </p>
+        </div>
+        <button
+          onClick={() => onSave("minimize_to_tray", trayIcon ? "false" : "true", "bool")}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+            trayIcon ? "bg-accent" : "bg-surface-3"
+          }`}
+        >
+          <span
+            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+              trayIcon ? "translate-x-[18px]" : "translate-x-[3px]"
+            }`}
+          />
+        </button>
       </div>
     </div>
   );

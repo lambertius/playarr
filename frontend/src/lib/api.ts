@@ -260,6 +260,12 @@ export const settingsApi = {
 
   restart: () =>
     api.post<{ status: string }>("/settings/restart").then(r => r.data),
+
+  getStartupStatus: () =>
+    api.get<{ registered: boolean; command: string | null }>("/settings/startup").then(r => r.data),
+
+  configureStartup: () =>
+    api.post<{ status: string; startup_enabled: boolean; delay: number }>("/settings/startup").then(r => r.data),
 };
 
 // ─── Stats ────────────────────────────────────────────────

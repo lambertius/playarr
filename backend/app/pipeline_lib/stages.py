@@ -291,6 +291,11 @@ def _library_stage_b(ws: ImportWorkspace, job_id: int, params: dict) -> None:
                 "video_rating": xml_data.get("video_rating"),
             })
 
+        # Locked fields from XML — persisted so future operations respect them
+        xml_locked = xml_data.get("locked_fields")
+        if xml_locked:
+            ws.write_artifact("xml_locked_fields", xml_locked)
+
         # Mark metadata stages as complete (they were done before, in the XML)
         ws.update_stage("resolve_metadata", "complete")
         ws.update_stage("fetch_artwork", "complete")

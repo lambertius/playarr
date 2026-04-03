@@ -96,7 +96,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
           <RefreshCw size={18} /> Rescan Selected
         </h2>
         <p className="text-sm text-text-muted mb-4">
-          {count} video{count !== 1 ? "s" : ""} selected — configure pipeline options below.
+          {count} video{count !== 1 ? "s" : ""} selected — metadata will be re-scraped. Locked fields are preserved.
         </p>
 
         <div className="space-y-4">

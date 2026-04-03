@@ -22,9 +22,9 @@ router = APIRouter(prefix="/api/settings", tags=["Settings"])
 
 # Default settings with their types
 DEFAULT_SETTINGS = {
-    "library_dir": ("D:\\MusicVideos\\Library", "string"),
+    "library_dir": ("./data/library", "string"),
     "library_source_dirs": ("[]", "json"),
-    "archive_dir": ("D:\\MusicVideos\\Archive", "string"),
+    "archive_dir": ("./data/archive", "string"),
     "normalization_target_lufs": ("-14.0", "float"),
     "normalization_lra": ("7.0", "float"),
     "normalization_tp": ("-1.5", "float"),
@@ -52,6 +52,11 @@ DEFAULT_SETTINGS = {
     "tmvdb_auto_pull": ("false", "bool"),
     "tmvdb_auto_push": ("false", "bool"),
     "import_scrape_tmvdb": ("false", "bool"),
+    # Startup / system
+    "startup_with_system": ("false", "bool"),
+    "startup_delay_seconds": ("0", "int"),
+    "auto_open_browser": ("true", "bool"),
+    "minimize_to_tray": ("true", "bool"),
 }
 
 
@@ -478,6 +483,82 @@ def restart_server():
     return {"status": "restarting"}
 
     return NamingPreviewResponse(examples=examples)
+
+
+# ---------------------------------------------------------------------------
+# Windows Startup Management
+# ---------------------------------------------------------------------------
+
+def _get_setting_value(db: Session, key: str) -> str | None:
+    """Read a single setting value from the DB, falling back to defaults."""
+    row = db.query(AppSetting).filter(AppSetting.key == key, AppSetting.user_id.is_(None)).first()
+    if row:
+        return row.value
+    default = DEFAULT_SETTINGS.get(key)
+    return default[0] if default else None
+
+
+@router.get("/startup")
+def get_startup_status():
+    """Check if Playarr is registered in the Windows startup registry."""
+    if sys.platform != "win32":
+        return {"registered": False, "command": None, "platform": sys.platform}
+    import winreg
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_READ,
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "Playarr")
+            return {"registered": True, "command": value}
+    except OSError:
+        return {"registered": False, "command": None}
+
+
+@router.post("/startup")
+def configure_startup(db: Session = Depends(get_db)):
+    """Add or remove Playarr from Windows startup based on current settings."""
+    if sys.platform != "win32":
+        raise HTTPException(status_code=400, detail="Startup management is only supported on Windows")
+
+    import winreg
+    enabled = _get_setting_value(db, "startup_with_system") == "true"
+    delay = int(_get_setting_value(db, "startup_delay_seconds") or "0")
+
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    if enabled:
+        # Use pythonw.exe (no console window) if available, else python.exe
+        python_exe = sys.executable
+        pythonw = python_exe.replace("python.exe", "pythonw.exe")
+        if os.path.exists(pythonw):
+            python_exe = pythonw
+
+        script = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "_start_server.py")
+        )
+        cmd = f'"{python_exe}" "{script}"'
+        if delay > 0:
+            cmd += f" --delay {delay}"
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE,
+        ) as key:
+            winreg.SetValueEx(key, "Playarr", 0, winreg.REG_SZ, cmd)
+
+        logger.info(f"Registered Playarr in Windows startup (delay={delay}s)")
+    else:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE,
+            ) as key:
+                winreg.DeleteValue(key, "Playarr")
+            logger.info("Removed Playarr from Windows startup")
+        except OSError:
+            pass  # Already absent
+
+    return {"status": "ok", "startup_enabled": enabled, "delay": delay}
 
 
 # ---------------------------------------------------------------------------

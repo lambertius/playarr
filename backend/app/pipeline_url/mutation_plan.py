@@ -147,6 +147,13 @@ def build_plan_from_workspace(ws) -> dict:
         plan["review_status"] = "needs_human_review"
         plan["review_reason"] = "Audio normalization failed (possible codec incompatibility)"
 
+    # ── AI failure → review ──────────────────────────────────────────
+    _ai_failures = ws.read_artifact("ai_failures") or []
+    if _ai_failures and plan["review_status"] == "none":
+        plan["review_status"] = "needs_human_review"
+        _codes = ", ".join(f.get("code", "unknown") for f in _ai_failures)
+        plan["review_reason"] = f"AI enhancement failed ({_codes})"
+
     # ── Genres ────────────────────────────────────────────────────────
     plan["genres"] = metadata.get("genres") or identity.get("genres") or []
 

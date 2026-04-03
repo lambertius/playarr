@@ -1511,9 +1511,21 @@ def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
                         ws.log(f"File re-organize: {e}", level="warning")
 
                 # Update job display name to reflect AI-corrected identity
+                # Read action_label to preserve job type suffix
+                from app.database import CosmeticSessionLocal as _DLabelSL
+                from app.models import ProcessingJob as _DLabelPJ
+                _dl_db = _DLabelSL()
+                try:
+                    _dl_job = _dl_db.query(_DLabelPJ).get(ws.job_id)
+                    _dl_label = _dl_job.action_label if _dl_job else None
+                finally:
+                    _dl_db.close()
+                _deferred_display = f"{_new_artist} \u2013 {_new_title}"
+                if _dl_label:
+                    _deferred_display = f"{_deferred_display} \u203a {_dl_label}"
                 _update_child_step(
                     ws.job_id,
-                    display_name=f"{_new_artist} \u2013 {_new_title}",
+                    display_name=_deferred_display,
                 )
 
             db.commit()
@@ -1522,6 +1534,21 @@ def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
         except Exception as e:
             db.rollback()
             ws.log(f"AI enrichment: {e}", level="warning")
+            # Flag the video for human review so it's easy to find
+            try:
+                from app.models import VideoItem
+                from sqlalchemy.orm.attributes import flag_modified
+                db2 = SessionLocal()
+                try:
+                    item = db2.query(VideoItem).get(video_id)
+                    if item and (item.review_status or "none") == "none":
+                        item.review_status = "needs_human_review"
+                        item.review_reason = f"AI enrichment failed: {e}"
+                        db2.commit()
+                finally:
+                    db2.close()
+            except Exception:
+                pass
         finally:
             db.close()
 

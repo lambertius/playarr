@@ -1,6 +1,10 @@
 """
 Playarr Configuration - Settings management via pydantic-settings.
 All settings can be overridden via environment variables or .env file.
+
+In production / installed mode, directories default to platform-appropriate
+AppData locations (see runtime_dirs.py).  In development mode (PLAYARR_DEV=1
+or detected git repo), dirs remain repo-relative for backward-compat.
 """
 import os
 import shutil
@@ -11,29 +15,37 @@ from typing import Optional, Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.runtime_dirs import get_runtime_dirs, IS_DEV
+
+# Resolve env file path from runtime dirs (may be repo .env or AppData config)
+_rdirs = get_runtime_dirs()
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment / .env file."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_rdirs.env_file) if _rdirs.env_file.is_file() else ".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
 
+    # --- Mode ---
+    playarr_dev: bool = IS_DEV
+
     # --- Directories ---
-    library_dir: str = r"D:\MusicVideos\Library"
-    library_source_dirs: str = ""  # JSON list of additional source dirs, e.g. '["V:\\Videos"]'
-    archive_dir: str = r"D:\MusicVideos\Archive"
+    library_dir: str = str(_rdirs.library_dir)
+    library_source_dirs: str = ""  # JSON list of additional source dirs, e.g. '["/mnt/videos"]'
+    archive_dir: str = str(_rdirs.archive_dir)
 
     # --- Library Naming Convention ---
     library_naming_pattern: str = "{artist} - {title} [{quality}]"
     library_folder_structure: str = "{artist}/{file_folder}"
-    preview_cache_dir: str = r"D:\MusicVideos\Previews"
-    asset_cache_dir: str = r"D:\MusicVideos\PlayarrCache\assets"
+    preview_cache_dir: str = str(_rdirs.preview_dir)
+    asset_cache_dir: str = str(_rdirs.asset_cache_dir)
     artist_root: str = ""   # blank = <library_dir>/_artists
     album_root: str = ""    # blank = <library_dir>/_albums
-    log_dir: str = "./logs"
+    log_dir: str = str(_rdirs.log_dir)
 
     # --- Tool Paths ---
     ffmpeg_path: str = "auto"
@@ -46,7 +58,7 @@ class Settings(BaseSettings):
     normalization_tp: float = -1.5
 
     # --- Database ---
-    database_url: str = "sqlite:///./playarr.db"
+    database_url: str = _rdirs.database_url
 
     # --- Redis ---
     redis_url: str = "redis://localhost:6379/0"
@@ -131,8 +143,21 @@ class Settings(BaseSettings):
 
     def ensure_directories(self):
         """Create required directories if they don't exist."""
-        for d in [self.library_dir, self.archive_dir, self.preview_cache_dir, self.log_dir]:
+        for d in [self.library_dir, self.archive_dir, self.preview_cache_dir,
+                  self.asset_cache_dir, self.log_dir]:
             os.makedirs(d, exist_ok=True)
+        # Runtime dirs (workspace, cache) managed by runtime_dirs module
+        _rdirs.ensure_all()
+
+    @property
+    def workspace_dir(self) -> str:
+        """Directory for temporary import workspaces."""
+        return str(_rdirs.workspace_dir)
+
+    @property
+    def data_dir(self) -> str:
+        """Root data directory."""
+        return str(_rdirs.data_dir)
 
 
 @lru_cache()

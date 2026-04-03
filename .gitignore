@@ -1,24 +1,73 @@
+# ── Python ──
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+*.eggs/
+pip-log.txt
+*.pyd
+*.so
+
+# ── Virtual Environments ──
+venv/
+.venv/
+env/
+
+# ── Environment / Secrets ──
 .env
+*.env.local
+.env.production
+.env.*.local
+
+# ── Database ──
 *.db
 *.db-shm
 *.db-wal
 *.db.bak*
 *.sqlite3
+*.sqlite
+
+# ── Node ──
 node_modules/
 dist/
+build/
 .vite/
+.eslintcache
+
+# ── App Data (runtime / user-generated) ──
 data/
 logs/
 reports/
-dev/
-frontend-old/
-*.egg-info/
-.mypy_cache/
-.pytest_cache/
+cache/
+previews/
+workspace/
+workspaces/
+downloads/
+thumbnails/
+exports/
+.tools/
+
+# ── OS ──
 .DS_Store
 Thumbs.db
-venv/
-.tools/
+Desktop.ini
+*.swp
+*~
+ehthumbs.db
+
+# ── IDE ──
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+
+# ── Docker (runtime) ──
+docker-compose.override.yml
+
+# ── Legacy / Development Artifacts ──
+dev/
+frontend-old/
+*.bak

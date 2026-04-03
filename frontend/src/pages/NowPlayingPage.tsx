@@ -397,17 +397,6 @@ export function NowPlayingPage() {
     };
   }, [track?.videoId, overlayDuration]);
 
-  // Sync browser fullscreenchange with store (e.g. user presses Escape in browser fullscreen)
-  useEffect(() => {
-    const onFsChange = () => {
-      if (!document.fullscreenElement) {
-        exitFullscreen();
-      }
-    };
-    document.addEventListener("fullscreenchange", onFsChange);
-    return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, [exitFullscreen]);
-
   // Sync play/pause with store
   useEffect(() => {
     const el = videoRef.current;

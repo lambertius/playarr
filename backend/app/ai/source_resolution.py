@@ -472,11 +472,46 @@ def _is_reasoning_model(model_name: str) -> bool:
     return any(model_name.startswith(p) for p in _REASONING_MODEL_PREFIXES)
 
 
+_RAW_MAX_RETRIES = 5  # retries on 429 rate-limit errors
+
+
+def _retry_on_rate_limit(resp, attempt: int, max_retries: int = _RAW_MAX_RETRIES) -> bool:
+    """Handle 429 rate-limit: sleep with backoff and return True to retry, False to give up."""
+    if resp.status_code != 429:
+        return False
+    import random, time as _time
+    # Check for hard quota errors (no point retrying)
+    try:
+        detail = resp.json().get("error", {}).get("message", "")
+        if "insufficient_quota" in detail.lower():
+            raise RuntimeError("AI provider: Insufficient quota")
+    except (ValueError, AttributeError):
+        pass
+    if attempt >= max_retries:
+        return False
+    retry_after = resp.headers.get("retry-after")
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            delay = 2 ** attempt + random.uniform(0, 2)
+    else:
+        delay = 2 ** attempt + random.uniform(0, 2)
+    delay = min(delay, 60)
+    logger.warning(
+        f"AI provider 429 rate limited (attempt {attempt + 1}/{max_retries + 1}), "
+        f"retrying in {delay:.1f}s"
+    )
+    _time.sleep(delay)
+    return True
+
+
 def _call_provider_raw(provider, system_prompt: str, user_prompt: str) -> str:
     """Call an AI provider with a raw system + user prompt and return the text response.
 
     Works with OpenAI, Gemini, Claude, and local providers by using their
-    underlying HTTP client directly.
+    underlying HTTP client directly.  Includes exponential-backoff retry
+    on 429 rate-limit responses.
     """
     from app.ai.providers.openai_provider import OpenAIProvider
     from app.ai.providers.gemini_provider import GeminiProvider
@@ -499,12 +534,17 @@ def _call_provider_raw(provider, system_prompt: str, user_prompt: str) -> str:
         # GPT-5 / o-series reasoning models only support temperature=1 (default)
         if not _is_reasoning_model(provider.model):
             payload["temperature"] = 0.3
-        resp = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            json=payload, headers=headers, timeout=60,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        for attempt in range(_RAW_MAX_RETRIES + 1):
+            resp = httpx.post(
+                "https://api.openai.com/v1/chat/completions",
+                json=payload, headers=headers, timeout=180,
+            )
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"]
+            if _retry_on_rate_limit(resp, attempt):
+                continue
+            resp.raise_for_status()
+        raise RuntimeError(f"OpenAI API: rate limited after {_RAW_MAX_RETRIES + 1} attempts")
 
     elif isinstance(provider, GeminiProvider):
         import httpx
@@ -517,10 +557,15 @@ def _call_provider_raw(provider, system_prompt: str, user_prompt: str) -> str:
             "contents": [{"parts": [{"text": user_prompt}]}],
             "generationConfig": {"temperature": 0.3},
         }
-        resp = httpx.post(url, json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        for attempt in range(_RAW_MAX_RETRIES + 1):
+            resp = httpx.post(url, json=payload, timeout=60)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            if _retry_on_rate_limit(resp, attempt):
+                continue
+            resp.raise_for_status()
+        raise RuntimeError(f"Gemini API: rate limited after {_RAW_MAX_RETRIES + 1} attempts")
 
     elif isinstance(provider, ClaudeProvider):
         import httpx
@@ -536,13 +581,18 @@ def _call_provider_raw(provider, system_prompt: str, user_prompt: str) -> str:
             "messages": [{"role": "user", "content": user_prompt}],
             "temperature": 0.3,
         }
-        resp = httpx.post(
-            "https://api.anthropic.com/v1/messages",
-            json=payload, headers=headers, timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["content"][0]["text"]
+        for attempt in range(_RAW_MAX_RETRIES + 1):
+            resp = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                json=payload, headers=headers, timeout=60,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["content"][0]["text"]
+            if _retry_on_rate_limit(resp, attempt):
+                continue
+            resp.raise_for_status()
+        raise RuntimeError(f"Claude API: rate limited after {_RAW_MAX_RETRIES + 1} attempts")
 
     elif isinstance(provider, LocalProvider):
         import httpx

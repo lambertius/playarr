@@ -76,10 +76,20 @@ export function AudioManager() {
   const onLoadedMetadata = useCallback(() => {
     const el = audioRef.current;
     if (!el) return;
-    setDuration(el.duration);
+    if (Number.isFinite(el.duration) && el.duration > 0) {
+      setDuration(el.duration);
+    }
     // Auto‐play after loading
     if (isPlaying) el.play().catch(() => {});
   }, [setDuration, isPlaying]);
+
+  const onDurationChange = useCallback(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (Number.isFinite(el.duration) && el.duration > 0) {
+      setDuration(el.duration);
+    }
+  }, [setDuration]);
 
   const onEnded = useCallback(() => {
     if (repeat === "one") {
@@ -106,6 +116,7 @@ export function AudioManager() {
       preload="metadata"
       onTimeUpdate={onTimeUpdate}
       onLoadedMetadata={onLoadedMetadata}
+      onDurationChange={onDurationChange}
       onEnded={onEnded}
       onPause={onPause}
       style={{ display: "none" }}

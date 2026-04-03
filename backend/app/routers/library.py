@@ -474,7 +474,7 @@ def list_albums(
         db.query(
             VideoItem.album,
             VideoItem.album_entity_id,
-            ArtistEntity.name.label("artist_name"),
+            ArtistEntity.canonical_name.label("artist_name"),
             func.count(VideoItem.id),
             func.group_concat(VideoItem.id),
         )
@@ -1699,16 +1699,18 @@ def scrape_video(video_id: int, body: ScrapeRequest = ScrapeRequest(), db: Sessi
     if not item:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    job = ProcessingJob(
-        job_type="metadata_scrape",
-        status=JobStatus.queued,
-        video_id=video_id,
-        action_label=_scrape_action_label(
+    _scrape_label = _scrape_action_label(
             ai_auto_analyse=body.ai_auto_analyse, ai_only=body.ai_only,
             scrape_wikipedia=body.scrape_wikipedia,
             scrape_musicbrainz=body.scrape_musicbrainz,
             scrape_tmvdb=body.scrape_tmvdb,
-        ),
+        )
+    job = ProcessingJob(
+        job_type="metadata_scrape",
+        status=JobStatus.queued,
+        video_id=video_id,
+        display_name=f"{item.artist} \u2013 {item.title} \u203a {_scrape_label}" if item.artist and item.title else None,
+        action_label=_scrape_label,
     )
     db.add(job)
     db.commit()

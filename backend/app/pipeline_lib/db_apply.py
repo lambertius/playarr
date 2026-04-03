@@ -189,6 +189,7 @@ def _execute_plan(plan: dict) -> int:
                 mb_release_group_id=v.get("mb_release_group_id"),
                 processing_state=v.get("processing_state") or {},
                 import_method="import",
+                locked_fields=plan.get("locked_fields") or [],
             )
             db.add(video_item)
 

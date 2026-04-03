@@ -24,9 +24,8 @@ _WORKSPACE_ROOT: Optional[str] = None
 def _get_workspace_root() -> str:
     global _WORKSPACE_ROOT
     if _WORKSPACE_ROOT is None:
-        # Place workspaces alongside the other data directories
-        base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data"))
-        _WORKSPACE_ROOT = os.path.join(base, "workspaces")
+        from app.runtime_dirs import get_runtime_dirs
+        _WORKSPACE_ROOT = str(get_runtime_dirs().workspace_dir)
     return _WORKSPACE_ROOT
 
 

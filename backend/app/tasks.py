@@ -665,7 +665,7 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
             _update_job(job_id, status=JobStatus.failed, error_message="Video not found")
             return
 
-        _update_job(job_id, display_name=f"Redownload: {video_item.artist} - {video_item.title}")
+        _update_job(job_id, display_name=f"{video_item.artist} \u2013 {video_item.title} \u203a Redownload")
 
         source = next((s for s in video_item.sources), None)
         if not source:
@@ -1051,17 +1051,17 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
             ctx_file_path = video_item.file_path
             ctx_folder_path = video_item.folder_path
             ctx_resolution_label = video_item.resolution_label
-            ctx_locked_fields = list(video_item.locked_fields or [])
             ctx_import_method = video_item.import_method
-            ctx_mb_artist_id = video_item.mb_artist_id
-            ctx_mb_recording_id = video_item.mb_recording_id
-            ctx_mb_release_id = video_item.mb_release_id
-            ctx_mb_release_group_id = getattr(video_item, 'mb_release_group_id', None)
-            ctx_artist_entity_id = getattr(video_item, 'artist_entity_id', None)
-            ctx_album_entity_id = getattr(video_item, 'album_entity_id', None)
             ctx_genre_names = [g.name for g in video_item.genres]
             ctx_duration = (video_item.quality_signature.duration_seconds
                             if video_item.quality_signature else None)
+
+            # Locked fields & existing MB IDs (for fallback if locked)
+            ctx_locked_fields = video_item.locked_fields or []
+            ctx_mb_artist_id = video_item.mb_artist_id
+            ctx_mb_recording_id = video_item.mb_recording_id
+            ctx_mb_release_id = video_item.mb_release_id
+            ctx_mb_release_group_id = video_item.mb_release_group_id
 
             # Source context
             _source = video_item.sources[0] if video_item.sources else None
@@ -1209,6 +1209,7 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
             ai = generate_ai_summary(plot)
             new_plot = ai if ai else plot
 
+        # MB IDs: use scraped values with existing as fallback
         new_mb_artist_id = metadata.get("mb_artist_id") or ctx_mb_artist_id
         new_mb_recording_id = metadata.get("mb_recording_id") or ctx_mb_recording_id
         new_mb_release_id = metadata.get("mb_release_id") or ctx_mb_release_id
@@ -1558,8 +1559,19 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                             last_validated_at=datetime.now(timezone.utc),
                         ))
 
-                # Sources
+                # Sources — clear non-video reference links (Wikipedia, MB,
+                # IMDB) so stale links from a previous scrape don't persist.
+                # The primary video source (YouTube etc.) is preserved.
+                # Skip clearing when all fields are locked.
                 from app.pipeline_url.db_apply import _upsert_source
+                if not all_locked:
+                    _cleared = db.query(Source).filter(
+                        Source.video_id == video_id,
+                        Source.source_type != "video",
+                    ).delete(synchronize_session="fetch")
+                    if _cleared:
+                        _append_job_log(job_id, f"Cleared {_cleared} stale reference source(s)")
+
                 for _src_key, _src_data in source_links.items():
                     _upsert_source(db, video_id, {
                         "provider": _src_data["provider"],
@@ -1571,6 +1583,13 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                     })
                 if source_links:
                     _append_job_log(job_id, f"Upserted {len(source_links)} source(s)")
+
+                # Clear entity links so rescan re-resolves from scratch.
+                # Skip when all fields are locked — preserve existing links.
+                if not all_locked:
+                    video_item.artist_entity_id = None
+                    video_item.album_entity_id = None
+                    video_item.track_id = None
 
                 # Flush core changes before entity resolution so savepoints
                 # only contain entity-related writes.
@@ -1723,10 +1742,13 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
             try:
                 norm_db = SessionLocal()
                 try:
+                    _nv = norm_db.query(VideoItem).get(video_id)
+                    _norm_display = f"{_nv.artist} \u2013 {_nv.title} \u203a Normalize" if _nv and _nv.artist and _nv.title else None
                     norm_job = ProcessingJob(
                         job_type="normalize", status=JobStatus.queued,
                         video_id=video_id,
                         action_label="Normalize",
+                        display_name=_norm_display,
                     )
                     norm_db.add(norm_job)
                     norm_db.commit()
@@ -3463,10 +3485,12 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             try:
                 norm_db = SessionLocal()
                 try:
+                    _norm_display2 = f"{video_item.artist} \u2013 {video_item.title} \u203a Normalize" if video_item.artist and video_item.title else None
                     norm_job = ProcessingJob(
                         job_type="normalize", status=JobStatus.queued,
                         video_id=video_id,
                         action_label="Normalize",
+                        display_name=_norm_display2,
                     )
                     norm_db.add(norm_job)
                     norm_db.commit()
@@ -3842,10 +3866,22 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
         for i, entry in enumerate(entries):
             _update_job(job_id, progress_percent=int((i / max(total, 1)) * 100))
 
-            # Check if already tracked
+            # Check if already tracked — use samefile on Windows to
+            # handle trailing-dot equivalence (e.g. "M.I.A." == "M.I.A")
             existing = db.query(VideoItem).filter(
                 VideoItem.folder_path == entry["folder_path"]
             ).first()
+
+            if not existing and os.name == "nt":
+                # Fallback: check all tracked folder_paths via samefile
+                for (vid_fp,) in db.query(VideoItem.folder_path).all():
+                    if vid_fp and os.path.isdir(vid_fp):
+                        try:
+                            if os.path.samefile(vid_fp, entry["folder_path"]):
+                                existing = True
+                                break
+                        except (OSError, ValueError):
+                            continue
 
             if existing:
                 continue
@@ -3974,7 +4010,7 @@ def metadata_refresh_task(self, job_id: int, video_id: int, force: bool = False)
 
         artist = video_item.artist or "Unknown Artist"
         title = video_item.title or "Unknown Title"
-        _update_job(job_id, display_name=f"Refresh: {artist} - {title}",
+        _update_job(job_id, display_name=f"{artist} \u2013 {title} \u203a Metadata Refresh",
                     current_step="Resolving artist", progress_percent=10)
 
         # --- Resolve artist entity ---

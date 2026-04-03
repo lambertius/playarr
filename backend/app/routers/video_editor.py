@@ -498,7 +498,7 @@ def encode_single(req: EncodeRequest, db: Session = Depends(get_db)):
         video_id=video.id,
         job_type="video_editor_encode",
         status=JobStatus.queued,
-        display_name=f"Video Edit: {video.artist} - {video.title}",
+        display_name=f"{video.artist} \u2013 {video.title} \u203a Video Edit",
         action_label="Video Edit",
         input_params={
             "crop": crop,
@@ -631,7 +631,7 @@ def batch_encode(req: BatchEncodeRequest, db: Session = Depends(get_db)):
             video_id=video.id,
             job_type="video_editor_encode",
             status=JobStatus.queued,
-            display_name=f"Video Edit: {video.artist} - {video.title}",
+            display_name=f"{video.artist} \u2013 {video.title} \u203a Video Edit",
             action_label="Video Edit",
             input_params={
                 "crop": crop,

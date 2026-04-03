@@ -1,8 +1,13 @@
 """
 Celery Worker Configuration
 
-When Redis is unavailable, tasks run in-process via threads
-so the application works standalone without a separate worker.
+Desktop / installed mode (default):
+  Tasks run in-process via threads. No Redis required. This is the
+  recommended mode for single-user Windows installs.
+
+Advanced / server mode (CELERY_WORKER_ENABLED=1 + Redis):
+  Tasks dispatch to Celery via Redis for multi-process scalability.
+  Requires a running Redis instance and a separate Celery worker process.
 """
 import logging
 import os

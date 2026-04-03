@@ -238,7 +238,7 @@ def import_all_cart(req: CartImportAllRequest = CartImportAllRequest(), db: Sess
             job_type="import_url",
             status=JobStatus.queued,
             input_url=item.url,
-            display_name=f"{item.artist} - {item.title}" if item.artist and item.title else item.url,
+            display_name=f"{item.artist} \u2013 {item.title} \u203a New Videos Import" if item.artist and item.title else item.url,
             action_label="New Videos import",
         )
         db.add(job)
@@ -377,7 +377,7 @@ def add_video(req: CartAddRequest, db: Session = Depends(get_db)):
         job_type="import_url",
         status=JobStatus.queued,
         input_url=sv.url,
-        display_name=f"{sv.artist} - {sv.title}" if sv.artist and sv.title else sv.url,
+        display_name=f"{sv.artist} \u2013 {sv.title} \u203a New Videos Quick Add" if sv.artist and sv.title else sv.url,
         action_label="New Videos quick add",
     )
     db.add(job)

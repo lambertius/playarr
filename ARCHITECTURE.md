@@ -1,202 +1,291 @@
-# Playarr — Architecture & Build Plan
+# Playarr — Architecture
 
-## 1. System Overview
+## System Overview
 
-Playarr is a self-hosted music-video manager in the spirit of Sonarr / Radarr / Lidarr.
-It downloads music videos from YouTube/Vimeo, auto-resolves metadata (MusicBrainz + Wikipedia),
-normalizes loudness, organises files on disk, writes Kodi-compatible NFO files, and serves
-everything through a dark-themed web UI with browser-native playback and hover previews.
+Playarr is a self-hosted music video manager built with a FastAPI backend, React frontend, and Celery background workers. It downloads music videos, resolves metadata from multiple sources, normalises audio loudness, organises files on disk, and serves everything through a dark-themed web UI.
 
 ```
-┌────────────┐   HTTP/REST    ┌─────────────────┐    Celery/Redis   ┌──────────────┐
-│  React SPA │ ─────────────▸ │  FastAPI Server  │ ───────────────▸  │ Celery Worker │
-│  (Vite)    │ ◂───────────── │  (uvicorn)       │ ◂─────────────── │              │
-└────────────┘  JSON + Stream └────────┬────────┘   task results    └──────┬───────┘
-                                       │                                    │
-                               ┌───────▼────────┐               ┌──────────▼──────────┐
-                               │  SQLite / PG    │               │  yt-dlp · ffmpeg    │
-                               │  (SQLAlchemy)   │               │  ffprobe · httpx    │
-                               └─────────────────┘               │  musicbrainzngs     │
-                                                                 └─────────────────────┘
-```
-
-### Component roles
-
-| Component        | Technology             | Purpose                                       |
-|------------------|------------------------|-----------------------------------------------|
-| **API**          | FastAPI + Uvicorn      | REST endpoints, video streaming, CORS          |
-| **Worker**       | Celery + Redis         | Background pipeline (download → organize)      |
-| **Database**     | SQLAlchemy + Alembic   | ORM, migrations, metadata storage              |
-| **Downloader**   | yt-dlp                 | Best-quality download with progress callbacks   |
-| **Analyzer**     | ffprobe                | Quality signature extraction (res, codecs, HDR) |
-| **Normalizer**   | ffmpeg (EBU R128)      | LUFS loudness normalization                     |
-| **Metadata**     | MusicBrainz + Wikipedia| Artist/title/year/genre/album/artwork           |
-| **AI Summary**   | Gemini / OpenAI (opt.) | Plot/visual description generation              |
-| **Frontend**     | React 18 + TailwindCSS | Dark SPA with grid, player, hover previews      |
-
----
-
-## 2. Database Schema
-
-### Tables
-
-| Table                  | Key Columns                                                         |
-|------------------------|---------------------------------------------------------------------|
-| `video_items`          | id, title, artist, album, year, resolution_label, file_path, poster_path, folder_path, duration_sec, source_provider, source_id, source_url, status, ai_summary, created_at, updated_at |
-| `sources`              | id, video_item_id, provider, video_id, url, added_at               |
-| `quality_signatures`   | id, video_item_id, width, height, fps, video_codec, audio_codec, video_bitrate, audio_bitrate, container, hdr, duration_sec, measured_lufs, quality_score, created_at |
-| `metadata_snapshots`   | id, video_item_id, snapshot_json, source_label, created_at          |
-| `media_assets`         | id, video_item_id, asset_type (poster/fanart/thumb/preview), file_path, url, created_at |
-| `genres`               | id, name (unique)                                                   |
-| `video_genres`         | video_item_id, genre_id (M2M join)                                  |
-| `processing_jobs`      | id, video_item_id, job_type, status, current_step, progress_percent, input_url, error_message, log_text, created_at, started_at, completed_at |
-| `app_settings`         | id, key (unique), value, updated_at                                 |
-| `normalization_history`| id, video_item_id, before_lufs, after_lufs, target_lufs, gain_applied_db, method, created_at |
-| `playback_history`     | id, video_item_id, position_sec, duration_sec, completed, played_at |
-
-### Entity Relationships
-
-```
-video_items 1──* sources
-video_items 1──* quality_signatures
-video_items 1──* metadata_snapshots
-video_items 1──* media_assets
-video_items *──* genres  (via video_genres)
-video_items 1──* processing_jobs
-video_items 1──* normalization_history
-video_items 1──* playback_history
+┌────────────┐   HTTP/REST    ┌─────────────────┐   Celery/Redis   ┌──────────────┐
+│  React SPA │ ─────────────▸ │  FastAPI Server  │ ───────────────▸ │ Celery Worker │
+│  (Vite)    │ ◂───────────── │  (Uvicorn)       │ ◂─────────────── │              │
+└────────────┘  JSON + Stream └────────┬────────┘   task results   └──────┬───────┘
+                                       │                                   │
+                               ┌───────▼────────┐              ┌──────────▼──────────┐
+                               │     SQLite      │              │  yt-dlp · ffmpeg    │
+                               │  (SQLAlchemy)   │              │  ffprobe · httpx    │
+                               └─────────────────┘              │  musicbrainzngs     │
+                                                                └─────────────────────┘
 ```
 
 ---
 
-## 3. API Endpoints
+## Technology Stack
 
-### Library (`/api/library`)
-
-| Method | Path                        | Description                      |
-|--------|-----------------------------|----------------------------------|
-| GET    | `/`                         | List videos (paginated, filtered, sorted) |
-| GET    | `/artists`                  | Distinct artist list + counts    |
-| GET    | `/years`                    | Distinct year list + counts      |
-| GET    | `/genres`                   | Genre list + counts              |
-| GET    | `/albums`                   | Album list + counts              |
-| GET    | `/{id}`                     | Full video detail                |
-| PUT    | `/{id}`                     | Update video metadata            |
-| DELETE | `/{id}`                     | Delete video + files             |
-| GET    | `/{id}/snapshots`           | Metadata version history         |
-| POST   | `/{id}/undo-rescan`         | Restore previous metadata        |
-
-### Jobs (`/api/jobs`)
-
-| Method | Path                        | Description                      |
-|--------|-----------------------------|----------------------------------|
-| POST   | `/import`                   | Import video by URL              |
-| POST   | `/rescan/{id}`              | Re-scrape metadata for one video |
-| POST   | `/rescan-batch`             | Batch re-scrape                  |
-| POST   | `/normalize/{id}`           | Normalize one video              |
-| POST   | `/normalize-batch`          | Batch normalize                  |
-| POST   | `/library-scan`             | Scan library directory on disk   |
-| GET    | `/`                         | List jobs (filtered)             |
-| GET    | `/{id}`                     | Job detail                       |
-| GET    | `/{id}/log`                 | Job log text                     |
-| POST   | `/{id}/retry`               | Retry a failed job               |
-| POST   | `/{id}/cancel`              | Cancel a queued job              |
-
-### Playback (`/api/playback`)
-
-| Method | Path                        | Description                      |
-|--------|-----------------------------|----------------------------------|
-| GET    | `/stream/{id}`              | Range-request video streaming    |
-| GET    | `/preview/{id}`             | Hover-preview clip               |
-| GET    | `/poster/{id}`              | Poster image                     |
-| POST   | `/history`                  | Record playback position         |
-
-### Settings (`/api/settings`)
-
-| Method | Path                        | Description                      |
-|--------|-----------------------------|----------------------------------|
-| GET    | `/`                         | All settings                     |
-| PUT    | `/{key}`                    | Update one setting               |
-| GET    | `/normalization-history/{id}`| LUFS history for a video        |
-
-### Root
-
-| Method | Path                        | Description                      |
-|--------|-----------------------------|----------------------------------|
-| GET    | `/api/health`               | Health check                     |
-| GET    | `/api/stats`                | Dashboard stats (counts, active) |
+| Layer | Technology | Version |
+|-------|-----------|---------|
+| **Frontend** | React, Vite, TypeScript, Tailwind CSS | 19, 7, 5.9, 4.2 |
+| **API** | FastAPI + Uvicorn | 0.104+ |
+| **Background** | Celery + Redis | 5.3+ |
+| **ORM** | SQLAlchemy + Alembic | 2.0+ |
+| **Database** | SQLite (WAL mode) | — |
+| **Downloader** | yt-dlp | 2024+ |
+| **Media** | ffmpeg + ffprobe | 5+ |
+| **Metadata** | MusicBrainz API, Wikipedia, CoverArtArchive | — |
+| **AI** (optional) | OpenAI, Google Gemini, Anthropic Claude, Ollama | — |
 
 ---
 
-## 4. Job Pipeline — State Machine
-
-The import pipeline moves through these states in `processing_jobs.status`:
+## Backend Structure
 
 ```
-queued → downloading → downloaded → remuxing → analyzing → normalizing → tagging → writing_nfo → asset_fetch → complete
-                                                                                                            ↘ failed
+backend/
+├── app/
+│   ├── main.py                # FastAPI app, lifespan, startup tasks
+│   ├── config.py              # Pydantic-settings configuration
+│   ├── database.py            # SQLAlchemy engine, sessions, dual pool
+│   ├── models.py              # ORM models (~30 tables)
+│   ├── schemas.py             # Pydantic request/response schemas
+│   ├── tasks.py               # Celery task definitions
+│   ├── version.py             # APP_VERSION constant
+│   ├── worker.py              # Celery app configuration
+│   │
+│   ├── routers/               # FastAPI route handlers
+│   │   ├── library.py         # Library CRUD, filtering, stats
+│   │   ├── jobs.py            # Job management, import, rescan
+│   │   ├── playback.py        # Video streaming, previews, posters
+│   │   ├── settings.py        # Settings CRUD, startup management
+│   │   ├── metadata.py        # Metadata operations
+│   │   ├── ai.py              # AI enrichment endpoints
+│   │   ├── artwork.py         # Artwork cache management
+│   │   ├── resolve.py         # Match/review/search/export
+│   │   ├── playlists.py       # Playlist CRUD
+│   │   ├── library_import.py  # Bulk library import wizard
+│   │   ├── video_editor.py    # Video trim/clip editor
+│   │   ├── scraper_test.py    # Metadata scraper testing tool
+│   │   ├── new_videos.py      # Video discovery/suggestions
+│   │   └── tmvdb.py           # TMVDB integration
+│   │
+│   ├── services/              # Business logic
+│   │   ├── unified_metadata.py      # Single-path metadata resolution
+│   │   ├── entity_resolution.py     # Artist/Album/Track entity linking
+│   │   ├── canonical_track.py       # Canonical track matching
+│   │   ├── library_scanner.py       # Filesystem scanning
+│   │   ├── preview_generator.py     # Hover preview clip creation
+│   │   └── ...                      # (~22 service modules)
+│   │
+│   ├── scraper/               # Metadata scraping
+│   │   ├── metadata_resolver.py     # MusicBrainz + Wikipedia + IMDB
+│   │   ├── musicbrainz_client.py    # MB API wrapper
+│   │   └── wikipedia_scraper.py     # Wikipedia page parsing
+│   │
+│   ├── ai/                    # AI provider abstraction
+│   │   ├── providers/         # OpenAI, Gemini, Claude, Ollama
+│   │   └── prompts/           # Shared prompt templates
+│   │
+│   ├── matching/              # Match scoring & confidence
+│   │
+│   ├── new_videos/            # Video discovery subsystem
+│   │
+│   ├── pipeline_url/          # ★ ACTIVE — URL import pipeline
+│   │   ├── stages.py          # Step-by-step import stages
+│   │   ├── workspace.py       # Import workspace state
+│   │   ├── mutation_plan.py   # DB mutation plan builder
+│   │   ├── db_apply.py        # Apply plan to database
+│   │   ├── deferred.py        # Deferred/async task dispatch
+│   │   ├── write_queue.py     # Serialised DB write queue
+│   │   ├── services/          # Pipeline-specific services
+│   │   ├── metadata/          # Metadata resolution
+│   │   ├── matching/          # Version detection
+│   │   └── ai/                # AI source resolution + review
+│   │
+│   ├── pipeline_lib/          # ★ ACTIVE — Library import pipeline
+│   │   └── (mirrors pipeline_url/ structure)
+│   │
+│   └── pipeline/              # ⚠ LEGACY — Original pipeline (unused)
+│       └── (minimal, superseded by pipeline_url/)
+│
+├── tray.py                    # Windows system tray icon
+├── _start_server.py           # Development server launcher
+├── requirements.txt           # Python dependencies
+└── .env.example               # Configuration template
+```
+
+---
+
+## Pipeline Architecture
+
+Playarr has three pipeline directories. This is a known technical debt item (see [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md)):
+
+| Directory | Status | Purpose |
+|-----------|--------|---------|
+| `pipeline_url/` | **Active** | Handles URL-based imports (YouTube, Vimeo). Used by the main import workflow. |
+| `pipeline_lib/` | **Active** | Handles library imports (importing existing files from disk). Used by the Library Import wizard. |
+| `pipeline/` | **Legacy** | Original pipeline implementation. Superseded by the above. Should not be modified without a refactor plan. |
+
+### Import Pipeline State Machine
+
+```
+queued → downloading → analyzing → metadata_resolution → normalizing → writing_nfo → entity_resolution → complete
+                                                                                                          ↘ failed
 Any step may transition to → failed (with error_message)
 A queued job may be → cancelled
 A failed job may be → retried (re-queued)
 ```
 
-### Import pipeline steps (in order)
+### Metadata Resolution Flow
 
-1. **Identify** — Parse URL, extract provider + video ID, check for existing item  
-2. **Check existing** — If item exists, fetch new format list, compare quality scores; skip if no upgrade  
-3. **Download** — yt-dlp best video+audio → merge to MKV in temp dir (retry + format fallback)  
-4. **Analyze** — ffprobe quality signature (resolution, codecs, bitrates, HDR, LUFS)  
-5a. **Resolve metadata (unified)** — Single code path via `resolve_metadata_unified()`:
-    - **AI Source Resolution** (pre-scrape, if enabled) — Determines canonical identity (artist/title) and
-      external source links (MusicBrainz recording UUID, Wikipedia URL, IMDB URL) BEFORE any scraping.
-      Controlled by `ai_source_resolution` setting (default: true when AI provider configured).
-    - **Source-guided scraping** — Uses AI-provided links/IDs first (direct lookup), falls back to
-      search-based resolution only if AI links are missing or invalid.
-      - MusicBrainz: AI recording UUID → `get_recording_by_id` → search fallback
-      - Wikipedia: AI URL → direct scrape → search fallback (validated via `detect_article_mismatch`)
-      - IMDB: AI URL → search fallback
-    - **AI Final Review** (post-scrape, if enabled) — Verifies scraped data against all signals,
-      applies high-confidence corrections (threshold ≥ 0.7), and approves/rejects artwork.
-      Controlled by `ai_final_review` setting (default: true when AI provider configured).
-    - Both automatic import and manual "Analyze Metadata" use this SAME code path.
-5b. **Version detection** — Identify cover/live/alternate versions from filename + description signals  
-6. **Organize** — Build folder name `Artist - Title [Resolution]`, move to library, archive old if upgrade  
-7. **Normalize** — Measure LUFS, apply gain to hit target (default -14.0 LUFS), remux  
-8a. **Write NFO** — Kodi-format XML sidecar with all metadata  
-8c. **Entity resolution** — Resolve canonical Artist/Album/Track entities  
-    - Phase 1: Network resolution (MusicBrainz + Wikipedia + CoverArtArchive providers)  
-    - Entity name safeguard: resolved `canonical_name` must have `fuzzy_score ≥ 0.4` vs input  
-    - Phase 2: DB writes (get_or_create_artist/album/track with genre dedup)  
-    - Entity asset download (artist/album images from CoverArtArchive)  
-8b. **Artist/Album artwork** — Runs AFTER entity resolution (uses MB IDs for CoverArtArchive)  
-8c.6. **Entity enrichment** — Backfill video metadata from resolved entities (year, album, plot, genres)  
-8c.7. **Poster upgrade** — Replace YouTube thumbnail with album cover art if available  
-8d. **Kodi export** — Write artist.nfo, album.nfo, and video NFO for Kodi library scanning  
-9. **Save to DB** — Upsert VideoItem, QualitySignature, Sources (with provenance), Genres, MediaAssets  
-10. **Match scoring** — Compute fingerprint + metadata match confidence  
-11. **Preview generation** — Short hover preview clip (cache keyed by `v{video_id}_{basename}`)  
-12. **Scene analysis** — AI scene detection + thumbnail generation  
-13. **AI metadata enrichment** — Full-context AI verification with Source records  
-    - Mismatch detection → lowered threshold (0.5) for identity corrections  
-    - If AI changes artist/title/album → **re-run entity resolution** to fix contaminated links  
+```
+1. AI Source Resolution (optional)
+   └─ Identifies canonical artist/title and external IDs
 
-### Source Provenance Tracking
+2. Source-Guided Scraping
+   ├─ MusicBrainz: AI recording UUID → direct lookup → search fallback
+   ├─ Wikipedia: AI URL → direct scrape → search fallback
+   └─ IMDB: AI URL → search fallback
 
-Every Source record includes a `provenance` field indicating how the URL/ID was discovered:
-- `"import"` — Primary source URL from yt-dlp at import time
-- `"ai"` — URL/ID provided by AI Source Resolution stage
-- `"scraped"` — Found via search-based scraping (MusicBrainz search, Wikipedia search, IMDB search)
-- `"manual"` — User-entered via the UI
-
-### Settings (metadata pipeline)
-
-| Key                    | Default    | Description                                                |
-|------------------------|------------|------------------------------------------------------------|
-| `ai_source_resolution` | `true`     | Run AI source resolution pre-scrape (requires AI provider) |
-| `ai_final_review`      | `true`     | Run AI final review post-scrape (requires AI provider)     |
-| `ai_provider`          | `none`     | AI provider (openai, gemini, claude, local, none)          |
+3. AI Final Review (optional)
+   └─ Verifies scraped data, applies corrections (threshold ≥ 0.7)
+```
 
 ---
+
+## Database
+
+SQLite in WAL mode with dual connection pools:
+- **Main pool** (20 connections) — General read/write operations
+- **Cosmetic pool** (10 connections) — Lightweight UI updates (ratings, play counts)
+
+### Core Tables
+
+| Table | Purpose |
+|-------|---------|
+| `video_items` | Central video metadata (~48 fields) |
+| `sources` | Provider URLs/IDs with provenance tracking |
+| `quality_signatures` | Resolution, codecs, bitrate, HDR, LUFS |
+| `processing_jobs` | Job queue with status, progress, logs |
+| `app_settings` | Key-value configuration store |
+| `genres` / `video_genres` | Genre taxonomy (M2M) |
+| `normalization_history` | LUFS before/after for each normalisation |
+| `playback_history` | Position tracking for resume |
+| `playlists` / `playlist_entries` | User playlists |
+
+### Entity Tables
+
+| Table | Purpose |
+|-------|---------|
+| `artist_entities` | Canonical artists with MusicBrainz IDs |
+| `album_entities` | Albums with release group IDs |
+| `track_entities` | Canonical tracks linking videos |
+| `cached_assets` | Downloaded artwork cache |
+| `metadata_revisions` | Entity metadata change history |
+
+### Matching Tables
+
+| Table | Purpose |
+|-------|---------|
+| `match_results` | Confidence scores for metadata matches |
+| `match_candidates` | Alternative match options |
+| `user_pinned_matches` | User-confirmed match selections |
+
+### AI Tables
+
+| Table | Purpose |
+|-------|---------|
+| `ai_metadata_results` | AI enrichment outputs |
+| `ai_scene_analyses` | Scene detection results |
+| `ai_thumbnails` | AI-generated thumbnail data |
+
+### Discovery Tables
+
+| Table | Purpose |
+|-------|---------|
+| `suggested_videos` | Recommended new videos |
+| `suggested_video_cart` | User cart for suggested videos |
+| `suggested_video_dismissals` | Dismissed suggestions |
+| `suggested_video_feedback` | User feedback on suggestions |
+
+---
+
+## Frontend Structure
+
+```
+frontend/src/
+├── pages/                     # Route pages
+│   ├── LibraryPage.tsx        # Main grid with filters
+│   ├── VideoDetailPage.tsx    # Video detail + player
+│   ├── ArtistDetailPage.tsx   # Artist entity page
+│   ├── AlbumDetailPage.tsx    # Album entity page
+│   ├── TrackDetailPage.tsx    # Track entity page
+│   ├── SettingsPage.tsx       # Configuration UI
+│   ├── JobsPage.tsx           # Job queue management
+│   ├── PlaylistPage.tsx       # Playlist views
+│   └── ...                    # (~18 routes total)
+│
+├── components/                # Reusable UI components (~50)
+│   ├── VideoCard.tsx          # Library grid card
+│   ├── VideoPlayer.tsx        # Browser video player
+│   ├── MetadataPanel.tsx      # Metadata editor
+│   ├── Toast.tsx              # Notification system
+│   └── ...
+│
+├── hooks/                     # React Query hooks, custom hooks
+├── stores/                    # Zustand state stores
+├── lib/
+│   └── api.ts                 # Typed API client (axios)
+└── index.css                  # Tailwind CSS 4 theme
+```
+
+### Design System
+
+- **Theme:** Dark surfaces (#0f1117 → #2b3245), accent red (#e11d2e), secondary orange (#ff6a00)
+- **Font:** Inter (via Google Fonts)
+- **Components:** Custom CSS utility classes (`btn`, `card`, `badge`, `input-field`) defined in `index.css`
+
+---
+
+## AI Subsystem
+
+AI features are optional and require an API key for cloud providers or a local Ollama instance.
+
+| Provider | Models |
+|----------|--------|
+| OpenAI | gpt-4o, gpt-4.1, o3, o4-mini |
+| Gemini | gemini-2.0-flash, gemini-2.5-pro |
+| Claude | claude-sonnet-4-20250514, claude-opus-4-20250918 |
+| Ollama | Any locally hosted model |
+
+AI tasks:
+- **Source Resolution** — Pre-scrape identification of artist, title, and external IDs
+- **Final Review** — Post-scrape verification and correction
+- **Scene Analysis** — Detect scenes and generate descriptions
+- **Metadata Enrichment** — Fill missing fields from video content analysis
+
+---
+
+## Video Discovery (New Videos)
+
+The recommendation engine suggests new music videos based on:
+- Artists in your library
+- Related artists via MusicBrainz relationships
+- Genre analysis
+- User feedback (thumbs up/down, dismissals)
+
+---
+
+## Docker Architecture
+
+The `docker-compose.yml` defines four services:
+
+```
+┌──────────┐   ┌───────────┐   ┌──────────┐   ┌──────────┐
+│  Redis   │   │  API      │   │  Worker  │   │ Frontend │
+│  :6379   │◄──│  :6969    │   │  (Celery)│   │  :3080   │
+│          │   │  (FastAPI)│   │          │   │  (Nginx) │
+└──────────┘   └───────────┘   └──────────┘   └──────────┘
+```
+
+All backend containers share the same image (multi-stage Dockerfile). The frontend is built as static files and served by Nginx.
+
 
 ## 5. Key Algorithms
 

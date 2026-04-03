@@ -371,6 +371,21 @@ def _cleanup_stale_jobs():
             logger.info(f"Fixed {len(stuck_finalizing)} job(s) stuck in Finalizing state")
 
 
+def _normalize_path_for_compare(p: str) -> str:
+    """Normalize a path for comparison, stripping trailing dots from each component.
+
+    On Windows, the filesystem silently strips trailing dots from directory
+    names (e.g. ``Andrew W.K.`` and ``Andrew W.K`` resolve to the same dir).
+    ``os.path.normpath`` does NOT strip these, so we do it manually.
+    """
+    p = os.path.normcase(os.path.normpath(p))
+    if os.name == "nt":
+        parts = p.split(os.sep)
+        parts = [part.rstrip(".") if part else part for part in parts]
+        p = os.sep.join(parts)
+    return p
+
+
 def _detect_untracked_library_files():
     """Log warnings for video files in the library not tracked by any VideoItem.
 
@@ -388,7 +403,7 @@ def _detect_untracked_library_files():
         tracked = set()
         for (fp,) in db.query(VideoItem.file_path).all():
             if fp:
-                tracked.add(os.path.normcase(os.path.normpath(fp)))
+                tracked.add(_normalize_path_for_compare(fp))
 
     untracked = []
     for library_dir in settings.get_all_library_dirs():
@@ -399,7 +414,7 @@ def _detect_untracked_library_files():
             for fname in files:
                 if os.path.splitext(fname)[1].lower() in video_extensions:
                     full = os.path.join(root, fname)
-                    if os.path.normcase(os.path.normpath(full)) not in tracked:
+                    if _normalize_path_for_compare(full) not in tracked:
                         untracked.append(full)
 
     if untracked:
@@ -427,7 +442,7 @@ def _purge_orphan_workspaces(engine):
     from sqlalchemy.orm import Session as SASession
     from app.models import ProcessingJob
 
-    ws_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "workspaces"))
+    ws_root = str(get_settings().workspace_dir)
     if not os.path.isdir(ws_root):
         return
 
@@ -753,12 +768,28 @@ def _version_tuple(v: str):
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
     # Startup
-    logger.info("Playarr starting up...")
+    from app.runtime_dirs import get_runtime_dirs, IS_DEV
+    rdirs = get_runtime_dirs()
+
+    mode_label = "DEVELOPMENT" if IS_DEV else "PRODUCTION"
+    logger.info(f"Playarr starting up... (mode={mode_label})")
+
     s = get_settings()
     s.ensure_directories()
 
     # Enable persistent file logging now that directories exist
     _setup_file_logging()
+
+    # Log runtime paths for diagnostics
+    logger.info(f"  DB:       {rdirs.db_path}")
+    logger.info(f"  Data:     {rdirs.data_dir}")
+    logger.info(f"  Logs:     {rdirs.log_dir}")
+    logger.info(f"  Cache:    {rdirs.cache_dir}")
+
+    # First-run detection
+    _is_first_run = not rdirs.db_path.exists()
+    if _is_first_run:
+        logger.info("First run detected — initializing database...")
 
     # Create tables (dev convenience; production uses Alembic)
     Base.metadata.create_all(bind=engine)
@@ -895,7 +926,10 @@ def get_stats():
         total_genres = db.query(Genre).count()
         active_jobs = db.query(ProcessingJob).filter(
             ProcessingJob.status.in_([JobStatus.queued, JobStatus.downloading,
-                                       JobStatus.analyzing, JobStatus.normalizing])
+                                       JobStatus.downloaded, JobStatus.remuxing,
+                                       JobStatus.analyzing, JobStatus.normalizing,
+                                       JobStatus.tagging, JobStatus.writing_nfo,
+                                       JobStatus.asset_fetch])
         ).count()
         failed_jobs = db.query(ProcessingJob).filter(
             ProcessingJob.status == JobStatus.failed
@@ -912,10 +946,25 @@ def get_stats():
 
 
 # ── Serve frontend SPA ────────────────────────────────────
-_frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
-if _frontend_dist.is_dir():
+# Search order: 1) bundled dist inside backend (installer), 2) repo-level frontend/dist (dev build)
+_frontend_dist = None
+_candidate_dirs = [
+    Path(__file__).resolve().parent / "static" / "dist",          # bundled with backend
+    Path(__file__).resolve().parent.parent / "static" / "dist",   # backend/static/dist
+    Path(__file__).resolve().parent.parent.parent / "frontend" / "dist",  # repo layout
+]
+for _cand in _candidate_dirs:
+    if _cand.is_dir() and (_cand / "index.html").is_file():
+        _frontend_dist = _cand
+        break
+
+if _frontend_dist is not None:
+    logger.info(f"Serving frontend from {_frontend_dist}")
+
     # Serve static assets (JS, CSS, images) under /assets
-    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="frontend-assets")
+    _assets_dir = _frontend_dist / "assets"
+    if _assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="frontend-assets")
 
     _index_html = _frontend_dist / "index.html"
 
@@ -941,13 +990,28 @@ if _frontend_dist.is_dir():
     # Serve root-level static files (vite.svg, favicon.ico, etc.)
     @app.get("/vite.svg")
     async def serve_vite_svg():
-        return FileResponse(str(_frontend_dist / "vite.svg"))
+        svg = _frontend_dist / "vite.svg"
+        if svg.is_file():
+            return FileResponse(str(svg))
+        return FileResponse(str(_index_html))
 
     @app.get("/favicon.ico")
     async def serve_favicon():
         fav = _frontend_dist / "favicon.ico"
         if fav.is_file():
             return FileResponse(str(fav))
-        return FileResponse(str(_frontend_dist / "vite.svg"))
+        svg = _frontend_dist / "vite.svg"
+        if svg.is_file():
+            return FileResponse(str(svg))
+        return FileResponse(str(_index_html))
+
+    # Root route — serves index.html directly (ensures / works without middleware)
+    @app.get("/")
+    async def serve_index():
+        return FileResponse(str(_index_html))
 else:
-    logger.warning(f"Frontend dist not found at {_frontend_dist}; UI will not be served.")
+    logger.warning(
+        "Frontend dist not found; UI will not be served. "
+        "Build the frontend with 'npm run build' in the frontend/ directory, "
+        "or set PLAYARR_DEV=1 and run the Vite dev server separately."
+    )

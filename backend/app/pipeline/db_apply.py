@@ -1,4 +1,6 @@
 """
+⚠️  LEGACY — Superseded by pipeline_url/ and pipeline_lib/. Do not modify.
+
 Serial DB apply executor.
 
 Consumes a mutation plan (dict) and applies ALL database writes in a single

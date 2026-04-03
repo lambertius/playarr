@@ -334,7 +334,7 @@ export function LibraryPage() {
             )}
           </button>
         </Tooltip>
-        <Tooltip content="Run metadata scrapers on selected videos. Choose sources in the options dialog.">
+        <Tooltip content="Run metadata scrapers on selected videos. Locked fields are never overwritten.">
           <button
             onClick={() => {
               if (selectedIds.size === 0) {

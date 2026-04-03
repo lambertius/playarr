@@ -9,7 +9,7 @@ import threading
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from sqlalchemy import func
@@ -20,6 +20,28 @@ from app.services.preview_generator import generate_preview
 
 router = APIRouter(prefix="/api/playback", tags=["Playback"])
 logger = logging.getLogger(__name__)
+
+
+# ── Cached artwork helper ──────────────────────────────────
+# Artwork images change rarely.  Aggressive caching prevents repeated
+# poster fetches from exhausting the DB connection pool when browsing
+# large library pages (48–192 cards per page).
+
+def _cached_file_response(asset, request: Request) -> Response:
+    """Return a FileResponse with cache headers + ETag for a MediaAsset."""
+    etag = f'"{asset.file_hash}"' if getattr(asset, "file_hash", None) else None
+
+    # If the client already has this version, return 304
+    if etag:
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match.strip() == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+
+    headers = {"Cache-Control": "public, max-age=86400"}
+    if etag:
+        headers["ETag"] = etag
+    return FileResponse(asset.file_path, headers=headers)
+
 
 # ── Active streaming process registry ──────────────────────
 # Maps normalised file path → set of subprocess.Popen objects.
@@ -204,21 +226,18 @@ async def get_preview(video_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/asset/{asset_id}")
-async def get_asset(asset_id: int, db: Session = Depends(get_db)):
+async def get_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
     """Serve any MediaAsset file by its ID. Only serves valid assets."""
     asset = db.query(MediaAsset).get(asset_id)
     if not asset or not os.path.isfile(asset.file_path):
         raise HTTPException(status_code=404, detail="Asset not found")
     if getattr(asset, "status", "valid") not in ("valid", "pending", None):
         raise HTTPException(status_code=404, detail="Asset is invalid")
-    headers = {"Cache-Control": "no-cache, must-revalidate"}
-    if getattr(asset, "file_hash", None):
-        headers["ETag"] = f'"{asset.file_hash}"'
-    return FileResponse(asset.file_path, headers=headers)
+    return _cached_file_response(asset, request)
 
 
 @router.get("/poster/{video_id}")
-async def get_poster(video_id: int, db: Session = Depends(get_db)):
+async def get_poster(video_id: int, request: Request, db: Session = Depends(get_db)):
     """Get the poster image for a video. Only serves valid assets."""
     asset = (
         db.query(MediaAsset)
@@ -232,11 +251,11 @@ async def get_poster(video_id: int, db: Session = Depends(get_db)):
     if not asset or not os.path.isfile(asset.file_path):
         raise HTTPException(status_code=404, detail="Poster not found")
 
-    return FileResponse(asset.file_path)
+    return _cached_file_response(asset, request)
 
 
 @router.get("/artwork/{video_id}/{asset_type}")
-async def get_artwork(video_id: int, asset_type: str, db: Session = Depends(get_db)):
+async def get_artwork(video_id: int, asset_type: str, request: Request, db: Session = Depends(get_db)):
     """Serve artwork for a video by asset type (artist_thumb, album_thumb, etc.)."""
     allowed_types = {"artist_thumb", "album_thumb"}
     if asset_type not in allowed_types:
@@ -252,11 +271,11 @@ async def get_artwork(video_id: int, asset_type: str, db: Session = Depends(get_
     )
     if not asset or not os.path.isfile(asset.file_path):
         raise HTTPException(status_code=404, detail=f"{asset_type} not found")
-    return FileResponse(asset.file_path)
+    return _cached_file_response(asset, request)
 
 
 @router.get("/thumb/{video_id}")
-async def get_video_thumb(video_id: int, db: Session = Depends(get_db)):
+async def get_video_thumb(video_id: int, request: Request, db: Session = Depends(get_db)):
     """Get the video player thumbnail (selected scene analysis frame). Only serves valid assets."""
     asset = (
         db.query(MediaAsset)
@@ -270,7 +289,7 @@ async def get_video_thumb(video_id: int, db: Session = Depends(get_db)):
     if not asset or not os.path.isfile(asset.file_path):
         raise HTTPException(status_code=404, detail="Video thumbnail not found")
 
-    return FileResponse(asset.file_path)
+    return _cached_file_response(asset, request)
 
 
 @router.put("/artwork/{video_id}/{asset_type}")

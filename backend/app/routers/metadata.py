@@ -337,7 +337,7 @@ def refresh_single(video_id: int, db: Session = Depends(get_db)):
         job_type="metadata_refresh",
         status=JobStatus.queued,
         video_id=video_id,
-        display_name=f"Refresh: {item.artist} - {item.title}",
+        display_name=f"{item.artist} \u2013 {item.title} \u203a Metadata Refresh",
         action_label="Metadata Refresh",
     )
     db.add(job)
@@ -365,11 +365,16 @@ def refresh_all(db: Session = Depends(get_db)):
     db.commit()
     db.refresh(parent)
 
+    # Pre-fetch display names for children
+    _refresh_vids = db.query(VideoItem).filter(VideoItem.id.in_(ids)).all()
+    _refresh_names = {v.id: f"{v.artist} \u2013 {v.title}" for v in _refresh_vids if v.artist and v.title}
     sub_ids = []
     for vid in ids:
+        _rn = _refresh_names.get(vid)
         child = ProcessingJob(
             job_type="metadata_refresh", status=JobStatus.queued, video_id=vid,
             action_label="Metadata Refresh",
+            display_name=f"{_rn} \u203a Metadata Refresh" if _rn else None,
         )
         db.add(child)
         db.flush()
@@ -407,6 +412,7 @@ def refresh_missing(db: Session = Depends(get_db)):
         child = ProcessingJob(
             job_type="metadata_refresh", status=JobStatus.queued, video_id=v.id,
             action_label="Metadata Refresh",
+            display_name=f"{v.artist} \u2013 {v.title} \u203a Metadata Refresh" if v.artist and v.title else None,
         )
         db.add(child)
         db.flush()

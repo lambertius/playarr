@@ -1,4 +1,6 @@
 """
+⚠️  LEGACY — Superseded by pipeline_url/ and pipeline_lib/. Do not modify.
+
 Staged pipeline orchestrator.
 
 Public entry points:
@@ -143,8 +145,20 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
         ws.update_stage("apply", "complete")
         ws.write_artifact("apply_result", {"video_id": video_id})
         ws.log(f"Applied to DB — video_id={video_id}")
-        # Update display name to resolved artist - title
-        _display = f"{plan['video'].get('artist', '')} - {plan['video'].get('title', '')}"
+        # Update display name to resolved artist - title with job type
+        _artist_d = plan['video'].get('artist', '')
+        _title_d = plan['video'].get('title', '')
+        _display = f"{_artist_d} \u2013 {_title_d}"
+        # Read action_label from job to include job type in display name
+        from app.database import CosmeticSessionLocal as _LabelSL
+        from app.models import ProcessingJob as _LabelPJ
+        _label_db = _LabelSL()
+        try:
+            _label_job = _label_db.query(_LabelPJ).get(job_id)
+            if _label_job and _label_job.action_label:
+                _display = f"{_display} \u203a {_label_job.action_label}"
+        finally:
+            _label_db.close()
         _coarse_update(job_id, display_name=_display)
 
         # Write Playarr XML sidecar

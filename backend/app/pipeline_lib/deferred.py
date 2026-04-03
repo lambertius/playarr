@@ -1353,6 +1353,19 @@ def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
                     time.sleep(delay)
                 else:
                     ws.log(f"AI enrichment: {e}", level="warning")
+                    # Flag the video for human review so it's easy to find
+                    try:
+                        db2 = SessionLocal()
+                        try:
+                            item = db2.query(VideoItem).get(video_id)
+                            if item and (item.review_status or "none") == "none":
+                                item.review_status = "needs_human_review"
+                                item.review_reason = f"AI enrichment failed: {e}"
+                                db2.commit()
+                        finally:
+                            db2.close()
+                    except Exception:
+                        pass
                     return
         finally:
             db.close()

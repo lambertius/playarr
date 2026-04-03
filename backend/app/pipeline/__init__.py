@@ -1,7 +1,14 @@
 """
-Staged import pipeline for Playarr.
+⚠️  LEGACY PIPELINE — Do not modify without a refactor plan.
 
-Architecture:
+This is the original staged import pipeline. It has been superseded by:
+  - pipeline_url/  (URL-based imports — YouTube, Vimeo)
+  - pipeline_lib/  (library file imports)
+
+Kept for reference. Active import tasks use pipeline_url and pipeline_lib.
+See docs/KNOWN_ISSUES.md for consolidation plans.
+
+Original architecture:
   Stage A — Minimal DB registration (ProcessingJob exists, status set)
   Stage B — Parallel workspace build (all heavy I/O, no locks, no DB writes)
   Stage C — Serial apply (short DB transaction under _apply_lock)

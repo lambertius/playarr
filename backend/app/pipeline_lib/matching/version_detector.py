@@ -49,7 +49,7 @@ _COVER_PATTERN_BY = re.compile(
     re.IGNORECASE,
 )
 
-# Live indicators
+# Live indicators — used for titles and filenames where a bare "live" is meaningful
 _LIVE_KEYWORDS = re.compile(
     r"\b(?:live|live\s+at|live\s+from|live\s+in|live\s+on|concert|unplugged"
     r"|mtv\s+unplugged|acoustic\s+live|session|sessions|tiny\s+desk"
@@ -57,6 +57,20 @@ _LIVE_KEYWORDS = re.compile(
     r"|jools\s+holland|later\s*\.\.\.\s*with|glastonbury|coachella|lollapalooza"
     r"|bonnaroo|sxsw|festival|on\s+stage|in\s+concert|live\s+performance"
     r"|live\s+session|bbc\s+(?:live|session|radio)|kexp|audiotree"
+    r"|npr\s+(?:music|tiny)|colors?\s+(?:show|studio)|mahogany\s+sessions?)\b",
+    re.IGNORECASE,
+)
+
+# Stricter live indicators for descriptions — excludes bare "live", "session",
+# and "festival" which appear routinely in YouTube promo boilerplate
+# (e.g. "Live Performances" playlist links, "watch them live at festivals").
+_LIVE_KEYWORDS_DESC = re.compile(
+    r"\b(?:live\s+at|live\s+from|live\s+in|live\s+on|recorded\s+live"
+    r"|concert|unplugged|mtv\s+unplugged|acoustic\s+live|tiny\s+desk"
+    r"|late\s+show|tonight\s+show|jimmy\s+(?:fallon|kimmel)|conan"
+    r"|jools\s+holland|later\s*\.\.\.\s*with|glastonbury|coachella|lollapalooza"
+    r"|bonnaroo|sxsw|on\s+stage|in\s+concert|live\s+session"
+    r"|bbc\s+(?:live|session|radio)|kexp|audiotree"
     r"|npr\s+(?:music|tiny)|colors?\s+(?:show|studio)|mahogany\s+sessions?)\b",
     re.IGNORECASE,
 )
@@ -274,7 +288,9 @@ def _check_description_keywords(signals: List[VersionSignal], description: str):
             "Cover keyword found in description",
         ))
 
-    if _LIVE_KEYWORDS.search(desc):
+    # Use the stricter description regex — bare "live", "session", "festival"
+    # appear routinely in YouTube promo boilerplate and cause false positives.
+    if _LIVE_KEYWORDS_DESC.search(desc):
         signals.append(VersionSignal(
             "description_keywords", "live", 0.50,
             "Live keyword found in description",
