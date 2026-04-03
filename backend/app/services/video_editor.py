@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 
 from app.subprocess_utils import HIDE_WINDOW
 import tempfile
@@ -358,8 +359,10 @@ def encode_video(
     # OS buffer and block the process while we only read stdout for progress.
     stderr_tmp = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
 
+    _popen_flags = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
     process = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=stderr_tmp, text=True,
+        **_popen_flags,
     )
 
     # Read progress from stdout
