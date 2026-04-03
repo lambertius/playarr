@@ -403,54 +403,102 @@ def browse_directories():
 
 
 def _win32_browse_folder() -> str:
-    """Native Windows folder picker using COM (works in frozen exe)."""
+    """Modern Windows folder picker using IFileOpenDialog (Explorer-style)."""
+    # Use PowerShell to invoke IFileOpenDialog via .NET COM interop.
+    # This gives the full Explorer window with navigation pane, breadcrumbs, etc.
+    ps_script = r'''
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+public class FileOpenDialogCOM { }
+
+[ComImport, Guid("42F85136-DB7E-439C-85F1-E4075D135FC8"),
+ InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IFileDialog {
+    [PreserveSig] int Show(IntPtr hwndOwner);
+    void SetFileTypes(uint c, IntPtr f);
+    void SetFileTypeIndex(uint i);
+    void GetFileTypeIndex(out uint i);
+    void Advise(IntPtr e, out uint c);
+    void Unadvise(uint c);
+    void SetOptions(uint o);
+    void GetOptions(out uint o);
+    void SetDefaultFolder(IShellItem f);
+    void SetFolder(IShellItem f);
+    void GetFolder(out IShellItem f);
+    void GetCurrentSelection(out IShellItem s);
+    void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string n);
+    void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string n);
+    void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string t);
+    void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string t);
+    void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string t);
+    void GetResult(out IShellItem i);
+    void AddPlace(IShellItem s, int a);
+    void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string e);
+    void Close(int hr);
+    void SetClientGuid(ref Guid g);
+    void ClearClientData();
+    void SetFilter(IntPtr f);
+}
+
+[ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"),
+ InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IShellItem {
+    void BindToHandler(IntPtr p, ref Guid b, ref Guid r, out IntPtr v);
+    void GetParent(out IShellItem i);
+    void GetDisplayName(uint n, [MarshalAs(UnmanagedType.LPWStr)] out string s);
+    void GetAttributes(uint m, out uint a);
+    void Compare(IShellItem i, uint h, out int o);
+}
+
+public static class FolderPicker {
+    public static string Pick() {
+        IFileDialog d = (IFileDialog)new FileOpenDialogCOM();
+        d.SetOptions(0x20 | 0x40);
+        d.SetTitle("Select Directory");
+        if (d.Show(IntPtr.Zero) != 0) return "";
+        IShellItem r; d.GetResult(out r);
+        string p; r.GetDisplayName(0x80058000u, out p);
+        return p ?? "";
+    }
+}
+"@ -ReferencedAssemblies System.Runtime.InteropServices
+
+Write-Output ([FolderPicker]::Pick())
+'''
     try:
-        import ctypes
-        import ctypes.wintypes
-
-        # Use SHBrowseForFolder via ctypes — no Tkinter needed
-        BIF_RETURNONLYFSDIRS = 0x0001
-        BIF_NEWDIALOGSTYLE = 0x0040
-
-        class BROWSEINFO(ctypes.Structure):
-            _fields_ = [
-                ("hwndOwner", ctypes.wintypes.HWND),
-                ("pidlRoot", ctypes.c_void_p),
-                ("pszDisplayName", ctypes.c_wchar_p),
-                ("lpszTitle", ctypes.c_wchar_p),
-                ("ulFlags", ctypes.c_uint),
-                ("lpfn", ctypes.c_void_p),
-                ("lParam", ctypes.c_void_p),
-                ("iImage", ctypes.c_int),
-            ]
-
-        shell32 = ctypes.windll.shell32
-        ole32 = ctypes.windll.ole32
-        ole32.CoInitialize(None)
-
-        buf = ctypes.create_unicode_buffer(260)
-        bi = BROWSEINFO()
-        bi.hwndOwner = 0
-        bi.pidlRoot = None
-        bi.pszDisplayName = ctypes.cast(buf, ctypes.c_wchar_p)
-        bi.lpszTitle = "Select Directory"
-        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
-        bi.lpfn = None
-        bi.lParam = None
-
-        pidl = shell32.SHBrowseForFolderW(ctypes.byref(bi))
-        if pidl:
-            path_buf = ctypes.create_unicode_buffer(260)
-            shell32.SHGetPathFromIDListW(pidl, path_buf)
-            ole32.CoTaskMemFree(pidl)
-            ole32.CoUninitialize()
-            return path_buf.value
-
-        ole32.CoUninitialize()
-        return ""
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True, text=True, timeout=120,
+        )
+        path = result.stdout.strip()
+        if path:
+            return path
     except Exception:
-        # Fall back to Tkinter if COM fails
-        return _tkinter_browse_folder()
+        pass
+    # Final fallback
+    return _powershell_browse_folder()
+
+
+def _powershell_browse_folder() -> str:
+    """Fallback Explorer-style folder picker via PowerShell .NET dialog."""
+    try:
+        ps_script = (
+            "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$d.Description = 'Select Directory'; "
+            "$d.ShowNewFolderButton = $true; "
+            "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath } else { '' }"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True, text=True, timeout=120,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
 
 
 def _tkinter_browse_folder() -> str:
