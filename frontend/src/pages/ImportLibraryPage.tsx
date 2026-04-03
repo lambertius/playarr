@@ -115,6 +115,10 @@ export function ImportLibraryPage() {
     scanMutation.mutate(req, {
       onSuccess: (data) => {
         setScanResults(data.items);
+        // Auto-select in_place when scanning inside the library directory
+        if (data.scan_is_library) {
+          setOptions((prev) => ({ ...prev, file_handling: "in_place" as const }));
+        }
         // Select all new items by default
         const newItems = new Set(
           data.items.filter((i) => !i.already_exists).map((i) => i.file_path),
@@ -530,6 +534,7 @@ function OptionsStep({
         </h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {([
+            { key: "in_place", label: "Keep in Place", desc: "Register videos where they are. No files are copied or moved." },
             { key: "copy", label: "Copy", desc: "Copy videos to the default library directory. Originals stay in place." },
             { key: "move", label: "Move", desc: "Move videos to the default library directory. Originals are removed." },
             { key: "copy_to", label: "Copy To", desc: "Copy videos to a custom destination directory. Originals stay in place." },
@@ -537,7 +542,7 @@ function OptionsStep({
           ] as const).map(({ key, label, desc }) => (
             <button
               key={key}
-              onClick={() => update({ file_handling: key, ...(key === "copy" || key === "move" ? { custom_destination: null } : {}) })}
+              onClick={() => update({ file_handling: key, ...(key === "copy" || key === "move" || key === "in_place" ? { custom_destination: null } : {}) })}
               className={`p-4 rounded-lg border text-left transition-colors ${
                 options.file_handling === key
                   ? "border-accent bg-accent/10"
@@ -945,6 +950,7 @@ function PreviewStep({
           </div>
           <div>
             <strong>Files:</strong> {{
+              in_place: "Keep in place",
               copy: "Copy to library",
               move: "Move to library",
               copy_to: `Copy to ${options.custom_destination || "custom dir"}`,
@@ -1274,7 +1280,7 @@ function ImportStep({
           </div>
         )}
         <p className="text-xs text-text-muted mt-2">
-          Files will be {options.file_handling.startsWith("move") ? "moved" : "copied"} to {options.file_handling.endsWith("_to") ? (options.custom_destination || "a custom directory") : "the library directory"}.
+          Files will be {options.file_handling === "in_place" ? "registered where they are" : options.file_handling.startsWith("move") ? "moved" : "copied"}{options.file_handling !== "in_place" ? ` to ${options.file_handling.endsWith("_to") ? (options.custom_destination || "a custom directory") : "the library directory"}` : ""}.
           {options.normalize_audio && " Audio will be normalised."}
           {options.find_source_video && " YouTube sources will be searched."}
         </p>

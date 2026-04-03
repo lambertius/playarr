@@ -1077,6 +1077,7 @@ export interface LibraryImportScanResponse {
   items: LibraryImportScannedItem[];
   already_in_library: number;
   new_items: number;
+  scan_is_library: boolean;
 }
 
 export interface LibraryImportScanRequest {
@@ -1087,7 +1088,7 @@ export interface LibraryImportScanRequest {
 
 export interface LibraryImportOptions {
   mode: "simple" | "advanced";
-  file_handling: "copy" | "move" | "copy_to" | "move_to";
+  file_handling: "copy" | "move" | "copy_to" | "move_to" | "in_place";
   custom_destination?: string | null;
   normalize_audio: boolean;
   find_source_video: boolean;

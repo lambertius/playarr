@@ -450,9 +450,11 @@ def _step_parse_identity(ws: ImportWorkspace, source_path: str, options: dict) -
     source_url = ""
     confidence = 0.0
 
-    # Check for existing .playarr.xml (used by Trust Existing / Trust & Review)
+    # Check for existing .playarr.xml (used by Trust Existing / Trust & Review,
+    # or automatically in in_place mode)
     review_mode = options.get("review_mode", "skip")
-    if review_mode in ("basic", "advanced"):
+    file_handling = options.get("file_handling", "copy")
+    if review_mode in ("basic", "advanced") or file_handling == "in_place":
         from app.services.playarr_xml import find_playarr_xml, parse_playarr_xml
         source_dir = os.path.dirname(source_path)
         xml_path = find_playarr_xml(source_dir)
@@ -690,10 +692,26 @@ def _step_duplicate_precheck(ws: ImportWorkspace, artist: str, title: str,
 def _step_organize_file(ws: ImportWorkspace, source_path: str,
                         artist: str, title: str, resolution_label: str,
                         options: dict) -> None:
-    """Copy or move the source file into the library."""
+    """Copy or move the source file into the library, or register in place."""
     if ws.is_stage_complete("organize_file"):
         return
     ws.update_stage("organize_file", "running")
+
+    file_handling = options.get("file_handling", "copy")
+
+    # ── In-place mode: register files where they already are ─────────
+    if file_handling == "in_place":
+        folder = os.path.dirname(source_path)
+        file_size = os.path.getsize(source_path) if os.path.isfile(source_path) else 0
+        ws.write_artifact("organized", {
+            "new_folder": folder,
+            "new_file": source_path,
+            "resolution_label": resolution_label,
+            "file_size_bytes": file_size,
+        })
+        ws.log(f"In-place: {folder}")
+        ws.update_stage("organize_file", "complete")
+        return
 
     from app.pipeline_lib.services.file_organizer import organize_file, build_folder_name, build_library_subpath
     from app.config import get_settings
@@ -793,20 +811,33 @@ def _step_organize_file(ws: ImportWorkspace, source_path: str,
 
 def _step_copy_artwork(ws: ImportWorkspace, source_path: str,
                        new_folder: str, new_file: str) -> None:
-    """Copy poster/thumb from source directory."""
+    """Copy poster/thumb from source directory (or reference in place)."""
     if ws.is_stage_complete("copy_artwork"):
         return
     ws.update_stage("copy_artwork", "running")
 
     from app.pipeline_lib.services.nfo_parser import find_artwork_for_video
 
+    input_data = ws.read_artifact("input") or {}
+    file_handling = (input_data.get("options") or {}).get("file_handling", "copy")
+
     artwork = find_artwork_for_video(source_path)
     assets = []
     for art_type, art_path in artwork.items():
         if art_path and os.path.isfile(art_path):
-            ext = os.path.splitext(art_path)[1]
-            basename = os.path.splitext(os.path.basename(new_file))[0]
-            dest = os.path.join(new_folder, f"{basename}-{art_type}{ext}")
+            if file_handling == "in_place":
+                # Reference existing artwork directly — no copy needed
+                assets.append({
+                    "asset_type": art_type,
+                    "file_path": art_path,
+                    "source_url": "",
+                    "provenance": "library_source",
+                })
+                ws.log(f"Found {art_type}: {os.path.basename(art_path)}")
+            else:
+                ext = os.path.splitext(art_path)[1]
+                basename = os.path.splitext(os.path.basename(new_file))[0]
+                dest = os.path.join(new_folder, f"{basename}-{art_type}{ext}")
             try:
                 shutil.copy2(art_path, dest)
                 assets.append({
@@ -854,9 +885,20 @@ def _step_normalize_audio(ws: ImportWorkspace, file_path: str, options: dict) ->
 
 def _step_write_nfo(ws: ImportWorkspace, folder: str, identity: dict,
                     resolution_label: str, params: dict) -> None:
-    """Write initial NFO file."""
+    """Write initial NFO file (skipped in in_place mode if NFO already exists)."""
     if ws.is_stage_complete("nfo_write"):
         return
+
+    # In in_place mode, don't overwrite an existing NFO
+    file_handling = (params.get("options") or {}).get("file_handling", "copy")
+    if file_handling == "in_place":
+        from app.pipeline_lib.services.nfo_parser import find_nfo_for_video
+        source_path = params.get("file_path", "")
+        if source_path and find_nfo_for_video(source_path):
+            ws.log("NFO already exists, skipping write (in-place mode)")
+            ws.update_stage("nfo_write", "skipped")
+            return
+
     ws.update_stage("nfo_write", "running")
 
     from app.pipeline_lib.services.file_organizer import write_nfo_file

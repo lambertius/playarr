@@ -65,6 +65,7 @@ class ScanResponse(BaseModel):
     items: List[ScannedItem]
     already_in_library: int
     new_items: int
+    scan_is_library: bool = False  # True when scanned dir is inside the library
 
 
 class RegexPreviewRequest(BaseModel):
@@ -91,7 +92,7 @@ class ImportOptions(BaseModel):
     """Configuration for the library import process."""
     # Core settings
     mode: str = Field("simple", description="'simple' or 'advanced'")
-    file_handling: str = Field("copy", description="'copy', 'move', 'copy_to', or 'move_to'")
+    file_handling: str = Field("copy", description="'copy', 'move', 'copy_to', 'move_to', or 'in_place'")
     custom_destination: Optional[str] = Field(None, description="Custom destination directory for copy_to/move_to modes")
     normalize_audio: bool = Field(False, description="Run audio normalization on imported videos")
 
@@ -250,11 +251,19 @@ def scan_directory(req: ScanRequest, db: Session = Depends(get_db)):
 
         items.append(item)
 
+    # Detect if scanned directory is inside (or is) the library
+    from app.config import get_settings
+    _settings = get_settings()
+    _norm_scan = os.path.normcase(os.path.normpath(req.directory))
+    _norm_lib = os.path.normcase(os.path.normpath(_settings.library_dir))
+    _scan_is_library = _norm_scan == _norm_lib or _norm_scan.startswith(_norm_lib + os.sep)
+
     return ScanResponse(
         total_found=len(items),
         items=items,
         already_in_library=already_count,
         new_items=len(items) - already_count,
+        scan_is_library=_scan_is_library,
     )
 
 
