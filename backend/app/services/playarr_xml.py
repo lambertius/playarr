@@ -204,6 +204,17 @@ def build_playarr_xml(video, db: Session) -> Element:
                 _txt(lf, "field", field)
     _opt(flags, "review_status", video.review_status if video.review_status != "none" else None)
     _opt(flags, "review_reason", video.review_reason)
+    _opt(flags, "review_category", video.review_category)
+
+    # ── related versions ──
+    if video.related_versions:
+        import json as _json
+        rv_el = SubElement(root, "related_versions")
+        rv_data = video.related_versions if isinstance(video.related_versions, list) else []
+        for rv in rv_data:
+            entry = SubElement(rv_el, "entry")
+            _opt(entry, "video_id", rv.get("video_id"))
+            _opt(entry, "label", rv.get("label"))
 
     # ── entity references (for cross-referencing on reimport) ──
     if video.artist_entity_id or video.album_entity_id or video.track_id:
@@ -489,6 +500,19 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         review_reason = _text(flags_el.find("review_reason"))
         if review_reason:
             result["review_reason"] = review_reason
+        review_cat = _text(flags_el.find("review_category"))
+        if review_cat:
+            result["review_category"] = review_cat
+
+    # ── related versions ──
+    rv_el = root.find("related_versions")
+    if rv_el is not None:
+        result["related_versions"] = []
+        for entry in rv_el.findall("entry"):
+            result["related_versions"].append({
+                "video_id": _int(entry.find("video_id")),
+                "label": _text(entry.find("label")) or None,
+            })
 
     # ── entity refs ──
     refs = root.find("entity_refs")
@@ -516,6 +540,15 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
                 "original_artist": _text(te.find("original_artist")) or None,
                 "original_title": _text(te.find("original_title")) or None,
             }
+
+    # ── field provenance (video-level) ──
+    prov_el = root.find("field_provenance")
+    if prov_el is not None:
+        result["field_provenance"] = {}
+        for f in prov_el.findall("field"):
+            fname = f.get("name")
+            if fname and f.text:
+                result["field_provenance"][fname] = f.text.strip()
 
     # ── timestamps ──
     ts = root.find("timestamps")

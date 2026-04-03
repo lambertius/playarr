@@ -1085,6 +1085,18 @@ def _rescan_from_disk(job_id: int, video_id: int,
     # Flags
     xml_locked_fields = data.get("locked_fields")
     xml_exclude_editor = data.get("exclude_from_editor_scan", False)
+    xml_review_status = data.get("review_status")
+    xml_review_reason = data.get("review_reason")
+    xml_review_category = data.get("review_category")
+
+    # Import method / provenance
+    xml_import_method = data.get("import_method")
+
+    # Field provenance (video-level)
+    xml_field_provenance = data.get("field_provenance")
+
+    # Related versions
+    xml_related_versions = data.get("related_versions")
 
     _update_job(job_id, current_step="Applying XML data", progress_percent=30)
 
@@ -1153,11 +1165,10 @@ def _rescan_from_disk(job_id: int, video_id: int,
             video_item.plot = xml_plot
 
             # Version info
-            if xml_version_type and xml_version_type != "normal":
-                video_item.version_type = xml_version_type
-                video_item.alternate_version_label = xml_alt_label
-                video_item.original_artist = xml_original_artist
-                video_item.original_title = xml_original_title
+            video_item.version_type = xml_version_type or "normal"
+            video_item.alternate_version_label = xml_alt_label
+            video_item.original_artist = xml_original_artist
+            video_item.original_title = xml_original_title
 
             # MusicBrainz IDs
             video_item.mb_artist_id = xml_mb_artist_id
@@ -1179,10 +1190,6 @@ def _rescan_from_disk(job_id: int, video_id: int,
                 video_item.video_rating = xml_video_rating
                 video_item.video_rating_set = True
 
-            # Loudness (stored in quality_signature)
-            if xml_loudness is not None and video_item.quality_signature:
-                video_item.quality_signature.loudness_lufs = xml_loudness
-
             # Resolution label
             if xml_resolution_label:
                 video_item.resolution_label = xml_resolution_label
@@ -1203,6 +1210,38 @@ def _rescan_from_disk(job_id: int, video_id: int,
 
             # Exclude from editor scan
             video_item.exclude_from_editor_scan = xml_exclude_editor
+
+            # Review status
+            if xml_review_status:
+                video_item.review_status = xml_review_status
+            if xml_review_reason:
+                video_item.review_reason = xml_review_reason
+            if xml_review_category:
+                video_item.review_category = xml_review_category
+
+            # Import method
+            if xml_import_method:
+                video_item.import_method = xml_import_method
+
+            # Field provenance
+            if xml_field_provenance:
+                video_item.field_provenance = xml_field_provenance
+
+            # Related versions
+            if xml_related_versions:
+                video_item.related_versions = xml_related_versions
+
+            # Full quality signature restore
+            if xml_quality and video_item.quality_signature:
+                qs = video_item.quality_signature
+                for qfield in ("width", "height", "fps", "video_codec",
+                                "video_bitrate", "hdr", "audio_codec",
+                                "audio_bitrate", "audio_sample_rate",
+                                "audio_channels", "container",
+                                "duration_seconds", "loudness_lufs"):
+                    val = xml_quality.get(qfield)
+                    if val is not None:
+                        setattr(qs, qfield, val)
 
             # Sources — restore all from XML
             # Clear existing non-video sources first, then upsert all
