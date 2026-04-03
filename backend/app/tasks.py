@@ -1089,14 +1089,14 @@ def _rescan_from_disk(job_id: int, video_id: int,
     _update_job(job_id, current_step="Applying XML data", progress_percent=30)
 
     # --- Resolve entities (network-free, uses cached MB data from XML) ---
-    from app.services.entity_resolution import (
+    from app.metadata.resolver import (
         resolve_artist, resolve_album, resolve_track,
-    )
-    from app.services.entity_management import (
         get_or_create_artist, get_or_create_album, get_or_create_track,
-        get_or_create_canonical_track, link_video_to_canonical_track,
-        save_revision,
     )
+    from app.services.canonical_track import (
+        get_or_create_canonical_track, link_video_to_canonical_track,
+    )
+    from app.metadata.revisions import save_revision
 
     resolved_artist = {}
     resolved_album = {}
