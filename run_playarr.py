@@ -75,12 +75,12 @@ def validate_environment(port: int) -> list[StartupError]:
             fatal=True,
         ))
 
-    # ffmpeg
+    # ffmpeg (not fatal — app starts but video processing won't work)
     if not shutil.which("ffmpeg"):
         errors.append(StartupError(
             "ffmpeg",
-            "ffmpeg not found on PATH. Install ffmpeg and ensure it is on your system PATH.",
-            fatal=True,
+            "ffmpeg not found on PATH. Video processing will not work until ffmpeg is installed.",
+            fatal=False,
         ))
 
     # ffprobe
@@ -88,7 +88,7 @@ def validate_environment(port: int) -> list[StartupError]:
         errors.append(StartupError(
             "ffprobe",
             "ffprobe not found on PATH. It is usually included with ffmpeg.",
-            fatal=True,
+            fatal=False,
         ))
 
     # yt-dlp (not fatal — library import works without it)
