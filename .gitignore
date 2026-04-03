@@ -75,6 +75,7 @@ frontend-old/
 # ── Build Output ──
 dist/
 build/
+Output/
 *.spec.bak
 *.ico
 __pycache__/
