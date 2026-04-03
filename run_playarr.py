@@ -76,7 +76,20 @@ def validate_environment(port: int) -> list[StartupError]:
         ))
 
     # ffmpeg (not fatal — app starts but video processing won't work)
-    if not shutil.which("ffmpeg"):
+    def _find_tool(name: str) -> bool:
+        if shutil.which(name):
+            return True
+        # Check bundled location next to exe
+        if _IS_FROZEN:
+            for candidate in [
+                os.path.join(_SCRIPT_DIR, f"{name}.exe"),
+                os.path.join(_SCRIPT_DIR, "tools", f"{name}.exe"),
+            ]:
+                if os.path.isfile(candidate):
+                    return True
+        return False
+
+    if not _find_tool("ffmpeg"):
         errors.append(StartupError(
             "ffmpeg",
             "ffmpeg not found on PATH. Video processing will not work until ffmpeg is installed.",
@@ -84,7 +97,7 @@ def validate_environment(port: int) -> list[StartupError]:
         ))
 
     # ffprobe
-    if not shutil.which("ffprobe"):
+    if not _find_tool("ffprobe"):
         errors.append(StartupError(
             "ffprobe",
             "ffprobe not found on PATH. It is usually included with ffmpeg.",
@@ -92,7 +105,7 @@ def validate_environment(port: int) -> list[StartupError]:
         ))
 
     # yt-dlp (not fatal — library import works without it)
-    if not shutil.which("yt-dlp"):
+    if not _find_tool("yt-dlp"):
         errors.append(StartupError(
             "yt-dlp",
             "yt-dlp not found on PATH. URL imports will not work until yt-dlp is installed.",

@@ -9,6 +9,7 @@ or detected git repo), dirs remain repo-relative for backward-compat.
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from functools import lru_cache
 from typing import Optional, Literal
@@ -98,13 +99,19 @@ class Settings(BaseSettings):
             found = shutil.which(tool_name)
             if found:
                 return found
+            # Check adjacent to the executable (bundled installs)
+            bundled_paths = []
+            if getattr(sys, "frozen", False):
+                exe_dir = os.path.dirname(sys.executable)
+                bundled_paths.append(os.path.join(exe_dir, f"{tool_name}.exe"))
+                bundled_paths.append(os.path.join(exe_dir, "tools", f"{tool_name}.exe"))
             # Try common Windows locations
             common_paths = [
                 os.path.join(os.environ.get("APPDATA", ""), f"{tool_name}.exe"),
                 os.path.join(os.environ.get("LOCALAPPDATA", ""), f"{tool_name}.exe"),
                 rf"C:\ffmpeg\bin\{tool_name}.exe",
             ]
-            for p in common_paths:
+            for p in bundled_paths + common_paths:
                 if os.path.isfile(p):
                     return p
             raise FileNotFoundError(

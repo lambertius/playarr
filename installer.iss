@@ -55,6 +55,10 @@ Source: "dist\Playarr\_internal\*"; DestDir: "{app}\_internal"; Flags: ignorever
 ; Icon file
 Source: "playarr.ico"; DestDir: "{app}"; Flags: ignoreversion
 
+; Bundled ffmpeg + ffprobe
+Source: "tools\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "tools\ffprobe.exe"; DestDir: "{app}"; Flags: ignoreversion
+
 [Icons]
 ; Start Menu
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\playarr.ico"
@@ -93,22 +97,20 @@ begin
   Result := True;
 end;
 
-// Check for ffmpeg after install and warn if missing
+// Check for ffmpeg after install (should always pass now that we bundle it)
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ResultCode: Integer;
-  Found: Boolean;
+  FFmpegPath: String;
 begin
   if CurStep = ssPostInstall then
   begin
-    Found := Exec('cmd.exe', '/C ffmpeg -version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    if (not Found) or (ResultCode <> 0) then
+    FFmpegPath := ExpandConstant('{app}\ffmpeg.exe');
+    if not FileExists(FFmpegPath) then
     begin
-      MsgBox('Playarr requires ffmpeg to process videos.' + #13#10 + #13#10 +
-             'ffmpeg was not detected on your system PATH.' + #13#10 + #13#10 +
+      MsgBox('Warning: ffmpeg.exe was not found in the install directory.' + #13#10 + #13#10 +
+             'Playarr requires ffmpeg to process videos.' + #13#10 +
              'Please install ffmpeg and add it to your system PATH:' + #13#10 +
-             'https://ffmpeg.org/download.html' + #13#10 + #13#10 +
-             'Playarr will not be able to process videos until ffmpeg is installed.',
+             'https://ffmpeg.org/download.html',
              mbInformation, MB_OK);
     end;
   end;
