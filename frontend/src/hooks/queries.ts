@@ -267,7 +267,8 @@ export function useImportVideo() {
 export function useRescan() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (videoId: number) => jobsApi.rescan(videoId),
+    mutationFn: ({ videoId, fromDisk }: { videoId: number; fromDisk?: boolean }) =>
+      jobsApi.rescan(videoId, fromDisk),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
   });
 }

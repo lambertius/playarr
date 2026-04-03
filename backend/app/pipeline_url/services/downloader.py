@@ -121,7 +121,7 @@ def _subprocess_kwargs() -> dict:
         # CREATE_NEW_PROCESS_GROUP (0x200) isolates the child from the parent's
         # console control-handler chain so Ctrl+C in the server terminal won't
         # kill running downloads.
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     return kwargs
 
 

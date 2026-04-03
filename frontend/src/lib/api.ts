@@ -149,8 +149,10 @@ export const jobsApi = {
   import: (data: ImportRequest) =>
     api.post<JobSummary>("/jobs/import", data).then(r => r.data),
 
-  rescan: (videoId: number) =>
-    api.post<JobSummary>(`/jobs/rescan/${videoId}`).then(r => r.data),
+  rescan: (videoId: number, fromDisk?: boolean) =>
+    api.post<JobSummary>(`/jobs/rescan/${videoId}`, null, {
+      params: fromDisk ? { from_disk: true } : undefined,
+    }).then(r => r.data),
 
   redownload: (videoId: number, formatSpec?: string) =>
     api.post<JobSummary>(`/jobs/redownload/${videoId}`, null, {

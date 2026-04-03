@@ -1003,6 +1003,429 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
 
 
 # ---------------------------------------------------------------------------
+# Rescan from disk — restore metadata from .playarr.xml sidecar
+# ---------------------------------------------------------------------------
+
+def _rescan_from_disk(job_id: int, video_id: int,
+                      folder_path: str, file_path: str,
+                      normalize: bool = False):
+    """Read .playarr.xml and apply all stored metadata to the DB.
+
+    Restores: identity, ratings, sources, loudness, processing state,
+    genres, MusicBrainz IDs, artwork, and entity links.
+    """
+    from app.services.playarr_xml import find_playarr_xml, parse_playarr_xml
+    from app.pipeline_url.db_apply import _upsert_source
+    from app.pipeline_url.write_queue import db_write
+
+    _update_job(job_id, current_step="Reading XML sidecar", progress_percent=10)
+
+    xml_path = find_playarr_xml(folder_path) if folder_path else None
+    if not xml_path:
+        _update_job(job_id, status=JobStatus.failed,
+                    error_message="No .playarr.xml file found in video folder")
+        _append_job_log(job_id, f"No .playarr.xml found in: {folder_path}")
+        return
+
+    data = parse_playarr_xml(xml_path)
+    if not data:
+        _update_job(job_id, status=JobStatus.failed,
+                    error_message="Failed to parse .playarr.xml")
+        return
+
+    _append_job_log(job_id, f"Parsed XML: {xml_path}")
+    _set_pipeline_step(job_id, "Reading XML sidecar", "success")
+    _check_cancelled(job_id)
+
+    # Extract fields from parsed XML
+    xml_artist = data.get("artist", "")
+    xml_title = data.get("title", "")
+    xml_album = data.get("album")
+    xml_year = data.get("year")
+    xml_plot = data.get("plot")
+    xml_genres = data.get("genres", [])
+    xml_version_type = data.get("version_type", "normal")
+    xml_alt_label = data.get("alternate_version_label")
+    xml_original_artist = data.get("original_artist")
+    xml_original_title = data.get("original_title")
+
+    # MusicBrainz IDs
+    xml_mb_artist_id = data.get("mb_artist_id")
+    xml_mb_recording_id = data.get("mb_recording_id")
+    xml_mb_release_id = data.get("mb_release_id")
+    xml_mb_release_group_id = data.get("mb_release_group_id")
+
+    # Ratings
+    xml_song_rating = data.get("song_rating")
+    xml_song_rating_set = data.get("song_rating_set", False)
+    xml_video_rating = data.get("video_rating")
+    xml_video_rating_set = data.get("video_rating_set", False)
+
+    # Processing state
+    xml_processing_state = data.get("processing_state")
+
+    # Sources
+    xml_sources = data.get("sources", [])
+
+    # Quality / loudness
+    xml_quality = data.get("quality", {})
+    xml_loudness = xml_quality.get("loudness_lufs") if xml_quality else None
+
+    # Artwork
+    xml_artwork = data.get("artwork", [])
+
+    # File info
+    xml_resolution_label = data.get("resolution_label")
+    xml_audio_fingerprint = data.get("audio_fingerprint")
+    xml_acoustid_id = data.get("acoustid_id")
+
+    # Entity refs (for re-linking)
+    xml_entity_refs = data.get("entity_refs", {})
+
+    # Flags
+    xml_locked_fields = data.get("locked_fields")
+    xml_exclude_editor = data.get("exclude_from_editor_scan", False)
+
+    _update_job(job_id, current_step="Applying XML data", progress_percent=30)
+
+    # --- Resolve entities (network-free, uses cached MB data from XML) ---
+    from app.services.entity_resolution import (
+        resolve_artist, resolve_album, resolve_track,
+    )
+    from app.services.entity_management import (
+        get_or_create_artist, get_or_create_album, get_or_create_track,
+        get_or_create_canonical_track, link_video_to_canonical_track,
+        save_revision,
+    )
+
+    resolved_artist = {}
+    resolved_album = {}
+    resolved_track = {}
+    try:
+        resolved_artist = resolve_artist(
+            xml_artist, mb_artist_id=xml_mb_artist_id,
+            skip_musicbrainz=True, skip_wikipedia=True,
+        )
+    except Exception as _e:
+        _append_job_log(job_id, f"Artist resolution warning: {_e}")
+
+    if xml_album:
+        try:
+            resolved_album = resolve_album(
+                xml_artist, xml_album,
+                mb_release_id=xml_mb_release_id,
+                skip_musicbrainz=True, skip_wikipedia=True,
+            )
+        except Exception as _e:
+            _append_job_log(job_id, f"Album resolution warning: {_e}")
+
+    try:
+        resolved_track = resolve_track(
+            xml_artist, xml_title,
+            mb_recording_id=xml_mb_recording_id,
+            skip_musicbrainz=True, skip_wikipedia=True,
+        )
+    except Exception as _e:
+        _append_job_log(job_id, f"Track resolution warning: {_e}")
+
+    _check_cancelled(job_id)
+
+    # ==================================================================
+    # Write phase — apply all XML data to the database atomically
+    # ==================================================================
+    def _execute_from_disk_write():
+        db = SessionLocal()
+        try:
+            video_item = db.query(VideoItem).get(video_id)
+            if not video_item:
+                _update_job(job_id, status=JobStatus.failed,
+                            error_message="Video not found (write phase)")
+                return
+
+            # Pre-rescan snapshot
+            _save_metadata_snapshot(db, video_item, "rescan_from_disk")
+
+            # Identity fields
+            video_item.artist = xml_artist or video_item.artist
+            video_item.title = xml_title or video_item.title
+            video_item.album = xml_album
+            video_item.year = xml_year
+            video_item.plot = xml_plot
+
+            # Version info
+            if xml_version_type and xml_version_type != "normal":
+                video_item.version_type = xml_version_type
+                video_item.alternate_version_label = xml_alt_label
+                video_item.original_artist = xml_original_artist
+                video_item.original_title = xml_original_title
+
+            # MusicBrainz IDs
+            video_item.mb_artist_id = xml_mb_artist_id
+            video_item.mb_recording_id = xml_mb_recording_id
+            video_item.mb_release_id = xml_mb_release_id
+            video_item.mb_release_group_id = xml_mb_release_group_id
+
+            # Genres
+            if xml_genres:
+                video_item.genres.clear()
+                for g in xml_genres:
+                    video_item.genres.append(_get_or_create_genre(db, g))
+
+            # Ratings
+            if xml_song_rating_set:
+                video_item.song_rating = xml_song_rating
+                video_item.song_rating_set = True
+            if xml_video_rating_set:
+                video_item.video_rating = xml_video_rating
+                video_item.video_rating_set = True
+
+            # Loudness (stored in quality_signature)
+            if xml_loudness is not None and video_item.quality_signature:
+                video_item.quality_signature.loudness_lufs = xml_loudness
+
+            # Resolution label
+            if xml_resolution_label:
+                video_item.resolution_label = xml_resolution_label
+
+            # Audio fingerprint / AcoustID
+            if xml_audio_fingerprint:
+                video_item.audio_fingerprint = xml_audio_fingerprint
+            if xml_acoustid_id:
+                video_item.acoustid_id = xml_acoustid_id
+
+            # Processing state
+            if xml_processing_state:
+                video_item.processing_state = xml_processing_state
+
+            # Locked fields
+            if xml_locked_fields:
+                video_item.locked_fields = xml_locked_fields
+
+            # Exclude from editor scan
+            video_item.exclude_from_editor_scan = xml_exclude_editor
+
+            # Sources — restore all from XML
+            # Clear existing non-video sources first, then upsert all
+            from app.models import Source
+            db.query(Source).filter(
+                Source.video_id == video_id,
+            ).delete(synchronize_session="fetch")
+
+            for src_data in xml_sources:
+                _upsert_source(db, video_id, {
+                    "provider": src_data.get("provider", ""),
+                    "source_video_id": src_data.get("source_video_id", ""),
+                    "original_url": src_data.get("original_url", ""),
+                    "canonical_url": src_data.get("canonical_url", ""),
+                    "source_type": src_data.get("source_type", "video"),
+                    "provenance": src_data.get("provenance", "xml_import"),
+                    "channel_name": src_data.get("channel_name"),
+                    "platform_title": src_data.get("platform_title"),
+                    "upload_date": src_data.get("upload_date"),
+                })
+            if xml_sources:
+                _append_job_log(job_id, f"Restored {len(xml_sources)} source(s) from XML")
+
+            # Artwork — restore MediaAsset records
+            from app.models import MediaAsset
+            if xml_artwork:
+                for art in xml_artwork:
+                    art_path = art.get("file_path")
+                    if art_path and os.path.isfile(art_path):
+                        existing = db.query(MediaAsset).filter(
+                            MediaAsset.video_id == video_id,
+                            MediaAsset.asset_type == art["asset_type"],
+                            MediaAsset.file_path == art_path,
+                        ).first()
+                        if not existing:
+                            db.add(MediaAsset(
+                                video_id=video_id,
+                                asset_type=art["asset_type"],
+                                file_path=art_path,
+                                source_url=art.get("source_url"),
+                                provenance=art.get("provenance", "xml_import"),
+                                source_provider=art.get("source_provider"),
+                                file_hash=art.get("file_hash"),
+                                status=art.get("status", "valid"),
+                                width=art.get("width"),
+                                height=art.get("height"),
+                                last_validated_at=datetime.now(timezone.utc),
+                            ))
+                _append_job_log(job_id, f"Restored {len(xml_artwork)} artwork asset(s) from XML")
+
+            # Clear entity links for re-resolution
+            video_item.artist_entity_id = None
+            video_item.album_entity_id = None
+            video_item.track_id = None
+            db.flush()
+
+            # Entity resolution
+            artist_entity = None
+            album_entity = None
+            track_entity = None
+            canonical_track = None
+
+            if xml_artist:
+                try:
+                    with db.begin_nested():
+                        artist_entity = get_or_create_artist(
+                            db, xml_artist, resolved=resolved_artist,
+                        )
+                        save_revision(db, "artist", artist_entity.id, "auto_import", "rescan_from_disk")
+                except Exception as _e:
+                    _append_job_log(job_id, f"Artist entity warning: {_e}")
+
+            if xml_album and artist_entity:
+                try:
+                    with db.begin_nested():
+                        album_entity = get_or_create_album(
+                            db, artist_entity, xml_album,
+                            resolved=resolved_album,
+                        )
+                        save_revision(db, "album", album_entity.id, "auto_import", "rescan_from_disk")
+                except Exception as _e:
+                    _append_job_log(job_id, f"Album entity warning: {_e}")
+
+            if xml_title and artist_entity:
+                try:
+                    with db.begin_nested():
+                        track_entity = get_or_create_track(
+                            db, artist_entity, album_entity, xml_title,
+                            resolved=resolved_track,
+                        )
+                except Exception as _e:
+                    _append_job_log(job_id, f"Track entity warning: {_e}")
+
+            if artist_entity:
+                try:
+                    with db.begin_nested():
+                        canonical_track, _ = get_or_create_canonical_track(
+                            db,
+                            title=xml_title,
+                            year=xml_year,
+                            mb_recording_id=xml_mb_recording_id,
+                            mb_release_id=xml_mb_release_id,
+                            mb_release_group_id=xml_mb_release_group_id,
+                            mb_artist_id=xml_mb_artist_id,
+                            version_type=xml_version_type or "normal",
+                            original_artist=xml_original_artist,
+                            original_title=xml_original_title,
+                            genres=xml_genres,
+                            resolved_track=resolved_track or None,
+                            artist_entity=artist_entity,
+                            album_entity=album_entity,
+                        )
+                except Exception as _e:
+                    _append_job_log(job_id, f"Canonical track warning: {_e}")
+
+            # Inherit album from canonical track if missing
+            if not album_entity and canonical_track and canonical_track.album_id:
+                from app.metadata.models import AlbumEntity
+                _ct_album = db.query(AlbumEntity).get(canonical_track.album_id)
+                if _ct_album:
+                    album_entity = _ct_album
+                    if not video_item.album:
+                        video_item.album = _ct_album.title
+
+            # Link video to entities
+            if artist_entity:
+                video_item.artist_entity_id = artist_entity.id
+            if album_entity:
+                video_item.album_entity_id = album_entity.id
+            if track_entity:
+                video_item.track_id = track_entity.id
+            if canonical_track:
+                link_video_to_canonical_track(db, video_item, canonical_track)
+
+            # Processing flags
+            _set_processing_flag(db, video_item, "metadata_scraped", method="rescan_from_disk")
+            _set_processing_flag(db, video_item, "metadata_resolved", method="rescan_from_disk")
+            if track_entity or canonical_track:
+                _set_processing_flag(db, video_item, "track_identified", method="rescan_from_disk")
+                _set_processing_flag(db, video_item, "canonical_linked", method="rescan_from_disk")
+
+            # Promote scanned items to full library imports
+            if video_item.import_method == "scanned":
+                video_item.import_method = "import"
+                _append_job_log(job_id, "Promoted import_method from 'scanned' to 'import'")
+
+            # Post-rescan snapshot
+            _save_metadata_snapshot(db, video_item, "rescan_from_disk_complete")
+
+            # Rewrite NFO with restored data
+            try:
+                from app.services.nfo_writer import write_nfo_file
+                if folder_path:
+                    write_nfo_file(
+                        folder_path,
+                        artist=xml_artist,
+                        title=xml_title,
+                        album=xml_album or "",
+                        year=xml_year,
+                        genres=xml_genres,
+                        plot=xml_plot or "",
+                        source_url="",
+                        resolution_label=xml_resolution_label or "",
+                    )
+                    _set_processing_flag(db, video_item, "nfo_exported", method="rescan_from_disk")
+            except Exception as _nfo_e:
+                _append_job_log(job_id, f"NFO rewrite warning: {_nfo_e}")
+
+            db.commit()
+            _append_job_log(job_id, "All XML data applied successfully")
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    db_write(_execute_from_disk_write)
+
+    _set_pipeline_step(job_id, "Applying XML data", "success")
+    _set_pipeline_step(job_id, "Resolving entities", "success")
+    _update_job(job_id, status=JobStatus.complete, progress_percent=90,
+                current_step="Finalizing", completed_at=datetime.now(timezone.utc))
+    _append_job_log(job_id, "Rescan from disk complete — dispatching deferred tasks")
+
+    # Deferred tasks (preview, entity artwork, etc.)
+    try:
+        from app.pipeline_url.workspace import ImportWorkspace
+        from app.pipeline_url.deferred import dispatch_deferred
+
+        deferred_tasks = ["preview", "matching", "kodi_export",
+                          "entity_artwork", "orphan_cleanup"]
+        ws = ImportWorkspace(job_id)
+        ws.log("Rescan-from-disk deferred tasks starting")
+        dispatch_deferred(video_id, deferred_tasks, ws)
+    except Exception as de:
+        logger.error(f"Rescan-from-disk deferred dispatch failed: {de}")
+        _append_job_log(job_id, f"Deferred dispatch failed: {de}")
+        _update_job(job_id, current_step="Import complete", progress_percent=100)
+
+    # Queue normalize as follow-up if requested
+    if normalize and file_path:
+        try:
+            norm_db = SessionLocal()
+            try:
+                _nv = norm_db.query(VideoItem).get(video_id)
+                _norm_display = f"{_nv.artist} – {_nv.title} › Normalize" if _nv and _nv.artist and _nv.title else None
+                norm_job = ProcessingJob(
+                    job_type="normalize", status=JobStatus.queued,
+                    video_id=video_id,
+                    action_label="Normalize",
+                    display_name=_norm_display,
+                )
+                norm_db.add(norm_job)
+                norm_db.commit()
+                dispatch_task(normalize_task, job_id=norm_job.id, video_id=video_id)
+                _append_job_log(job_id, "Normalize queued as follow-up")
+            finally:
+                norm_db.close()
+        except Exception as ne:
+            _append_job_log(job_id, f"Failed to queue normalize: {ne}")
+
+
+# ---------------------------------------------------------------------------
 # Rescan metadata task
 # ---------------------------------------------------------------------------
 
@@ -1017,7 +1440,8 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                          hint_alternate: bool = False,
                          hint_uncensored: bool = False,
                          normalize: bool = False,
-                         find_source_video: bool = False):
+                         find_source_video: bool = False,
+                         from_disk: bool = False):
     """Rescan metadata for a single video item.
 
     Uses a two-phase architecture (same as the URL import pipeline):
@@ -1108,6 +1532,13 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
         _append_job_log(job_id, f"Rescanning: {ctx_artist} - {ctx_title}")
         _set_pipeline_step(job_id, "Rescanning metadata", "success")
         _check_cancelled(job_id)
+
+        # ==================================================================
+        # FROM DISK — read .playarr.xml and apply all data directly
+        # ==================================================================
+        if from_disk:
+            _rescan_from_disk(job_id, video_id, ctx_folder_path, ctx_file_path, normalize)
+            return
 
         # --- A2: Validate entity artwork (short independent DB session) ---
         try:

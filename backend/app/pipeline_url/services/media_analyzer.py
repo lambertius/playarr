@@ -6,6 +6,8 @@ Media Analyzer — ffprobe-based media analysis + quality signature.
 import json
 import logging
 import subprocess
+
+from app.subprocess_utils import HIDE_WINDOW
 from typing import Optional, Dict, Any
 
 from app.config import get_settings
@@ -30,7 +32,7 @@ def probe_file(file_path: str) -> Dict[str, Any]:
     ]
 
     logger.debug(f"Running ffprobe: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, **HIDE_WINDOW)
 
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {result.stderr}")
@@ -156,7 +158,7 @@ def measure_loudness(file_path: str) -> Optional[float]:
     logger.debug(f"Measuring loudness: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, **HIDE_WINDOW)
 
         # Parse stderr for integrated loudness
         for line in result.stderr.split("\n"):

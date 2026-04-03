@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import ReactDOM from "react-dom";
-import { X, RefreshCw, Loader2, Info } from "lucide-react";
+import { X, RefreshCw, Loader2, Info, HardDrive } from "lucide-react";
 import { useSettings } from "@/hooks/queries";
 import { Tooltip } from "@/components/Tooltip";
 
@@ -23,6 +23,7 @@ export interface RescanOptions {
   hint_alternate: boolean;
   normalize: boolean;
   find_source_video: boolean;
+  from_disk: boolean;
 }
 
 function getBoolSetting(settings: { key: string; value: string }[] | undefined, key: string, fallback: boolean): boolean {
@@ -42,6 +43,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
   const [isAlternate, setIsAlternate] = useState(false);
   const [normalize, setNormalize] = useState(true);
   const [findSourceVideo, setFindSourceVideo] = useState(false);
+  const [fromDisk, setFromDisk] = useState(false);
 
   const { data: settings } = useSettings();
 
@@ -61,16 +63,17 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
 
   const handleConfirm = () => {
     onConfirm({
-      scrape_wikipedia: scrapeWiki,
-      scrape_musicbrainz: scrapeMusicbrainz,
-      scrape_tmvdb: scrapeTmvdb,
-      ai_auto: aiAuto,
-      ai_only: aiOnly,
+      scrape_wikipedia: fromDisk ? false : scrapeWiki,
+      scrape_musicbrainz: fromDisk ? false : scrapeMusicbrainz,
+      scrape_tmvdb: fromDisk ? false : scrapeTmvdb,
+      ai_auto: fromDisk ? false : aiAuto,
+      ai_only: fromDisk ? false : aiOnly,
       hint_cover: isCover,
       hint_live: isLive,
       hint_alternate: isAlternate,
       normalize,
-      find_source_video: findSourceVideo,
+      find_source_video: fromDisk ? false : findSourceVideo,
+      from_disk: fromDisk,
     });
   };
 
@@ -100,19 +103,31 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
         </p>
 
         <div className="space-y-4">
+          {/* Rescan from Disk */}
+          <div className="space-y-2 rounded-lg border border-accent/30 p-3">
+            <div className="flex items-center gap-1.5">
+              <HardDrive size={14} className="text-accent" />
+              <p className="text-xs font-medium text-text-muted uppercase tracking-wide">Rescan from Disk</p>
+              <Tooltip content={"Read metadata from .playarr.xml sidecar files stored alongside each video.\n\nRestores all data including ratings, sources, loudness, and processing history.\nNo network requests — instant and free."}>
+                <span><Info size={12} className="text-text-muted" /></span>
+              </Tooltip>
+            </div>
+            <ToggleRow label="Rescan from Disk" description="Restore all metadata from .playarr.xml files. Skips external scraping — uses only local data on disk." checked={fromDisk} onChange={(v) => { setFromDisk(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setScrapeTmvdb(false); setAiAuto(false); setAiOnly(false); setFindSourceVideo(false); } }} />
+          </div>
+
           {/* Metadata Sources */}
-          <div className="space-y-2 rounded-lg border border-surface-border/50 p-3">
+          <div className={`space-y-2 rounded-lg border border-surface-border/50 p-3 ${fromDisk ? "opacity-40 pointer-events-none" : ""}`}>
             <div className="flex items-center gap-1.5">
               <p className="text-xs font-medium text-text-muted uppercase tracking-wide">Metadata Sources</p>
               <Tooltip content={"Choose how metadata is gathered:\n\n• Wikipedia + MusicBrainz can be enabled together for best results\n• AI modes are exclusive — they replace manual scraping"}>
                 <span><Info size={12} className="text-text-muted" /></span>
               </Tooltip>
             </div>
-            <ToggleRow label="Scrape Wikipedia" description="Search for a Wikipedia article to extract plot, genre, and background info. Artist is verified to prevent false positives." checked={scrapeWiki} onChange={(v) => { setScrapeWiki(v); if (v) { setAiAuto(false); setAiOnly(false); } }} />
-            <ToggleRow label="Scrape MusicBrainz" description="Query MusicBrainz for structured metadata: album, release year, and genre tags." checked={scrapeMusicbrainz} onChange={(v) => { setScrapeMusicbrainz(v); if (v) { setAiAuto(false); setAiOnly(false); } }} />
+            <ToggleRow label="Scrape Wikipedia" description="Search for a Wikipedia article to extract plot, genre, and background info. Artist is verified to prevent false positives." checked={scrapeWiki} onChange={(v) => { setScrapeWiki(v); if (v) { setAiAuto(false); setAiOnly(false); setFromDisk(false); } }} />
+            <ToggleRow label="Scrape MusicBrainz" description="Query MusicBrainz for structured metadata: album, release year, and genre tags." checked={scrapeMusicbrainz} onChange={(v) => { setScrapeMusicbrainz(v); if (v) { setAiAuto(false); setAiOnly(false); setFromDisk(false); } }} />
             <ToggleRow label="Retrieve from TMVDB" description="Look up metadata from The Music Video DB community database. (Coming soon)" checked={false} onChange={() => {}} disabled />
-            <ToggleRow label="AI Auto" description="Full AI-guided enrichment after scraping. Falls back to AI when scrapers miss data. Uses AI tokens." checked={aiAuto} onChange={(v) => { setAiAuto(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setScrapeTmvdb(false); setAiOnly(false); } }} />
-            <ToggleRow label="AI Only" description="Skip all external scrapers — rely solely on AI for metadata. Uses AI tokens." checked={aiOnly} onChange={(v) => { setAiOnly(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setScrapeTmvdb(false); setAiAuto(false); } }} />
+            <ToggleRow label="AI Auto" description="Full AI-guided enrichment after scraping. Falls back to AI when scrapers miss data. Uses AI tokens." checked={aiAuto} onChange={(v) => { setAiAuto(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setScrapeTmvdb(false); setAiOnly(false); setFromDisk(false); } }} />
+            <ToggleRow label="AI Only" description="Skip all external scrapers — rely solely on AI for metadata. Uses AI tokens." checked={aiOnly} onChange={(v) => { setAiOnly(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setScrapeTmvdb(false); setAiAuto(false); setFromDisk(false); } }} />
           </div>
 
           {/* Version hints */}
@@ -161,7 +176,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
               </Tooltip>
             </div>
             <ToggleRow label="Normalise Audio" description="Apply loudness normalisation (EBU R128) to ensure consistent volume across all tracks." checked={normalize} onChange={(v) => setNormalize(v)} />
-            <ToggleRow label="YouTube Source Matching" description="Search YouTube for the official music video source. If an existing YouTube link is present, it will be verified first." checked={findSourceVideo} onChange={(v) => setFindSourceVideo(v)} />
+            <ToggleRow label="YouTube Source Matching" description="Search YouTube for the official music video source. If an existing YouTube link is present, it will be verified first." checked={findSourceVideo} onChange={(v) => setFindSourceVideo(v)} disabled={fromDisk} />
           </div>
 
           {/* Action buttons */}

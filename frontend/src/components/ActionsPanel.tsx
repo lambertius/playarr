@@ -764,13 +764,13 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
     {
       label: "Rescan from Disk",
       icon: <RefreshCw size={14} />,
-      tooltip: "Re-read the video file from disk and refresh file-level metadata (resolution, codec, duration, etc.). Local operation — no AI tokens used.",
+      tooltip: "Re-read all metadata from the .playarr.xml sidecar file — restores ratings, sources, loudness, and processing history. Local operation — no AI tokens used.",
       pending: rescanMutation.isPending,
       variant: isStepDone("metadata_resolved") ? "success" as const : undefined,
       onClick: () =>
         guardLocked(() =>
-          rescanMutation.mutate(videoId, {
-            onSuccess: () => toast({ type: "success", title: "Rescan queued" }),
+          rescanMutation.mutate({ videoId, fromDisk: true }, {
+            onSuccess: () => toast({ type: "success", title: "Rescan from disk queued" }),
           }),
         ),
     },

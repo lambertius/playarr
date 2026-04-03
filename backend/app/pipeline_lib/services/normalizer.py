@@ -13,6 +13,8 @@ Inspired by VVN (Video Volume Normalization) script behavior:
 import logging
 import os
 import subprocess
+
+from app.subprocess_utils import HIDE_WINDOW
 import tempfile
 from typing import Optional, Tuple
 
@@ -157,7 +159,7 @@ def normalize_with_loudnorm(
         ]
 
         logger.debug(f"Running: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, **HIDE_WINDOW)
 
         if result.returncode != 0:
             logger.error(f"loudnorm failed: {result.stderr[-500:]}")
@@ -197,7 +199,7 @@ def _extract_audio(ffmpeg: str, video_path: str, output_wav: str):
         "-ac", "2",
         output_wav,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, **HIDE_WINDOW)
     if result.returncode != 0:
         raise RuntimeError(f"Audio extraction failed: {result.stderr[-500:]}")
     logger.debug(f"Extracted audio to: {output_wav}")
@@ -222,7 +224,7 @@ def _measure_lufs(ffmpeg: str, file_path: str) -> Optional[float]:
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, **HIDE_WINDOW)
 
         last_lufs = None
         for line in result.stderr.split("\n"):
@@ -250,7 +252,7 @@ def _apply_gain(ffmpeg: str, input_path: str, output_path: str, gain_db: float):
         "-af", f"volume={gain_db}dB",
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, **HIDE_WINDOW)
     if result.returncode != 0:
         raise RuntimeError(f"Gain adjustment failed: {result.stderr[-500:]}")
     logger.debug(f"Applied {gain_db}dB gain to: {output_path}")
@@ -268,7 +270,7 @@ def _remux_audio(ffmpeg: str, video_path: str, audio_path: str, output_path: str
         "-map", "1:a:0",
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, **HIDE_WINDOW)
     if result.returncode != 0:
         raise RuntimeError(f"Remux failed: {result.stderr[-500:]}")
     logger.debug(f"Remuxed audio into: {output_path}")

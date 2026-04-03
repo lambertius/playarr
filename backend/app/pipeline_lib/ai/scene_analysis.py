@@ -17,6 +17,8 @@ import logging
 import math
 import os
 import subprocess
+
+from app.subprocess_utils import HIDE_WINDOW
 import tempfile
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -221,7 +223,7 @@ def _get_duration(ffprobe: str, file_path: str) -> float:
         "-of", "json",
         file_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, **HIDE_WINDOW)
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {result.stderr[:200]}")
 
@@ -248,6 +250,7 @@ def _detect_scenes(
 
     result = subprocess.run(
         cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+        **HIDE_WINDOW,
     )
 
     timestamps = [0.0]  # Always include start
@@ -305,7 +308,7 @@ def _extract_frame(ffmpeg: str, file_path: str, timestamp: float, output_path: s
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, **HIDE_WINDOW)
     return result.returncode == 0 and os.path.isfile(output_path)
 
 
@@ -337,7 +340,7 @@ def _score_frame(ffprobe: str, frame_path: str) -> Dict[str, float]:
             "-of", "json",
             frame_path,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, **HIDE_WINDOW)
         if result.returncode != 0:
             return scores
 

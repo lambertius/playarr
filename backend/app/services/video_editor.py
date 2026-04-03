@@ -12,6 +12,8 @@ import logging
 import os
 import shutil
 import subprocess
+
+from app.subprocess_utils import HIDE_WINDOW
 import tempfile
 import threading
 import time
@@ -83,7 +85,7 @@ def detect_letterbox(file_path: str, sample_duration: int = 30, skip_seconds: in
     ]
 
     logger.info(f"Running cropdetect on {file_path}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, **HIDE_WINDOW)
 
     # Parse cropdetect output from stderr — lines like:
     #   [Parsed_cropdetect_0 @ ...] x1:0 x2:1919 y1:140 y2:939 w:1920 h:800 ...

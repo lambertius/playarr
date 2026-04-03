@@ -7,6 +7,8 @@ transcode to a web-friendly format (mp4/h264 + aac, low bitrate) for fast loadin
 import logging
 import os
 import subprocess
+
+from app.subprocess_utils import HIDE_WINDOW
 from typing import Optional
 
 from app.config import get_settings
@@ -99,7 +101,7 @@ def generate_preview(
         ]
 
         logger.debug(f"Generating preview: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, **HIDE_WINDOW)
 
         if result.returncode != 0:
             logger.error(f"Preview generation failed: {result.stderr[-300:]}")
@@ -127,7 +129,7 @@ def _get_duration(ffprobe: str, file_path: str) -> Optional[float]:
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, **HIDE_WINDOW)
         if result.returncode == 0 and result.stdout.strip():
             return float(result.stdout.strip())
     except Exception as e:

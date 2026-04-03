@@ -300,6 +300,7 @@ export function RatingsPage() {
             hint_alternate: opts.hint_alternate,
             normalize: opts.normalize,
             find_source_video: opts.find_source_video,
+            from_disk: opts.from_disk,
           }, {
             onSuccess: () => { setRescanDialogOpen(false); toast({ type: "success", title: `Rescan queued for ${selectedVideoIds.length} video(s)` }); },
           });

@@ -25,6 +25,8 @@ import json
 import logging
 import os
 import subprocess
+
+from app.subprocess_utils import HIDE_WINDOW
 import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -182,6 +184,7 @@ def _is_fpcalc_available(fpcalc_path: str) -> bool:
         result = subprocess.run(
             [fpcalc_path, "-version"],
             capture_output=True, text=True, timeout=5,
+            **HIDE_WINDOW,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -208,7 +211,7 @@ def _extract_audio_segment(
             "-of", "json",
             file_path,
         ]
-        probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=15)
+        probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=15, **HIDE_WINDOW)
         if probe.returncode != 0:
             logger.warning(f"ffprobe failed: {probe.stderr[:200]}")
             total_dur = 0
@@ -237,7 +240,7 @@ def _extract_audio_segment(
             "-acodec", "pcm_s16le",
             tmp_path,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, **HIDE_WINDOW)
         if result.returncode != 0:
             logger.warning(f"Audio extraction failed: {result.stderr[:200]}")
             os.unlink(tmp_path)
@@ -261,7 +264,7 @@ def _generate_fingerprint(
     """
     try:
         cmd = [fpcalc_path, "-json", audio_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, **HIDE_WINDOW)
 
         if result.returncode != 0:
             logger.warning(f"fpcalc failed: {result.stderr[:200]}")

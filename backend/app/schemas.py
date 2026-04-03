@@ -329,6 +329,7 @@ class BatchRescanRequest(BaseModel):
     hint_alternate: Optional[bool] = None
     normalize: Optional[bool] = None
     find_source_video: Optional[bool] = None
+    from_disk: Optional[bool] = None
 
 
 class BatchActionResponse(BaseModel):

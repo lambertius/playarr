@@ -446,6 +446,7 @@ export interface BatchRescanRequest {
   hint_alternate?: boolean;
   normalize?: boolean;
   find_source_video?: boolean;
+  from_disk?: boolean;
 }
 
 export interface JobsParams {

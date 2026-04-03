@@ -1265,6 +1265,7 @@ def _robust_rmtree(folder_path: str):
             subprocess.run(
                 ["cmd", "/c", "rd", "/s", "/q", folder_path],
                 capture_output=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except Exception as e:
             logger.debug(f"rd /s /q failed for {folder_path}: {e}")
@@ -1299,6 +1300,7 @@ def _schedule_deferred_rmdir(folder_path: str):
                     subprocess.run(
                         ["cmd", "/c", "rd", "/s", "/q", folder_path],
                         capture_output=True, timeout=15,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                     if not os.path.isdir(folder_path):
                         logger.info(f"Deferred removal succeeded (rd /s /q): {folder_path}")

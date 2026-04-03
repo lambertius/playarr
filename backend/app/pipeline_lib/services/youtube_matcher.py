@@ -19,6 +19,8 @@ import logging
 import os
 import re
 import subprocess
+
+from app.subprocess_utils import HIDE_WINDOW
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import List, Optional
@@ -234,6 +236,7 @@ def search_youtube(
             text=True,
             timeout=30,
             cwd=os.path.dirname(ytdlp) if os.path.dirname(ytdlp) else None,
+            **HIDE_WINDOW,
         )
     except subprocess.TimeoutExpired:
         logger.warning(f"YouTube search timed out for: {query}")

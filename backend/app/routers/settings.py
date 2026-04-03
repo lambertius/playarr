@@ -472,6 +472,7 @@ Write-Output ([FolderPicker]::Pick())
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True, text=True, timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         path = result.stdout.strip()
         if path:
@@ -495,6 +496,7 @@ def _powershell_browse_folder() -> str:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True, text=True, timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         return result.stdout.strip()
     except Exception:
@@ -517,6 +519,7 @@ def _tkinter_browse_folder() -> str:
         result = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True, text=True, timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         return result.stdout.strip()
     except Exception:

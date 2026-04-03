@@ -145,7 +145,7 @@ export function LibraryPage() {
           // Will be handled by playlist popup later
           break;
         case "rescan":
-          rescanMutation.mutate(videoId, {
+          rescanMutation.mutate({ videoId }, {
             onSuccess: () => toast({ type: "success", title: "Rescan queued" }),
           });
           break;
@@ -535,6 +535,7 @@ export function LibraryPage() {
             hint_alternate: opts.hint_alternate,
             normalize: opts.normalize,
             find_source_video: opts.find_source_video,
+            from_disk: opts.from_disk,
           }, {
             onSuccess: (res) => {
               setRescanDialogOpen(false);

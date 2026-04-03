@@ -359,24 +359,25 @@ def redownload_video(video_id: int, format_spec: Optional[str] = Query(None),
 
 
 @router.post("/rescan/{video_id}", response_model=JobOut)
-def rescan_metadata(video_id: int, db: Session = Depends(get_db)):
+def rescan_metadata(video_id: int, from_disk: bool = False, db: Session = Depends(get_db)):
     """Force rescan metadata for a single video."""
     item = db.query(VideoItem).get(video_id)
     if not item:
         raise HTTPException(status_code=404, detail="Video not found")
 
+    _label = "Rescan from Disk" if from_disk else "Rescan"
     job = ProcessingJob(
         job_type="rescan",
         status=JobStatus.queued,
         video_id=video_id,
-        action_label="Rescan",
-        display_name=f"{item.artist} \u2013 {item.title} \u203a Rescan" if item.artist and item.title else None,
+        action_label=_label,
+        display_name=f"{item.artist} \u2013 {item.title} \u203a {_label}" if item.artist and item.title else None,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    dispatch_task(rescan_metadata_task, job_id=job.id, video_id=video_id)
+    dispatch_task(rescan_metadata_task, job_id=job.id, video_id=video_id, from_disk=from_disk)
     return job
 
 
@@ -402,12 +403,15 @@ def rescan_batch(req: BatchRescanRequest, db: Session = Depends(get_db)):
     ids = [v.id for v in videos]
 
     # Create a parent job for tracking
-    _batch_label = _rescan_action_label(
-        ai_auto=req.ai_auto, ai_only=req.ai_only,
-        scrape_wikipedia=req.scrape_wikipedia if req.scrape_wikipedia is not None else True,
-        scrape_musicbrainz=req.scrape_musicbrainz if req.scrape_musicbrainz is not None else True,
-        scrape_tmvdb=req.scrape_tmvdb if req.scrape_tmvdb is not None else False,
-    )
+    if req.from_disk:
+        _batch_label = "Rescan from Disk"
+    else:
+        _batch_label = _rescan_action_label(
+            ai_auto=req.ai_auto, ai_only=req.ai_only,
+            scrape_wikipedia=req.scrape_wikipedia if req.scrape_wikipedia is not None else True,
+            scrape_musicbrainz=req.scrape_musicbrainz if req.scrape_musicbrainz is not None else True,
+            scrape_tmvdb=req.scrape_tmvdb if req.scrape_tmvdb is not None else False,
+        )
     job = ProcessingJob(
         job_type="batch_rescan",
         status=JobStatus.queued,
@@ -431,6 +435,7 @@ def rescan_batch(req: BatchRescanRequest, db: Session = Depends(get_db)):
             "hint_alternate": req.hint_alternate,
             "normalize": req.normalize,
             "find_source_video": req.find_source_video,
+            "from_disk": req.from_disk,
         }.items() if v is not None
     }
     # Pre-fetch display names for all videos in the batch
