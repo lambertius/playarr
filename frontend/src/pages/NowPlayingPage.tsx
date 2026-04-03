@@ -336,7 +336,6 @@ export function NowPlayingPage() {
   const currentTime = usePlaybackStore((s) => s.currentTime);
   const fullscreenMode = usePlaybackStore((s) => s.fullscreenMode);
   const setFullscreenMode = usePlaybackStore((s) => s.setFullscreenMode);
-  const exitFullscreen = usePlaybackStore((s) => s.exitFullscreen);
   const individualTrack = usePlaybackStore((s) => s.individualTrack);
   const stopIndividual = usePlaybackStore((s) => s.stopIndividual);
 

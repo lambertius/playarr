@@ -5,6 +5,7 @@ Main FastAPI application entry point.
 import asyncio
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -946,13 +947,18 @@ def get_stats():
 
 
 # ── Serve frontend SPA ────────────────────────────────────
-# Search order: 1) bundled dist inside backend (installer), 2) repo-level frontend/dist (dev build)
+# Search order: 1) PyInstaller bundle, 2) bundled dist inside backend, 3) repo-level frontend/dist
 _frontend_dist = None
 _candidate_dirs = [
     Path(__file__).resolve().parent / "static" / "dist",          # bundled with backend
     Path(__file__).resolve().parent.parent / "static" / "dist",   # backend/static/dist
+    Path(__file__).resolve().parent.parent / "frontend" / "dist", # PyInstaller _internal/frontend/dist
     Path(__file__).resolve().parent.parent.parent / "frontend" / "dist",  # repo layout
 ]
+# PyInstaller frozen bundle: check sys._MEIPASS
+if getattr(sys, "frozen", False):
+    _meipass = Path(getattr(sys, "_MEIPASS", ""))
+    _candidate_dirs.insert(0, _meipass / "frontend" / "dist")
 for _cand in _candidate_dirs:
     if _cand.is_dir() and (_cand / "index.html").is_file():
         _frontend_dist = _cand

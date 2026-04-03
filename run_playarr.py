@@ -31,8 +31,15 @@ import time
 # ---------------------------------------------------------------------------
 # Resolve paths BEFORE any app imports
 # ---------------------------------------------------------------------------
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_BACKEND_DIR = os.path.join(_SCRIPT_DIR, "backend") if os.path.isdir(os.path.join(_SCRIPT_DIR, "backend")) else _SCRIPT_DIR
+_IS_FROZEN = getattr(sys, "frozen", False)
+
+if _IS_FROZEN:
+    # PyInstaller bundle — exe lives in dist/Playarr/, code in _internal/
+    _SCRIPT_DIR = os.path.dirname(sys.executable)
+    _BACKEND_DIR = sys._MEIPASS  # type: ignore[attr-defined]
+else:
+    _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    _BACKEND_DIR = os.path.join(_SCRIPT_DIR, "backend") if os.path.isdir(os.path.join(_SCRIPT_DIR, "backend")) else _SCRIPT_DIR
 
 # Ensure backend is on sys.path
 if _BACKEND_DIR not in sys.path:
@@ -223,20 +230,26 @@ def main():
 
             threading.Thread(target=_open, daemon=True).start()
 
-    # Run uvicorn with restart support
-    while True:
-        result = subprocess.run([
-            sys.executable, "-m", "uvicorn", "app.main:app",
-            "--host", args.host,
-            "--port", str(args.port),
-        ], cwd=_BACKEND_DIR)
+    # Run uvicorn
+    if _IS_FROZEN:
+        # PyInstaller bundle — run uvicorn in-process (subprocess won't work)
+        import uvicorn
+        uvicorn.run("app.main:app", host=args.host, port=args.port, log_level="info")
+    else:
+        # Development / non-frozen — subprocess allows restart via exit code
+        while True:
+            result = subprocess.run([
+                sys.executable, "-m", "uvicorn", "app.main:app",
+                "--host", args.host,
+                "--port", str(args.port),
+            ], cwd=_BACKEND_DIR)
 
-        if result.returncode == RESTART_EXIT_CODE:
-            print("[Playarr] Restart requested — relaunching...")
-            stop_tray()
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        else:
-            break
+            if result.returncode == RESTART_EXIT_CODE:
+                print("[Playarr] Restart requested — relaunching...")
+                stop_tray()
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                break
 
     stop_tray()
     print("[Playarr] Stopped.")

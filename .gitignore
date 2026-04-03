@@ -71,3 +71,10 @@ docker-compose.override.yml
 dev/
 frontend-old/
 *.bak
+
+# ── Build Output ──
+dist/
+build/
+*.spec.bak
+*.ico
+__pycache__/
