@@ -37,6 +37,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 PrivilegesRequired=admin
 CloseApplications=yes
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -44,6 +46,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "startupentry"; Description: "Start Playarr when Windows starts"; GroupDescription: "Startup:"
+
+[InstallDelete]
+; Clean stale files from previous version before installing new ones
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; Main executable

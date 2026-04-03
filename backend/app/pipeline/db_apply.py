@@ -304,12 +304,12 @@ def _execute_plan(plan: dict) -> int:
             video_item.processing_state = state
             flag_modified(video_item, "processing_state")
         # ── 9b. Field provenance ─────────────────────────────────────
-        fp = plan.get(\"field_provenance\")
+        fp = plan.get("field_provenance")
         if fp:
             existing_fp = video_item.field_provenance or {}
             existing_fp.update(fp)
             video_item.field_provenance = existing_fp
-            flag_modified(video_item, \"field_provenance\")
+            flag_modified(video_item, "field_provenance")
         # ── 10. Job linkage + terminal status ────────────────────────
         #  Mark the job complete INSIDE the apply transaction so it's
         #  atomic — no separate _coarse_update needed for the terminal
