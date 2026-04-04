@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.5.0] - 2026-04-04
+
+### Fixed
+- **Video Player: Native Fullscreen** — fullscreen playback modes (theatre and video-only) now use the native browser Fullscreen API (`requestFullscreen` / `exitFullscreen`) instead of CSS-only viewport fill, restoring true OS-level fullscreen that hides the taskbar and browser chrome. Exiting native fullscreen via Escape correctly syncs the playback store back to normal mode
+
 ## [1.4.1] - 2026-04-04
 
 ### Fixed
