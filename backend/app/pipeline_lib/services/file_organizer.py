@@ -209,12 +209,21 @@ def organize_file(
 
 def archive_folder(folder_path: str) -> str:
     """
-    Move an existing library folder to the archive directory.
+    Move an existing library folder to the _archive subdirectory of
+    whichever library root contains it.
     Appends timestamp if collision.
     Returns the archive destination path.
     """
     settings = get_settings()
-    archive_dir = settings.archive_dir
+
+    # Determine which library root this folder belongs to
+    archive_dir = settings.archive_dir  # default: library_dir/_archive
+    norm_fp = os.path.normcase(os.path.normpath(folder_path))
+    for lib_root in settings.get_all_library_dirs():
+        norm_root = os.path.normcase(os.path.normpath(lib_root))
+        if norm_fp.startswith(norm_root + os.sep):
+            archive_dir = os.path.join(lib_root, "_archive")
+            break
 
     folder_name = os.path.basename(folder_path)
     archive_dest = os.path.join(archive_dir, folder_name)

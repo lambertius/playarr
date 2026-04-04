@@ -21,6 +21,15 @@ from app.runtime_dirs import get_runtime_dirs, IS_DEV
 # Resolve env file path from runtime dirs (may be repo .env or AppData config)
 _rdirs = get_runtime_dirs()
 
+# Critical subdirectories created inside every library/source directory
+CRITICAL_SUBDIRS = ("_albums", "_artists", "_archive", "_PlayarrCache")
+
+
+def ensure_library_subdirs(library_root: str) -> None:
+    """Create critical subdirectories inside a library root if they don't exist."""
+    for sub in CRITICAL_SUBDIRS:
+        os.makedirs(os.path.join(library_root, sub), exist_ok=True)
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment / .env file."""
@@ -29,6 +38,7 @@ class Settings(BaseSettings):
         env_file=str(_rdirs.env_file) if _rdirs.env_file.is_file() else ".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # --- Mode ---
@@ -37,16 +47,24 @@ class Settings(BaseSettings):
     # --- Directories ---
     library_dir: str = str(_rdirs.library_dir)
     library_source_dirs: str = ""  # JSON list of additional source dirs, e.g. '["/mnt/videos"]'
-    archive_dir: str = str(_rdirs.archive_dir)
 
     # --- Library Naming Convention ---
     library_naming_pattern: str = "{artist} - {title} [{quality}]"
     library_folder_structure: str = "{artist}/{file_folder}"
     preview_cache_dir: str = str(_rdirs.preview_dir)
-    asset_cache_dir: str = str(_rdirs.asset_cache_dir)
     artist_root: str = ""   # blank = <library_dir>/_artists
     album_root: str = ""    # blank = <library_dir>/_albums
     log_dir: str = str(_rdirs.log_dir)
+
+    @property
+    def archive_dir(self) -> str:
+        """Archive is always _archive inside the library directory."""
+        return os.path.join(self.library_dir, "_archive")
+
+    @property
+    def asset_cache_dir(self) -> str:
+        """Asset cache lives inside _PlayarrCache in the library directory."""
+        return os.path.join(self.library_dir, "_PlayarrCache")
 
     # --- Tool Paths ---
     ffmpeg_path: str = "auto"
@@ -153,6 +171,10 @@ class Settings(BaseSettings):
         for d in [self.library_dir, self.archive_dir, self.preview_cache_dir,
                   self.asset_cache_dir, self.log_dir]:
             os.makedirs(d, exist_ok=True)
+        # Ensure critical subdirectories for all library dirs
+        ensure_library_subdirs(self.library_dir)
+        for d in self.get_all_library_dirs()[1:]:  # skip library_dir (already done)
+            ensure_library_subdirs(d)
         # Runtime dirs (workspace, cache) managed by runtime_dirs module
         _rdirs.ensure_all()
 

@@ -284,7 +284,7 @@ export const settingsApi = {
     api.post<{ status: string; startup_enabled: boolean; delay: number }>("/settings/startup").then(r => r.data),
 
   defaults: () =>
-    api.get<{ library_dir: string; archive_dir: string }>("/settings/defaults").then(r => r.data),
+    api.get<{ library_dir: string }>("/settings/defaults").then(r => r.data),
 
   openDirectory: (path: string) =>
     api.post<{ ok: boolean; path: string }>("/settings/open-directory", { path }).then(r => r.data),

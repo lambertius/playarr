@@ -685,7 +685,6 @@ def clean_orphans(body: OrphanCleanRequest, db: Session = Depends(get_db)):
         os.path.normcase(os.path.normpath(d))
         for d in settings.get_all_library_dirs()
     ]
-    archive_dir = settings.archive_dir
 
     # Build tracked set to prevent accidentally removing tracked videos
     tracked = set()
@@ -709,12 +708,21 @@ def clean_orphans(body: OrphanCleanRequest, db: Session = Depends(get_db)):
             results.append({"folder": fp, "status": "skipped", "reason": "Folder does not exist"})
             continue
 
+        # Determine the _archive dir for the library root containing this folder
+        _orphan_archive = settings.archive_dir  # default
+        for _lr in settings.get_all_library_dirs():
+            _nr = os.path.normcase(os.path.normpath(_lr))
+            if norm.startswith(_nr + os.sep):
+                _orphan_archive = os.path.join(_lr, "_archive")
+                break
+
         try:
             if body.mode == "archive":
-                dest = os.path.join(archive_dir, name)
+                dest = os.path.join(_orphan_archive, name)
                 if os.path.exists(dest):
                     # Add timestamp suffix to avoid collisions
                     dest = f"{dest}_{int(time.time())}"
+                os.makedirs(_orphan_archive, exist_ok=True)
                 shutil.move(fp, dest)
                 results.append({"folder": fp, "status": "archived", "destination": dest})
             else:

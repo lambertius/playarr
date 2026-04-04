@@ -45,11 +45,6 @@ const SETTING_META: Record<string, SettingMeta> = {
     label: "Additional Source Directories",
     description: "Extra directories scanned for orphan detection, library imports, and cleanup.",
   },
-  "archive_dir": {
-    group: "library",
-    label: "Archive Directory",
-    description: "Folder for archived or replaced video files.",
-  },
   "library_naming_pattern": {
     group: "library",
     label: "File Naming Pattern",
@@ -347,7 +342,7 @@ export function SettingsPage() {
   const { data: settings, isLoading, isError, refetch } = useSettings();
   const updateMutation = useUpdateSetting();
   const [activeTab, setActiveTab] = useState("library");
-  const [dirDefaults, setDirDefaults] = useState<{ library_dir: string; archive_dir: string } | null>(null);
+  const [dirDefaults, setDirDefaults] = useState<{ library_dir: string } | null>(null);
 
   useEffect(() => {
     settingsApi.defaults().then(setDirDefaults).catch(() => {});
@@ -476,30 +471,7 @@ export function SettingsPage() {
               }}
             />
 
-            {(() => {
-              const archiveSetting = settingsByKey["archive_dir"];
-              if (!archiveSetting) return null;
-              return (
-                <DirectoryRow
-                  label="Archive Directory"
-                  description="Folder for archived or replaced video files."
-                  setting={archiveSetting}
-                  onSave={(value) => {
-                    updateMutation.mutate(
-                      { key: "archive_dir", value, value_type: archiveSetting.value_type },
-                      {
-                        onSuccess: () => toast({ type: "success", title: "Archive directory saved" }),
-                        onError: () => toast({ type: "error", title: "Failed to save archive directory" }),
-                      }
-                    );
-                  }}
-                  isPending={updateMutation.isPending}
-                  defaultValue={dirDefaults?.archive_dir}
-                />
-              );
-            })()}
-
-            {settingRows(groups[group].filter(s => s.key !== "library_dir" && s.key !== "library_source_dirs" && s.key !== "library_naming_pattern" && s.key !== "library_folder_structure" && s.key !== "archive_dir"))}
+            {settingRows(groups[group].filter(s => s.key !== "library_dir" && s.key !== "library_source_dirs" && s.key !== "library_naming_pattern" && s.key !== "library_folder_structure"))}
 
               </div>
             </div>
@@ -1079,7 +1051,7 @@ async function openDirectoryPicker(onSelect: (path: string) => void) {
   }
 }
 
-/* ── Directory Row (reusable for library_dir, archive_dir, etc.) ── */
+/* ── Directory Row (reusable for library_dir, source dirs, etc.) ── */
 
 function DirectoryRow({
   label,
@@ -1097,6 +1069,7 @@ function DirectoryRow({
   defaultValue?: string;
 }) {
   const [value, setValue] = useState(setting.value);
+  const { toast } = useToast();
 
   const [prevValue, setPrevValue] = useState(setting.value);
   if (setting.value !== prevValue) {
@@ -1128,7 +1101,13 @@ function DirectoryRow({
         </Tooltip>
         <Tooltip content="Open in file explorer">
           <button
-            onClick={() => settingsApi.openDirectory(value).catch(() => {})}
+            onClick={async () => {
+              try {
+                await settingsApi.openDirectory(value);
+              } catch {
+                toast({ type: "error", title: "Could not open directory — does it exist?" });
+              }
+            }}
             className="btn-secondary btn-sm flex items-center gap-1"
           >
             <ExternalLink size={14} />
@@ -1243,7 +1222,13 @@ function SourceDirectoriesEditor({
           </Tooltip>
           <Tooltip content="Open in file explorer">
             <button
-              onClick={() => settingsApi.openDirectory(d).catch(() => {})}
+              onClick={async () => {
+                try {
+                  await settingsApi.openDirectory(d);
+                } catch {
+                  toast({ type: "error", title: "Could not open directory — does it exist?" });
+                }
+              }}
               className="btn-secondary btn-sm flex items-center gap-1 p-1.5"
             >
               <ExternalLink size={14} />

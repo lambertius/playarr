@@ -60,11 +60,7 @@ _DEFAULT_SIZE = (1000, 1000)
 
 def _cache_dir() -> str:
     """Return and ensure the root asset cache directory."""
-    settings = get_settings()
-    d = getattr(settings, "asset_cache_dir", None)
-    if not d:
-        # Fallback: alongside library
-        d = os.path.join(os.path.dirname(settings.library_dir), "PlayarrCache", "assets")
+    d = get_settings().asset_cache_dir
     os.makedirs(d, exist_ok=True)
     return d
 

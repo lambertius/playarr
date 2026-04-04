@@ -80,13 +80,30 @@ def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Opt
       2. Any video file in the expected archive subfolder
       3. Manifest-based scan: walk archive_dir looking for .playarr-archive.json
          files whose original_relative_path matches the library file path
+
+    If file_path lives under a source directory rather than library_dir,
+    the _archive subdir of that source directory is checked instead.
     """
-    if not file_path or not archive_dir:
-        return None
-    if not os.path.isdir(archive_dir):
+    if not file_path:
         return None
 
-    library_root = os.path.normpath(library_dir)
+    # Determine the correct archive_dir for this file
+    from app.config import get_settings
+    _s = get_settings()
+    actual_library_dir = library_dir
+    actual_archive_dir = archive_dir
+    norm_fp = os.path.normpath(file_path)
+    for lib_root in _s.get_all_library_dirs():
+        norm_root = os.path.normcase(os.path.normpath(lib_root))
+        if os.path.normcase(norm_fp).startswith(norm_root + os.sep):
+            actual_library_dir = lib_root
+            actual_archive_dir = os.path.join(lib_root, "_archive")
+            break
+
+    if not actual_archive_dir or not os.path.isdir(actual_archive_dir):
+        return None
+
+    library_root = os.path.normpath(actual_library_dir)
     norm_fp = os.path.normpath(file_path)
     if norm_fp.startswith(library_root + os.sep):
         rel = os.path.relpath(norm_fp, library_root)
@@ -94,7 +111,7 @@ def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Opt
         rel = os.path.basename(file_path)
 
     # 1) Exact match (same extension and name)
-    archive_path = os.path.join(archive_dir, rel)
+    archive_path = os.path.join(actual_archive_dir, rel)
     if os.path.isfile(archive_path):
         return archive_path
 
@@ -109,7 +126,7 @@ def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Opt
     import json
     rel_norm = os.path.normpath(rel)
     try:
-        for root, _dirs, fnames in os.walk(archive_dir):
+        for root, _dirs, fnames in os.walk(actual_archive_dir):
             if _MANIFEST_NAME not in fnames:
                 continue
             manifest_path = os.path.join(root, _MANIFEST_NAME)
@@ -483,17 +500,28 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
         if not os.path.isfile(temp_output) or os.path.getsize(temp_output) < 1024:
             raise RuntimeError("Encoded output file is missing or too small")
 
-        # Archive original to the configured archive directory,
-        # preserving relative path from library root
+        # Archive original to the _archive subdirectory of the
+        # library root that contains the file
         from app.config import get_settings as _get_settings
         _settings = _get_settings()
-        library_root = os.path.normpath(_settings.library_dir)
+
+        # Determine which library root this file belongs to
+        _archive_dir = _settings.archive_dir  # default
+        _lib_root = _settings.library_dir
         norm_input = os.path.normpath(input_path)
+        for _lr in _settings.get_all_library_dirs():
+            _nr = os.path.normcase(os.path.normpath(_lr))
+            if os.path.normcase(norm_input).startswith(_nr + os.sep):
+                _archive_dir = os.path.join(_lr, "_archive")
+                _lib_root = _lr
+                break
+
+        library_root = os.path.normpath(_lib_root)
         if norm_input.startswith(library_root + os.sep):
             rel = os.path.relpath(norm_input, library_root)
         else:
             rel = os.path.basename(input_path)
-        archive_path = os.path.join(_settings.archive_dir, rel)
+        archive_path = os.path.join(_archive_dir, rel)
         os.makedirs(os.path.dirname(archive_path), exist_ok=True)
         shutil.move(input_path, archive_path)
 
