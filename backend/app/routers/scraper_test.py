@@ -156,10 +156,10 @@ class ScraperTestResult(BaseModel):
 
 # â”€â”€ Per-test output file writer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-_SCRAPER_TEST_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-    "logs", "scraper_tests",
-)
+def _get_scraper_test_dir() -> str:
+    """Return the scraper test log directory, based on settings.log_dir."""
+    from app.config import get_settings
+    return os.path.join(get_settings().log_dir, "scraper_tests")
 
 
 def _safe_filename(text: str) -> str:
@@ -196,13 +196,14 @@ def _write_scraper_test_file(
     Returns the relative path to the file (from project root), or None on error.
     """
     try:
-        os.makedirs(_SCRAPER_TEST_DIR, exist_ok=True)
+        scraper_dir = _get_scraper_test_dir()
+        os.makedirs(scraper_dir, exist_ok=True)
 
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_artist = _safe_filename(artist)
         safe_title = _safe_filename(title)
         filename = f"{stamp}_{safe_artist}_{safe_title}.txt"
-        filepath = os.path.join(_SCRAPER_TEST_DIR, filename)
+        filepath = os.path.join(scraper_dir, filename)
 
         lines: List[str] = []
 
@@ -396,7 +397,7 @@ def _write_scraper_test_file(
         with open(filepath, "w", encoding="utf-8") as fh:
             fh.write(content)
 
-        rel_path = os.path.relpath(filepath, os.path.dirname(os.path.dirname(_SCRAPER_TEST_DIR)))
+        rel_path = os.path.relpath(filepath, os.path.dirname(os.path.dirname(scraper_dir)))
         logger.info(f"Scraper test trace written to: {filepath}")
         return rel_path
 

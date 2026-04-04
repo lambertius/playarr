@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, Check, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Search, Eye, EyeOff, Compass, Download, Power, ScrollText, ExternalLink } from "lucide-react";
+import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, Check, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Search, Eye, EyeOff, Compass, Download, Power, ScrollText, ExternalLink, Copy } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport } from "@/hooks/queries";
+import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport, useLibraryDuplicateScan } from "@/hooks/queries";
 import { useGenreBlacklist, useUpdateGenreBlacklist, useCreateGenre } from "@/hooks/queries";
 import { settingsApi, libraryApi, statsApi } from "@/lib/api";
 import { ErrorState, Skeleton } from "@/components/Feedback";
@@ -223,6 +223,14 @@ const SETTING_META: Record<string, SettingMeta> = {
     tooltip:
       "When enabled, a tray icon appears with Open and Quit actions.\n\n" +
       "Requires pystray + Pillow (included by default). Takes effect on next server start.",
+  },
+  "startup_duplicate_scan": {
+    group: "server",
+    label: "Duplicate Scan on Startup",
+    description: "Automatically scan for duplicate videos when the server starts.",
+    tooltip:
+      "Runs a background duplicate detection scan each time Playarr starts.\n\n" +
+      "Flagged items appear in the Review Queue under the Duplicates tab.",
   },
   "import_scrape_wikipedia": {
     group: "import",
@@ -806,6 +814,7 @@ function StartupControls({
   const delaySec = settings["startup_delay_seconds"]?.value ?? "0";
   const autoOpen = settings["auto_open_browser"]?.value === "true";
   const trayIcon = settings["minimize_to_tray"]?.value === "true";
+  const dupeScanStartup = settings["startup_duplicate_scan"]?.value === "true";
   const [delayInput, setDelayInput] = useState(delaySec);
   const [syncing, setSyncing] = useState(false);
 
@@ -941,6 +950,33 @@ function StartupControls({
           <span
             className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
               trayIcon ? "translate-x-[18px]" : "translate-x-[3px]"
+            }`}
+          />
+        </button>
+      </div>
+
+      {/* Duplicate Scan on Startup */}
+      <div className="flex items-center justify-between">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm font-medium text-text-primary">Duplicate Scan on Startup</p>
+            <Tooltip content="Runs a background duplicate detection scan each time Playarr starts. Flagged items appear in the Review Queue.">
+              <Info size={13} className="text-text-muted cursor-help" />
+            </Tooltip>
+          </div>
+          <p className="text-xs text-text-muted mt-0.5">
+            Automatically check for duplicate videos on launch
+          </p>
+        </div>
+        <button
+          onClick={() => onSave("startup_duplicate_scan", dupeScanStartup ? "false" : "true", "bool")}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+            dupeScanStartup ? "bg-accent" : "bg-surface-3"
+          }`}
+        >
+          <span
+            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+              dupeScanStartup ? "translate-x-[18px]" : "translate-x-[3px]"
             }`}
           />
         </button>
@@ -1646,6 +1682,7 @@ function LibraryMaintenanceContent() {
   const { toast } = useToast();
   const scanMutation = useLibraryScan();
   const exportMutation = useLibraryExport();
+  const dupeMutation = useLibraryDuplicateScan();
   const [cleanDialogOpen, setCleanDialogOpen] = useState(false);
   const [exportMode, setExportMode] = useState<string>("skip_existing");
 
@@ -1672,6 +1709,26 @@ function LibraryMaintenanceContent() {
             >
               <ScanLine size={14} />
               {scanMutation.isPending ? "Scanning…" : "Scan"}
+            </button>
+          </div>
+          <div className="flex items-start gap-3">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-text-secondary">Scan for Duplicates</p>
+              <p className="text-xs text-text-muted leading-relaxed">
+                Detect potential duplicate videos by comparing artist and title. Flagged items appear in the Review Queue for resolution.
+              </p>
+            </div>
+            <button
+              onClick={() =>
+                dupeMutation.mutate(undefined, {
+                  onSuccess: () => toast({ type: "success", title: "Duplicate scan started" }),
+                })
+              }
+              disabled={dupeMutation.isPending}
+              className="btn-secondary btn-sm flex items-center gap-1.5 shrink-0"
+            >
+              <Copy size={14} />
+              {dupeMutation.isPending ? "Scanning…" : "Scan"}
             </button>
           </div>
           <div className="flex items-start gap-3">

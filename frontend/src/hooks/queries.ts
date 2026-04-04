@@ -335,6 +335,14 @@ export function useLibraryScan() {
   });
 }
 
+export function useLibraryDuplicateScan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => jobsApi.libraryDuplicateScan(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+  });
+}
+
 export function useLibraryExport() {
   const qc = useQueryClient();
   return useMutation({
@@ -557,7 +565,7 @@ export function useBatchDeleteReview() {
 export function useBatchScrapeReview() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (videoIds: number[]) => reviewApi.batchScrape(videoIds),
+    mutationFn: ({ videoIds, options }: { videoIds: number[]; options?: { scrape_wikipedia?: boolean; scrape_musicbrainz?: boolean; ai_auto?: boolean; ai_only?: boolean; normalize?: boolean } }) => reviewApi.batchScrape(videoIds, options),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["reviewQueue"] });
       qc.invalidateQueries({ queryKey: ["jobs"] });

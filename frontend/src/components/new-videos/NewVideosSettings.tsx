@@ -6,10 +6,11 @@ interface NVSettingDef {
   key: string;
   label: string;
   description: string;
-  type: "bool" | "int" | "float" | "string";
+  type: "bool" | "int" | "float" | "string" | "select";
   min?: number;
   max?: number;
   step?: number;
+  options?: { value: string; label: string }[];
 }
 
 const SECTIONS: { title: string; settings: NVSettingDef[] }[] = [
@@ -17,6 +18,13 @@ const SECTIONS: { title: string; settings: NVSettingDef[] }[] = [
     title: "Feed Behaviour",
     settings: [
       { key: "nv_enabled", label: "Enable Discovery", description: "Turn the New Videos discovery system on or off.", type: "bool" },
+      { key: "nv_preferred_resolution", label: "Preferred Resolution", description: "Maximum video resolution to download. 'Maximum Available' grabs the best quality.", type: "select", options: [
+        { value: "max", label: "Maximum Available" },
+        { value: "2160", label: "4K (2160p)" },
+        { value: "1080", label: "Full HD (1080p)" },
+        { value: "720", label: "HD (720p)" },
+        { value: "480", label: "SD (480p)" },
+      ] },
       { key: "nv_videos_per_category", label: "Videos Per Category", description: "Default number of videos shown in each category row.", type: "int", min: 5, max: 50 },
       { key: "nv_refresh_interval_minutes", label: "Refresh Interval (min)", description: "How often cached suggestions expire before the next refresh.", type: "int", min: 30, max: 1440, step: 30 },
       { key: "nv_auto_refresh_on_startup", label: "Auto-Refresh on Startup", description: "Automatically refresh suggestions when the app starts.", type: "bool" },
@@ -177,6 +185,29 @@ function SettingRow({
 
   // string
   const strVal = String(value ?? "");
+
+  if (def.type === "select" && def.options) {
+    return (
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <label className="text-sm font-medium text-text-primary">{def.label}</label>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{def.description}</p>
+        </div>
+        <div className="shrink-0 sm:pt-0.5">
+          <select
+            value={strVal}
+            onChange={(e) => onChange(def.key, e.target.value)}
+            className="w-48 px-2 py-1 rounded bg-bg-secondary border border-border text-sm text-text-primary"
+          >
+            {def.options.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col sm:flex-row sm:items-start gap-2">
       <div className="flex-1 min-w-0">

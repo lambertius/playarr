@@ -237,6 +237,31 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
             _mark_processing_state(db, video_id, "scenes_analyzed", method="scene_analysis")
             _mark_processing_state(db, video_id, "thumbnail_selected", method="scene_analysis")
             db.commit()
+
+            # Persist scene analysis to disk so it survives library clear + re-scan:
+            # 1. Update the XML sidecar with scene_analysis data
+            # 2. Copy thumb files into the video folder for fallback discovery
+            try:
+                from app.models import VideoItem
+                from app.ai.models import AIThumbnail
+                import shutil as _shutil
+
+                video = db.query(VideoItem).get(video_id)
+                if video and video.folder_path and os.path.isdir(video.folder_path):
+                    from app.services.playarr_xml import write_playarr_xml
+                    write_playarr_xml(video, db)
+
+                    thumbs = db.query(AIThumbnail).filter(
+                        AIThumbnail.video_id == video_id,
+                    ).all()
+                    for t in thumbs:
+                        if t.file_path and os.path.isfile(t.file_path):
+                            dest = os.path.join(video.folder_path, os.path.basename(t.file_path))
+                            if not os.path.isfile(dest):
+                                _shutil.copy2(t.file_path, dest)
+            except Exception as exc:
+                ws.log(f"Scene analysis persist-to-disk: {exc}", level="warning")
+
             return
         except ImportError:
             return

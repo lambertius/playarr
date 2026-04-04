@@ -434,6 +434,7 @@ def record_feedback(req: FeedbackRequest, db: Session = Depends(get_db)):
 # New Videos settings with defaults
 NV_SETTINGS_DEFAULTS = {
     "nv_enabled": ("true", "bool"),
+    "nv_preferred_resolution": ("max", "string"),
     "nv_videos_per_category": ("15", "int"),
     "nv_refresh_interval_minutes": ("360", "int"),
     "nv_auto_refresh_on_startup": ("false", "bool"),

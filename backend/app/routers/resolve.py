@@ -23,10 +23,12 @@ POST /api/export/kodi            — export trigger
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -47,6 +49,45 @@ from app.matching.schemas import (
 from app.models import VideoItem, ProcessingJob, JobStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _record_review_history(vi: VideoItem, action: str) -> None:
+    """Append a review history entry to the video item."""
+    entry = {
+        "action": action,
+        "category": vi.review_category,
+        "reason": vi.review_reason,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    history = vi.review_history or []
+    history.append(entry)
+    vi.review_history = history
+
+
+def _persist_duplicate_dismissal(vi: VideoItem, db) -> None:
+    """Parse partner IDs from review_reason and add reciprocal
+    dismissed_duplicate_ids so the pair/group won't be re-flagged."""
+    id_match = re.search(r'ID\(s\):\s*([\d,\s]+)', vi.review_reason or "")
+    if not id_match:
+        return
+    partner_ids = [int(x.strip()) for x in id_match.group(1).split(',') if x.strip().isdigit()]
+    existing_partners = [
+        pid for pid in partner_ids
+        if db.query(VideoItem.id).filter(VideoItem.id == pid).first()
+    ]
+    dismissed = vi.dismissed_duplicate_ids or []
+    for pid in existing_partners:
+        if pid not in dismissed:
+            dismissed.append(pid)
+    vi.dismissed_duplicate_ids = dismissed
+    # Reciprocal: add vi.id to each partner's dismissed list
+    for pid in existing_partners:
+        partner = db.query(VideoItem).filter(VideoItem.id == pid).first()
+        if partner:
+            p_dismissed = partner.dismissed_duplicate_ids or []
+            if vi.id not in p_dismissed:
+                p_dismissed.append(vi.id)
+                partner.dismissed_duplicate_ids = p_dismissed
 
 resolve_router = APIRouter(prefix="/api/resolve", tags=["resolve"])
 review_router = APIRouter(prefix="/api/review", tags=["review"])
@@ -471,9 +512,9 @@ def _build_review_item(vi: VideoItem, db: Session) -> ReviewItemOut:
     # Duplicate comparison: extract existing video id from review_reason
     dup_summary = None
     if cat == "duplicate" and vi.review_reason:
-        id_match = re.search(r'id=(\d+)', vi.review_reason)
+        id_match = re.search(r'ID\(s\):\s*([\d,\s]+)', vi.review_reason)
         if id_match:
-            existing_id = int(id_match.group(1))
+            existing_id = int(id_match.group(1).split(',')[0].strip())
             # Skip self-reference: hard-duplicate flags are placed on the
             # existing video itself, so the id in the reason points at itself.
             if existing_id != vi.id:
@@ -501,6 +542,12 @@ def _build_review_item(vi: VideoItem, db: Session) -> ReviewItemOut:
                         import_method=existing_vi.import_method,
                         quality_score=ex_qs.quality_score() if ex_qs else 0,
                     )
+
+    # Duplicate group key: normalized artist||title for visual grouping
+    _dup_group_key = None
+    if cat == "duplicate" and vi.artist and vi.title:
+        from app.tasks import _normalize_for_dup, _normalize_title_for_dup
+        _dup_group_key = f"{_normalize_for_dup(vi.artist)}||{_normalize_title_for_dup(vi.title)}"
 
     # Rename info: compute expected path for rename-category items
     _expected_path = None
@@ -552,6 +599,7 @@ def _build_review_item(vi: VideoItem, db: Session) -> ReviewItemOut:
         container=qs.container if qs else None,
         quality_score=qs.quality_score() if qs else 0,
         duplicate_of=dup_summary,
+        dup_group_key=_dup_group_key,
         expected_path=_expected_path,
     )
 
@@ -652,11 +700,24 @@ def batch_approve(
     db: Session = Depends(_get_db),
 ):
     """Approve multiple review items at once."""
-    updated = db.query(VideoItem).filter(
-        VideoItem.id.in_(video_ids)
-    ).update({VideoItem.review_status: "reviewed"}, synchronize_session="fetch")
+    items = db.query(VideoItem).filter(VideoItem.id.in_(video_ids)).all()
+    for vi in items:
+        # For duplicates: persist dismissed_duplicate_ids so pairs aren't re-flagged
+        if vi.review_category == "duplicate" and vi.review_reason:
+            _persist_duplicate_dismissal(vi, db)
+        _record_review_history(vi, "approved")
+        vi.review_status = "reviewed"
+        vi.review_reason = None
+        vi.review_category = None
     db.commit()
-    return {"status": "approved", "count": updated}
+    # Persist to XML sidecars
+    try:
+        from app.services.playarr_xml import write_playarr_xml
+        for vi in items:
+            write_playarr_xml(vi, db)
+    except Exception:
+        pass
+    return {"status": "approved", "count": len(items)}
 
 
 @review_router.post("/batch/dismiss")
@@ -665,15 +726,24 @@ def batch_dismiss(
     db: Session = Depends(_get_db),
 ):
     """Dismiss multiple review items at once."""
-    updated = db.query(VideoItem).filter(
-        VideoItem.id.in_(video_ids)
-    ).update({
-        VideoItem.review_status: "none",
-        VideoItem.review_reason: None,
-        VideoItem.review_category: None,
-    }, synchronize_session="fetch")
+    items = db.query(VideoItem).filter(VideoItem.id.in_(video_ids)).all()
+    for vi in items:
+        # For duplicates: persist dismissed_duplicate_ids so pairs aren't re-flagged
+        if vi.review_category == "duplicate" and vi.review_reason:
+            _persist_duplicate_dismissal(vi, db)
+        _record_review_history(vi, "dismissed")
+        vi.review_status = "none"
+        vi.review_reason = None
+        vi.review_category = None
     db.commit()
-    return {"status": "dismissed", "count": updated}
+    # Persist to XML sidecars
+    try:
+        from app.services.playarr_xml import write_playarr_xml
+        for vi in items:
+            write_playarr_xml(vi, db)
+    except Exception:
+        pass
+    return {"status": "dismissed", "count": len(items)}
 
 
 @review_router.post("/batch/apply-rename")
@@ -691,6 +761,7 @@ def batch_apply_rename(
             rename_to_expected(vid, db)
             vi = db.query(VideoItem).filter(VideoItem.id == vid).first()
             if vi:
+                _record_review_history(vi, "approved")
                 vi.review_status = "reviewed"
                 vi.review_reason = None
                 vi.review_category = None
@@ -717,9 +788,18 @@ def batch_delete_from_review(
     return batch_delete_videos(req, db)
 
 
+class BatchScrapeRequest(BaseModel):
+    video_ids: List[int]
+    scrape_wikipedia: bool = True
+    scrape_musicbrainz: bool = True
+    ai_auto: bool = False
+    ai_only: bool = False
+    normalize: bool = False
+
+
 @review_router.post("/batch/scrape")
 def batch_scrape_from_review(
-    video_ids: List[int],
+    req: BatchScrapeRequest,
     db: Session = Depends(_get_db),
 ):
     """Queue a metadata scrape (rescan) for multiple review items.
@@ -731,7 +811,7 @@ def batch_scrape_from_review(
     from app.worker import dispatch_task
     from datetime import datetime, timezone
 
-    items = db.query(VideoItem).filter(VideoItem.id.in_(video_ids)).all()
+    items = db.query(VideoItem).filter(VideoItem.id.in_(req.video_ids)).all()
     if not items:
         raise HTTPException(404, "No matching videos found")
 
@@ -760,7 +840,11 @@ def batch_scrape_from_review(
         db.add(sub_job)
         db.flush()
         sub_job_ids.append(sub_job.id)
-        dispatch_task(rescan_metadata_task, job_id=sub_job.id, video_id=vid)
+        dispatch_task(rescan_metadata_task, job_id=sub_job.id, video_id=vid,
+                      scrape_wikipedia=req.scrape_wikipedia,
+                      scrape_musicbrainz=req.scrape_musicbrainz,
+                      ai_auto=req.ai_auto, ai_only=req.ai_only,
+                      normalize=req.normalize)
 
     job.status = JobStatus.analyzing
     job.current_step = f"Scraping {len(ids)} videos"
@@ -832,8 +916,24 @@ def approve_review_item(
     vi = db.query(VideoItem).filter(VideoItem.id == video_id).first()
     if not vi:
         raise HTTPException(404, "Video not found")
+
+    # For duplicates: persist dismissed_duplicate_ids so the pair is never re-flagged
+    if vi.review_category == "duplicate" and vi.review_reason:
+        _persist_duplicate_dismissal(vi, db)
+
+    _record_review_history(vi, "approved")
     vi.review_status = "reviewed"
+    vi.review_reason = None
+    vi.review_category = None
     db.commit()
+
+    # Persist to XML sidecar
+    try:
+        from app.services.playarr_xml import write_playarr_xml
+        write_playarr_xml(vi, db)
+    except Exception:
+        pass
+
     return {"status": "approved", "video_id": video_id}
 
 
@@ -846,10 +946,24 @@ def dismiss_review_item(
     vi = db.query(VideoItem).filter(VideoItem.id == video_id).first()
     if not vi:
         raise HTTPException(404, "Video not found")
+
+    # For duplicates: persist dismissed_duplicate_ids so the pair isn't re-flagged
+    if vi.review_category == "duplicate" and vi.review_reason:
+        _persist_duplicate_dismissal(vi, db)
+
+    _record_review_history(vi, "dismissed")
     vi.review_status = "none"
     vi.review_reason = None
     vi.review_category = None
     db.commit()
+
+    # Update XML sidecar to persist the dismissed_duplicate_ids
+    try:
+        from app.services.playarr_xml import write_playarr_xml
+        write_playarr_xml(vi, db)
+    except Exception:
+        pass
+
     return {"status": "dismissed", "video_id": video_id}
 
 

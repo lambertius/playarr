@@ -1020,8 +1020,10 @@ def _step_resolve_metadata(ws: ImportWorkspace, artist: str, title: str,
                                           source_url=identity.get("source_url", ""))
             if summary:
                 metadata["plot"] = summary
-        except Exception:
-            pass
+            else:
+                ws.log("AI summary returned empty — raw scraped text kept as plot", level="warning")
+        except Exception as e:
+            ws.log(f"AI summary generation failed: {e}", level="warning")
 
     ws.write_artifact("scraper_results", metadata)
     # Persist AI failures separately so the pipeline can inject them into the job record

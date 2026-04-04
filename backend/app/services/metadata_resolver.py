@@ -2492,25 +2492,25 @@ def extract_album_wiki_url_from_single(single_wiki_url: str) -> Optional[str]:
         if not infobox:
             return None
 
-        # Method 1: infobox-header elements with "from the album ..."
+        # Method 1: infobox-header elements with "from the album/EP ..."
         for elem in infobox.find_all(["th", "td"], {"class": "infobox-header"}):
             text = elem.get_text(strip=True).lower()
             # Require "from" to distinguish "from the album X" (single page)
             # from "Studio album by Artist" (album page).  Without this,
             # album pages return the generic /wiki/Album link.
-            if "from" in text and "album" in text:
+            if "from" in text and ("album" in text or "ep " in text or text.endswith(" ep") or " ep" in text):
                 a_tag = elem.find("a", href=True)
                 if a_tag:
                     href = a_tag["href"]
                     if href.startswith("/wiki/"):
                         url = f"https://en.wikipedia.org{href}"
-                        logger.info(f"Album wiki URL extracted from single infobox: {url}")
+                        logger.info(f"Album/EP wiki URL extracted from single infobox: {url}")
                         return url
 
-        # Method 2: Regular row with "Album" / "from the album" label
+        # Method 2: Regular row with "Album" / "EP" / "from the album" label
         for th in infobox.find_all("th"):
             label = th.get_text(strip=True).lower()
-            if label in ("album", "from the album", "from"):
+            if label in ("album", "ep", "from the album", "from the ep", "from"):
                 td = th.find_next_sibling("td")
                 if td:
                     a_tag = td.find("a", href=True)
@@ -2518,7 +2518,7 @@ def extract_album_wiki_url_from_single(single_wiki_url: str) -> Optional[str]:
                         href = a_tag["href"]
                         if href.startswith("/wiki/"):
                             url = f"https://en.wikipedia.org{href}"
-                            logger.info(f"Album wiki URL extracted from single infobox: {url}")
+                            logger.info(f"Album/EP wiki URL extracted from single infobox: {url}")
                             return url
     except Exception as e:
         logger.debug(f"Album URL extraction from single page failed: {e}")

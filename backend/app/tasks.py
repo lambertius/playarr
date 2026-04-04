@@ -423,6 +423,39 @@ def _is_processing_complete(video_item: VideoItem, step: str) -> bool:
     return bool(entry and entry.get("completed"))
 
 
+def _safe_commit(db, retries: int = 5):
+    """Commit with retry on transient SQLite 'database is locked' errors.
+
+    On lock contention, rolls back, waits with exponential backoff, and
+    retries.  Pending ORM modifications are lost after rollback — callers
+    should use this ONLY for commits where losing the batch is acceptable
+    (e.g. non-fatal sidecar sections) or re-apply changes after failure.
+    """
+    import time as _time
+    for attempt in range(retries):
+        try:
+            db.commit()
+            return
+        except Exception as e:
+            _err = str(e).lower()
+            _cause = str(getattr(e, '__cause__', '') or '').lower()
+            if ('database is locked' in _err or 'database is locked' in _cause
+                    or 'has been rolled back' in _err):
+                logger.warning(
+                    "DB locked on commit (attempt %d/%d), retrying...",
+                    attempt + 1, retries,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                _time.sleep(1.0 * (attempt + 1))
+                continue
+            raise
+    # final attempt — let it raise
+    db.commit()
+
+
 def _purge_stale_scene_data(db, video_id: int):
     """Delete any existing scene analyses and thumbnails for a video ID.
 
@@ -2782,7 +2815,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             elif hint_alternate:
                 video_item.version_type = "alternate"
             video_item.alternate_version_label = hint_alternate_label or None
-            db.commit()
+            _safe_commit(db)
             _append_job_log(job_id, f"Version type set: {video_item.version_type}"
                             + (f" ({hint_alternate_label})" if hint_alternate_label else ""))
 
@@ -3012,6 +3045,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                     _append_job_log(job_id, "AI enrichment skipped (provider not configured)")
                     _set_pipeline_step(job_id, "AI enrichment", "skipped")
             except Exception as e:
+                db.rollback()
                 _append_job_log(job_id, f"AI enrichment failed: {e}")
                 _set_pipeline_step(job_id, "AI enrichment", "failed")
                 logger.warning(f"AI-only enrichment failed for video {video_id}: {e}")
@@ -3080,9 +3114,10 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 else:
                     _append_job_log(job_id, "No MusicBrainz match found")
             except Exception as e:
+                db.rollback()
                 _append_job_log(job_id, f"MusicBrainz resolution failed: {e}")
 
-            db.commit()
+            _safe_commit(db)
 
             # Collect MusicBrainz source proposals
             proposed_source_list.extend(
@@ -3208,7 +3243,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                                 ))
                             updated_fields.append("poster")
 
-                db.commit()
+                _safe_commit(db)
 
                 # Collect Wikipedia source proposal
                 if wiki_url and not mismatch_reason:
@@ -3672,7 +3707,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
         _artwork_fields = {"poster", "artist_artwork", "album_artwork"}
         if _artwork_fields & set(updated_fields):
             _set_processing_flag(db, video_item, "artwork_fetched", method="scrape")
-            db.commit()
+            _safe_commit(db)
 
         # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         # Common: Create AIMetadataResult for user review
@@ -3785,7 +3820,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 change_summary=f"Proposed changes from {_model_label}: {', '.join(_all_proposed_keys)}" if proposed or proposed_source_list else f"No new metadata found from {_model_label}",
             )
             db.add(_scrape_result)
-            db.commit()
+            _safe_commit(db)
             _set_pipeline_step(job_id, "Storing proposed changes", "success")
             _append_job_log(job_id, f"Proposed changes stored for review (result_id={_scrape_result.id})")
 
@@ -3896,6 +3931,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 _set_pipeline_step(job_id, "Writing NFO", "success")
                 _append_job_log(job_id, "NFO sidecar written")
             except Exception as _nfo_e:
+                db.rollback()
                 _set_pipeline_step(job_id, "Writing NFO", "failed")
                 _append_job_log(job_id, f"NFO write error (non-fatal): {_nfo_e}")
 
@@ -3907,10 +3943,11 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 _set_pipeline_step(job_id, "Writing Playarr XML", "success")
                 _append_job_log(job_id, "Playarr XML sidecar written")
             except Exception as _xml_e:
+                db.rollback()
                 _set_pipeline_step(job_id, "Writing Playarr XML", "failed")
                 _append_job_log(job_id, f"Playarr XML write error (non-fatal): {_xml_e}")
 
-            db.commit()
+            _safe_commit(db)
 
         # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         # Common: Finalise
@@ -3950,7 +3987,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
         _set_pipeline_step(job_id, "Finalising", "success")
         _update_job(job_id, status=JobStatus.complete, progress_percent=100,
                     current_step=msg, completed_at=datetime.now(timezone.utc))
-        db.commit()
+        _safe_commit(db)
         _append_job_log(job_id, f"Metadata scrape complete. {msg}")
 
         # Queue normalize as a follow-up if requested
@@ -4522,9 +4559,30 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
 
                 # If XML sidecar exists, apply additional metadata
                 if xml_sidecar_data:
-                    video_item.review_status = xml_sidecar_data.get("review_status") or "needs_human_review"
-                    video_item.review_category = xml_sidecar_data.get("review_category") or "scanned"
-                    video_item.review_reason = xml_sidecar_data.get("review_reason") or video_item.review_reason
+                    # Determine if this XML represents a fully-processed item
+                    # that should NOT be flagged for review.
+                    ps = xml_sidecar_data.get("processing_state") or {}
+                    _completed = lambda step: ps.get(step, {}).get("completed", False)
+                    xml_fully_processed = (
+                        _completed("metadata_scraped")
+                        and (_completed("ai_enriched") or _completed("metadata_resolved"))
+                    )
+                    # Check if the item was previously dismissed from review
+                    xml_rh = xml_sidecar_data.get("review_history") or []
+                    previously_dismissed = any(
+                        h.get("action") == "dismissed" and h.get("category") == "scanned"
+                        for h in xml_rh
+                    )
+                    if xml_fully_processed or previously_dismissed:
+                        video_item.review_status = "none"
+                        video_item.review_category = None
+                        video_item.review_reason = None
+                    else:
+                        video_item.review_status = xml_sidecar_data.get("review_status") or "needs_human_review"
+                        video_item.review_category = xml_sidecar_data.get("review_category") or "scanned"
+                        video_item.review_reason = xml_sidecar_data.get("review_reason") or video_item.review_reason
+                    video_item.review_history = xml_rh or None
+                    video_item.dismissed_duplicate_ids = xml_sidecar_data.get("dismissed_duplicate_ids")
                     video_item.mb_artist_id = xml_sidecar_data.get("mb_artist_id")
                     video_item.mb_recording_id = xml_sidecar_data.get("mb_recording_id")
                     video_item.mb_release_id = xml_sidecar_data.get("mb_release_id")
@@ -4618,6 +4676,51 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                                 last_validated_at=datetime.now(timezone.utc),
                             ))
 
+                    # Restore scene analysis thumbnails from XML
+                    xml_sa = xml_sidecar_data.get("scene_analysis")
+                    if xml_sa and xml_sa.get("thumbnails"):
+                        from app.ai.models import AISceneAnalysis, AIThumbnail
+                        sa = AISceneAnalysis(
+                            video_id=video_item.id,
+                            status="complete",
+                            total_scenes=xml_sa.get("total_scenes", 0),
+                            duration_seconds=xml_sa.get("duration_seconds"),
+                            scenes=None,
+                            config=None,
+                        )
+                        db.add(sa)
+                        db.flush()
+                        thumb_dir = os.path.join(
+                            get_settings().asset_cache_dir,
+                            "thumbnails", str(video_item.id),
+                        )
+                        os.makedirs(thumb_dir, exist_ok=True)
+                        for td in xml_sa["thumbnails"]:
+                            old_path = td.get("file_path")
+                            new_path = os.path.join(
+                                thumb_dir,
+                                f"thumb_{td['timestamp_sec']:.2f}.jpg",
+                            )
+                            # Move/copy the file to the new cache location
+                            if old_path and os.path.isfile(old_path) and old_path != new_path:
+                                import shutil
+                                shutil.copy2(old_path, new_path)
+                            final_path = new_path if os.path.isfile(new_path) else old_path
+                            if final_path and os.path.isfile(final_path):
+                                db.add(AIThumbnail(
+                                    video_id=video_item.id,
+                                    scene_analysis_id=sa.id,
+                                    timestamp_sec=td["timestamp_sec"],
+                                    file_path=final_path,
+                                    score_sharpness=td.get("score_sharpness", 0),
+                                    score_contrast=td.get("score_contrast", 0),
+                                    score_color_variance=td.get("score_color_variance", 0),
+                                    score_composition=td.get("score_composition", 0),
+                                    score_overall=td.get("score_overall", 0),
+                                    is_selected=td.get("is_selected", False),
+                                    provenance=td.get("provenance", "xml_import"),
+                                ))
+
                     # Restore entity references (artist, album, canonical track)
                     entity_refs = xml_sidecar_data.get("entity_refs", {})
 
@@ -4701,6 +4804,49 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                         db, entity_refs, video_item, job_id,
                     )
 
+                # Fallback: discover thumb_*.jpg files in the video folder
+                # if no AIThumbnail records were created from XML.
+                from app.ai.models import AISceneAnalysis as _SA, AIThumbnail as _AT
+                has_thumbs = db.query(_AT).filter(
+                    _AT.video_id == video_item.id,
+                ).first() is not None
+                if not has_thumbs:
+                    import re as _re
+                    folder = entry["folder_path"]
+                    thumb_files = sorted([
+                        f for f in os.listdir(folder)
+                        if _re.match(r"thumb_[\d.]+\.jpg$", f)
+                    ])
+                    if thumb_files:
+                        sa = _SA(
+                            video_id=video_item.id,
+                            status="complete",
+                            total_scenes=len(thumb_files),
+                            duration_seconds=None,
+                        )
+                        db.add(sa)
+                        db.flush()
+                        thumb_dir = os.path.join(
+                            get_settings().asset_cache_dir,
+                            "thumbnails", str(video_item.id),
+                        )
+                        os.makedirs(thumb_dir, exist_ok=True)
+                        for fn in thumb_files:
+                            ts_match = _re.search(r"thumb_([\d.]+)\.jpg$", fn)
+                            ts = float(ts_match.group(1)) if ts_match else 0.0
+                            src = os.path.join(folder, fn)
+                            dst = os.path.join(thumb_dir, fn)
+                            if src != dst:
+                                import shutil
+                                shutil.copy2(src, dst)
+                            db.add(_AT(
+                                video_id=video_item.id,
+                                scene_analysis_id=sa.id,
+                                timestamp_sec=ts,
+                                file_path=dst,
+                                provenance="disk_discovery",
+                            ))
+
                 # Poster fallback: if no poster asset was created (XML missing
                 # poster, wrong XML picked, or no XML at all), discover a poster
                 # image directly from the folder.
@@ -4759,6 +4905,103 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
     except Exception as e:
         db.rollback()
         logger.error(f"Library scan failed: {e}")
+        _update_job(job_id, status=JobStatus.failed, error_message=str(e))
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Duplicate scan task
+# ---------------------------------------------------------------------------
+
+def _normalize_for_dup(s: str) -> str:
+    """Lower-case, strip articles, collapse whitespace for duplicate comparison."""
+    import re as _re
+    s = s.strip().lower()
+    s = _re.sub(r"^(the|a|an)\s+", "", s)
+    s = _re.sub(r"[^\w\s]", "", s)
+    return _re.sub(r"\s+", " ", s).strip()
+
+
+def _normalize_title_for_dup(title: str) -> str:
+    """Normalize title: strip trailing parenthetical version labels like
+    '(Alternate Version)', '(Live)', '(Clean Version)', etc."""
+    import re as _re
+    # Strip trailing parenthetical/bracketed suffixes that indicate versions
+    stripped = _re.sub(r'\s*[\(\[](alternate|live|acoustic|clean|explicit|remix|remaster|censored|uncensored|extended|short|radio|bonus|demo|instrumental|karaoke|version|edit|deluxe|remastered|official|hd|hq|lyric|lyrics|official\s*video|music\s*video|official\s*music\s*video)(?:\s+\w+)*[\)\]]\s*$', '', title, flags=_re.IGNORECASE)
+    return _normalize_for_dup(stripped)
+
+
+@celery_app.task(bind=True)
+def duplicate_scan_task(self, job_id: int):
+    """Scan library for potential duplicate video items by artist+title."""
+    _update_job(job_id, status=JobStatus.analyzing, started_at=datetime.now(timezone.utc),
+                celery_task_id=getattr(getattr(self, "request", None), "id", None))
+
+    db = SessionLocal()
+    try:
+        # First: clean stale dismissed_duplicate_ids referencing deleted videos
+        all_video_ids = set(
+            r[0] for r in db.query(VideoItem.id).all()
+        )
+        stale_cleaned = 0
+        for vi in db.query(VideoItem).filter(VideoItem.dismissed_duplicate_ids.isnot(None)).all():
+            cleaned = [did for did in (vi.dismissed_duplicate_ids or []) if did in all_video_ids]
+            if len(cleaned) != len(vi.dismissed_duplicate_ids or []):
+                vi.dismissed_duplicate_ids = cleaned if cleaned else None
+                stale_cleaned += 1
+        if stale_cleaned:
+            db.commit()
+            _append_job_log(job_id, f"Cleaned stale dismissed IDs from {stale_cleaned} items")
+
+        all_items = db.query(VideoItem).all()
+        _append_job_log(job_id, f"Scanning {len(all_items)} items for duplicates")
+
+        # Build buckets keyed by normalized artist + normalized title (with
+        # version labels stripped so "Never Meant" and "Never Meant (Alternate
+        # Version)" land in the same bucket).
+        buckets: dict[str, list[VideoItem]] = {}
+        for vi in all_items:
+            if not vi.artist or not vi.title:
+                continue
+            key = f"{_normalize_for_dup(vi.artist)}||{_normalize_title_for_dup(vi.title)}"
+            buckets.setdefault(key, []).append(vi)
+
+        dup_groups = {k: v for k, v in buckets.items() if len(v) > 1}
+        _append_job_log(job_id, f"Found {len(dup_groups)} potential duplicate groups")
+
+        flagged = 0
+        for key, items in dup_groups.items():
+            for vi in items:
+                other_ids = [x.id for x in items if x.id != vi.id]
+
+                # Check dismissed_duplicate_ids — skip if ALL partners are dismissed
+                dismissed = set(vi.dismissed_duplicate_ids or [])
+                undismissed = [oid for oid in other_ids if oid not in dismissed]
+                if not undismissed:
+                    continue
+
+                # Skip if already flagged for review
+                if vi.review_status in ("needs_human_review", "needs_ai_review"):
+                    continue
+
+                vi.review_status = "needs_human_review"
+                vi.review_category = "duplicate"
+                vi.review_reason = f"Potential duplicate of video ID(s): {', '.join(map(str, undismissed))}"
+                flagged += 1
+
+            if flagged % 50 == 0:
+                db.commit()
+                _update_job(job_id, progress_percent=min(95, int(flagged / max(len(dup_groups), 1) * 100)))
+
+        db.commit()
+        _append_job_log(job_id, f"Duplicate scan complete. {flagged} items flagged for review.")
+        _update_job(job_id, status=JobStatus.complete, progress_percent=100,
+                    completed_at=datetime.now(timezone.utc))
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Duplicate scan failed: {e}")
         _update_job(job_id, status=JobStatus.failed, error_message=str(e))
     finally:
         db.close()

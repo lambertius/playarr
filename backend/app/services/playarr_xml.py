@@ -161,6 +161,34 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
             if asset.height:
                 _txt(a, "height", asset.height)
 
+    # ── scene analysis thumbnails ──
+    from app.ai.models import AISceneAnalysis, AIThumbnail
+    analysis = db.query(AISceneAnalysis).filter(
+        AISceneAnalysis.video_id == video.id,
+        AISceneAnalysis.status == "complete",
+    ).first()
+    if analysis:
+        sa_el = SubElement(root, "scene_analysis")
+        _txt(sa_el, "total_scenes", analysis.total_scenes)
+        _opt(sa_el, "duration_seconds", analysis.duration_seconds)
+        thumbs = db.query(AIThumbnail).filter(
+            AIThumbnail.video_id == video.id,
+        ).order_by(AIThumbnail.score_overall.desc()).all()
+        if thumbs:
+            thumbs_el = SubElement(sa_el, "thumbnails")
+            for t in thumbs:
+                te = SubElement(thumbs_el, "thumb")
+                _txt(te, "timestamp_sec", t.timestamp_sec)
+                if t.file_path:
+                    _txt(te, "file", _rel_path(t.file_path, folder_path))
+                _txt(te, "score_sharpness", t.score_sharpness)
+                _txt(te, "score_contrast", t.score_contrast)
+                _txt(te, "score_color_variance", t.score_color_variance)
+                _txt(te, "score_composition", t.score_composition)
+                _txt(te, "score_overall", t.score_overall)
+                _txt(te, "is_selected", t.is_selected)
+                _opt(te, "provenance", t.provenance)
+
     # ── file info ──
     file_el = SubElement(root, "file")
     _opt(file_el, "resolution_label", video.resolution_label)
@@ -210,6 +238,22 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     _opt(flags, "review_status", video.review_status if video.review_status != "none" else None)
     _opt(flags, "review_reason", video.review_reason)
     _opt(flags, "review_category", video.review_category)
+
+    # Review history — preserves dismiss/clear actions across library moves
+    if video.review_history:
+        rh = SubElement(flags, "review_history")
+        for entry in video.review_history:
+            e = SubElement(rh, "entry")
+            _opt(e, "action", entry.get("action"))
+            _opt(e, "category", entry.get("category"))
+            _opt(e, "reason", entry.get("reason"))
+            _opt(e, "timestamp", entry.get("timestamp"))
+
+    # Dismissed duplicate IDs — video IDs confirmed as "not a duplicate"
+    if video.dismissed_duplicate_ids:
+        dd = SubElement(flags, "dismissed_duplicate_ids")
+        for did in video.dismissed_duplicate_ids:
+            _txt(dd, "id", did)
 
     # ── related versions ──
     if video.related_versions:
@@ -538,6 +582,33 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
                 "version": _text(step.find("version")) or None,
             }
 
+    # ── scene analysis ──
+    sa_el = root.find("scene_analysis")
+    if sa_el is not None:
+        sa_data: dict = {
+            "total_scenes": _int(sa_el.find("total_scenes")) or 0,
+            "duration_seconds": _float(sa_el.find("duration_seconds")),
+            "thumbnails": [],
+        }
+        thumbs_el = sa_el.find("thumbnails")
+        if thumbs_el is not None:
+            for te in thumbs_el.findall("thumb"):
+                thumb_file = _text(te.find("file"))
+                if thumb_file and not os.path.isabs(thumb_file):
+                    thumb_file = os.path.normpath(os.path.join(folder_path, thumb_file))
+                sa_data["thumbnails"].append({
+                    "timestamp_sec": _float(te.find("timestamp_sec")) or 0.0,
+                    "file_path": thumb_file,
+                    "score_sharpness": _float(te.find("score_sharpness")) or 0.0,
+                    "score_contrast": _float(te.find("score_contrast")) or 0.0,
+                    "score_color_variance": _float(te.find("score_color_variance")) or 0.0,
+                    "score_composition": _float(te.find("score_composition")) or 0.0,
+                    "score_overall": _float(te.find("score_overall")) or 0.0,
+                    "is_selected": _bool(te.find("is_selected")),
+                    "provenance": _text(te.find("provenance")) or "ai_scene_analysis",
+                })
+        result["scene_analysis"] = sa_data
+
     # ── flags ──
     flags_el = root.find("flags")
     if flags_el is not None:
@@ -554,6 +625,25 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         review_cat = _text(flags_el.find("review_category"))
         if review_cat:
             result["review_category"] = review_cat
+
+        # Review history
+        rh = flags_el.find("review_history")
+        if rh is not None:
+            result["review_history"] = []
+            for entry in rh.findall("entry"):
+                result["review_history"].append({
+                    "action": _text(entry.find("action")) or None,
+                    "category": _text(entry.find("category")) or None,
+                    "reason": _text(entry.find("reason")) or None,
+                    "timestamp": _text(entry.find("timestamp")) or None,
+                })
+
+        # Dismissed duplicate IDs
+        dd_el = flags_el.find("dismissed_duplicate_ids")
+        if dd_el is not None:
+            ids = [_int(id_el) for id_el in dd_el.findall("id") if _int(id_el)]
+            if ids:
+                result["dismissed_duplicate_ids"] = ids
 
     # ── related versions ──
     rv_el = root.find("related_versions")
