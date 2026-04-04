@@ -932,6 +932,74 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                 db.rollback()
                 ws.log(f"Poster scraper cleanup: {e}", level="warning")
 
+        # ── 3a. Fallback: Wikipedia single cover image ─────────────────
+        # If CoverArtArchive didn't produce a poster, try the Wikipedia
+        # single/song cover image that was scraped earlier.
+        try:
+            _poster_after_caa = db.query(MediaAsset).filter(
+                MediaAsset.video_id == video_id,
+                MediaAsset.asset_type == "poster",
+            ).first()
+            _wiki_image_url = metadata.get("image_url")
+            if not _poster_after_caa and _wiki_image_url and item and item.folder_path:
+                from app.services.metadata_resolver import download_image
+                from app.services.artwork_service import guarded_copy, validate_file
+
+                folder_name = os.path.basename(item.folder_path)
+                ts = int(datetime.now(timezone.utc).timestamp())
+                _wp_poster = os.path.join(item.folder_path, f"{folder_name}-poster-pending-{ts}.jpg")
+                _wp_thumb = os.path.join(item.folder_path, f"{folder_name}-thumb-pending-{ts}.jpg")
+
+                if download_image(_wiki_image_url, _wp_poster):
+                    guarded_copy(_wp_poster, _wp_thumb)
+                    _wp_vr = validate_file(_wp_poster) if os.path.isfile(_wp_poster) else None
+                    with _apply_lock:
+                        for _wp_type, _wp_path in [("poster", _wp_poster), ("thumb", _wp_thumb)]:
+                            db.query(MediaAsset).filter(
+                                MediaAsset.video_id == video_id,
+                                MediaAsset.asset_type == _wp_type,
+                            ).delete(synchronize_session="fetch")
+                            db.add(MediaAsset(
+                                video_id=video_id, asset_type=_wp_type,
+                                file_path=_wp_path, source_url=_wiki_image_url,
+                                provenance="artwork_pipeline",
+                                status="valid" if (_wp_vr and _wp_vr.valid) else "invalid",
+                                width=_wp_vr.width if _wp_vr and _wp_vr.valid else None,
+                                height=_wp_vr.height if _wp_vr and _wp_vr.valid else None,
+                                file_size_bytes=_wp_vr.file_size_bytes if _wp_vr and _wp_vr.valid else None,
+                                file_hash=_wp_vr.file_hash if _wp_vr and _wp_vr.valid else None,
+                                last_validated_at=datetime.now(timezone.utc),
+                            ))
+                        db.commit()
+                    # Rename pending -> final
+                    for _wp_pend, _wp_final, _wp_atype in [
+                        (_wp_poster, os.path.join(item.folder_path, f"{folder_name}-poster.jpg"), "poster"),
+                        (_wp_thumb, os.path.join(item.folder_path, f"{folder_name}-thumb.jpg"), "thumb"),
+                    ]:
+                        try:
+                            if os.path.isfile(_wp_final):
+                                os.remove(_wp_final)
+                            os.rename(_wp_pend, _wp_final)
+                            with _apply_lock:
+                                db.query(MediaAsset).filter(
+                                    MediaAsset.video_id == video_id,
+                                    MediaAsset.asset_type == _wp_atype,
+                                ).update({"file_path": _wp_final})
+                                db.commit()
+                        except Exception:
+                            pass
+                    ws.log("Poster fallback: using Wikipedia single cover image")
+                else:
+                    for _f in (_wp_poster, _wp_thumb):
+                        try:
+                            if os.path.isfile(_f):
+                                os.remove(_f)
+                        except OSError:
+                            pass
+        except Exception as e:
+            db.rollback()
+            ws.log(f"Poster wiki fallback: {e}", level="warning")
+
         # â”€â”€ 3b. Fallback: create poster from video thumb if none exists â”€â”€
         # When no CoverArtArchive poster was fetched (e.g. mb_release_id is
         # None), use the existing library thumbnail as the poster so the

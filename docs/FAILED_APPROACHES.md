@@ -1526,3 +1526,13 @@ The `_album_is_title_duplicate` guard was designed for one failure mode (AI inve
 
 ### ANTI-PATTERN: Asymmetric matching between related extraction functions
 Functions that extract different aspects of the same data (text vs URL from the same infobox) must use the same keyword matching. When `_extract_infobox_album()` handles EPs but `extract_album_wiki_url_from_single()` does not, EP-released singles silently lose their album cross-link while still having the album name extracted — a partial failure that's hard to diagnose.
+
+### FAILED: `_find_parent_album` accepting Various Artists compilations not tagged as compilations (Attempt 1)
+- **What was tried:** `_find_parent_album()` in `metadata_resolver.py` browses MusicBrainz releases for a recording ID and selects release groups with `primary-type: "Album"` that have no excluded secondary types (compilation, DJ-mix, soundtrack, etc. in `_EXCLUDED_SECONDARY_TYPES`).
+- **Why it failed:** MusicBrainz release group `70cc702d-578e-4160-9b2c-f7dc43a93aa0` ("Die Ultimative Chartshow - Hits 2025") is a Various Artists compilation, but its `secondary-type-list` is **empty** — it has no "compilation" tag despite being credited to "Various Artists" (MB ID `89ad4ac3-39f7-470e-963a-56509c546377`). Because `_find_parent_album` only checked secondary types and never checked the artist credit, this VA compilation passed the filter and was selected as the parent album for Myles Smith's "Nice To Meet You". This then set `mb_album_release_group_id`, which triggered the AI Final Review album-override guard, blocking the AI from correcting the album name.
+- **Lesson:** MusicBrainz secondary-type tagging is inconsistent. Some compilations are not tagged with the "compilation" secondary type. Always check the artist credit as a secondary guard — if a release is credited to "Various Artists", it's a compilation regardless of secondary types.
+- **Fix applied:** Added `'artist-credits'` to the `browse_releases` includes list, and added a check in `_extract_album()` that skips releases where the first artist-credit's `artist.id` matches the "Various Artists" MB ID (`89ad4ac3-39f7-470e-963a-56509c546377`). Applied to both `services/metadata_resolver.py` and `scraper/metadata_resolver.py`.
+
+### IMPROVEMENT: Wikipedia single cover image as poster fallback
+- **What was added:** When CoverArtArchive doesn't produce a poster (section 3 of deferred.py), a new section 3a now falls back to the Wikipedia single cover image (`metadata["image_url"]`) before the final video-thumbnail fallback (section 3b). This ensures videos whose singles aren't in CoverArtArchive still get proper artwork from Wikipedia.
+- **Applied to:** `pipeline/deferred.py`, `pipeline_lib/deferred.py`, `pipeline_url/deferred.py`.
