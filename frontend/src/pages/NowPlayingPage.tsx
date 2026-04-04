@@ -372,6 +372,17 @@ export function NowPlayingPage() {
   const isFullscreen = fullscreenMode !== "off";
   const isVideoOnly = fullscreenMode === "video";
 
+  // ── Sync store when native fullscreen is exited via Escape / browser chrome ──
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement && usePlaybackStore.getState().fullscreenMode !== "off") {
+        setFullscreenMode("off");
+      }
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, [setFullscreenMode]);
+
   // ── Fetch full video detail for metadata overlay when track changes ──
   useEffect(() => {
     if (!track || overlayDuration <= 0) {

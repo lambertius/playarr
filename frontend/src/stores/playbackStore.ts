@@ -264,14 +264,27 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
 
   setFullscreenMode: (mode) => {
     set({ fullscreenMode: mode });
+    if (mode !== "off" && !document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else if (mode === "off" && document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
   },
   cycleFullscreen: () => {
     const s = get();
     const modes: FullscreenMode[] = ["off", "theater", "video"];
     const next = modes[(modes.indexOf(s.fullscreenMode) + 1) % modes.length];
     set({ fullscreenMode: next });
+    if (next !== "off" && !document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else if (next === "off" && document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
   },
   exitFullscreen: () => {
     set({ fullscreenMode: "off" });
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
   },
 }));
