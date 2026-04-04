@@ -605,6 +605,32 @@ def restart_server():
     return NamingPreviewResponse(examples=examples)
 
 
+# ─── Open a directory in the OS file manager ─────────────────────
+
+class OpenDirectoryRequest(BaseModel):
+    path: str
+
+
+@router.post("/open-directory")
+def open_directory(body: OpenDirectoryRequest):
+    """Open a directory in the OS file manager.
+
+    Only allows opening directories that actually exist.
+    """
+    target = os.path.normpath(os.path.abspath(body.path))
+    if not os.path.isdir(target):
+        raise HTTPException(404, f"Directory does not exist: {target}")
+
+    if sys.platform == "win32":
+        os.startfile(target)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+    else:
+        subprocess.Popen(["xdg-open", target])
+
+    return {"ok": True, "path": target}
+
+
 # ---------------------------------------------------------------------------
 # Windows Startup Management
 # ---------------------------------------------------------------------------

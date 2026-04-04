@@ -209,6 +209,9 @@ export const jobsApi = {
   logFiles: () =>
     api.get<LogFileEntry[]>("/jobs/logs/files").then(r => r.data),
 
+  logDirectory: () =>
+    api.get<{ path: string }>("/jobs/logs/directory").then(r => r.data),
+
   readLog: (params: { file: string; tail?: number; offset?: number; limit?: number }) =>
     api.get<LogReadResponse>("/jobs/logs/read", { params }).then(r => r.data),
 };
@@ -282,6 +285,9 @@ export const settingsApi = {
 
   defaults: () =>
     api.get<{ library_dir: string; archive_dir: string }>("/settings/defaults").then(r => r.data),
+
+  openDirectory: (path: string) =>
+    api.post<{ ok: boolean; path: string }>("/settings/open-directory", { path }).then(r => r.data),
 };
 
 // ─── Stats ────────────────────────────────────────────────

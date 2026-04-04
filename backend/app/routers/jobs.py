@@ -792,6 +792,14 @@ def list_log_files():
     return result
 
 
+@router.get("/logs/directory")
+def get_log_directory():
+    """Return the absolute path to the log directory."""
+    from app.config import get_settings
+    log_dir = get_settings().log_dir
+    return {"path": os.path.abspath(log_dir)}
+
+
 @router.get("/logs/read")
 def read_log_file(
     file: str = Query(..., description="Relative log filename (e.g. playarr.log, jobs/42.log)"),

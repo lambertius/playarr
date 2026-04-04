@@ -1357,7 +1357,8 @@ def _re_organize_file(db, video_id: int, ws: ImportWorkspace) -> None:
     if not os.path.isdir(item.folder_path):
         return
 
-    from app.pipeline_url.services.file_organizer import build_folder_name, sanitize_filename
+    from app.services.file_organizer import build_folder_name, build_library_subpath, sanitize_filename
+    from app.config import get_settings
 
     version_type = item.version_type or "normal"
     alt_label = item.alternate_version_label or ""
@@ -1374,18 +1375,37 @@ def _re_organize_file(db, video_id: int, ws: ImportWorkspace) -> None:
     old_folder = item.folder_path
     old_folder_name = os.path.basename(old_folder)
 
-    if old_folder_name == new_folder_name:
+    # Build subpath using configured folder structure
+    subpath = build_library_subpath(
+        item.artist, item.title, resolution,
+        album=item.album or "",
+        version_type=version_type,
+        alternate_version_label=alt_label,
+    )
+    settings = get_settings()
+    library_dir = settings.library_dir
+    new_folder = os.path.join(library_dir, subpath)
+
+    if os.path.normpath(old_folder) == os.path.normpath(new_folder):
         return  # already correct
 
-    library_dir = os.path.dirname(old_folder)
-    new_folder = os.path.join(library_dir, new_folder_name)
+    # Ensure parent directories exist (for nested structures like Artist/VideoFolder)
+    os.makedirs(os.path.dirname(new_folder), exist_ok=True)
 
-    # Rename the folder
+    # Rename/move the folder
     try:
         os.rename(old_folder, new_folder)
     except OSError as e:
         ws.log(f"File rename failed: {e}", level="warning")
         return
+
+    # Clean up empty parent directories left behind
+    old_parent = os.path.dirname(old_folder)
+    if old_parent != os.path.normpath(library_dir) and os.path.isdir(old_parent):
+        try:
+            os.rmdir(old_parent)  # only removes if empty
+        except OSError:
+            pass
 
     # Rename the video file inside the folder
     old_file = item.file_path
