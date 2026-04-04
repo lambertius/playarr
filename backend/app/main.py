@@ -769,6 +769,47 @@ def _version_tuple(v: str):
         return (0, 0, 0)
 
 
+def _backfill_missing_durations():
+    """One-shot backfill: populate duration_seconds for any QualitySignature rows
+    that have NULL duration_seconds.  Runs ffprobe per-file; skips files that are
+    missing from disk.  Low-overhead because it only touches rows lacking data."""
+    try:
+        from app.database import SessionLocal
+        from app.models import QualitySignature, VideoItem
+        from app.pipeline_lib.services.media_analyzer import extract_quality_signature
+
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(QualitySignature)
+                .filter(QualitySignature.duration_seconds.is_(None))
+                .all()
+            )
+            if not rows:
+                return
+            logger.info(f"Backfilling duration_seconds for {len(rows)} track(s)...")
+            filled = 0
+            for qs in rows:
+                vi = db.query(VideoItem).filter(VideoItem.id == qs.video_id).first()
+                if not vi or not vi.file_path or not os.path.isfile(vi.file_path):
+                    continue
+                try:
+                    sig = extract_quality_signature(vi.file_path)
+                    dur = sig.get("duration_seconds")
+                    if dur and dur > 0:
+                        qs.duration_seconds = dur
+                        filled += 1
+                except Exception:
+                    pass  # skip broken files silently
+            if filled:
+                db.commit()
+                logger.info(f"Backfilled duration_seconds for {filled} track(s)")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Duration backfill failed (non-fatal): {e}")
+
+
 def _maybe_startup_duplicate_scan():
     """Fire a duplicate scan at startup if the setting is enabled."""
     try:
@@ -880,6 +921,9 @@ async def lifespan(app: FastAPI):
 
     # Start background watchdog for stuck Finalizing jobs
     watchdog_task = asyncio.create_task(_finalizing_watchdog())
+
+    # --- Backfill missing duration_seconds values ---
+    _backfill_missing_durations()
 
     # --- Optional startup duplicate scan ---
     _maybe_startup_duplicate_scan()

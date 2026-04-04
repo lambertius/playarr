@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.4.1] - 2026-04-04
+
+### Fixed
+- **Video Player: Duration Display** — replaced native browser video controls with custom controls that use the stored `duration_seconds` from the database, fixing the bug where track length rendered incorrectly and adjusted as the video progressed
+- **Duration Backfill** — added a one-shot startup task that populates `duration_seconds` via ffprobe for any existing tracks missing the value; subsequent startups skip it automatically
+
 ## [1.4.0] - 2026-04-04
 
 ### Fixed

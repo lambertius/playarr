@@ -169,6 +169,7 @@ export function VideoDetailPage() {
               videoId={video.id}
               poster={playerPoster}
               className="w-full h-full object-contain rounded-xl"
+              durationSeconds={q?.duration_seconds}
             />
           </div>
         </div>
