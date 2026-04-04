@@ -695,9 +695,7 @@ def delete_entity_cached_assets(entity_type: str, entity_id: int, db):
     # Also clean up the entity cache directory
     from app.config import get_settings
     settings = get_settings()
-    cache_dir = getattr(settings, "asset_cache_dir", None)
-    if not cache_dir:
-        cache_dir = os.path.join(os.path.dirname(settings.library_dir), "PlayarrCache", "assets")
+    cache_dir = settings.asset_cache_dir
     entity_dir = os.path.join(cache_dir, f"{entity_type}s", str(entity_id))
     if os.path.isdir(entity_dir):
         try:
@@ -934,9 +932,7 @@ def fetch_and_store_entity_asset(
     }
 
     settings = get_settings()
-    cache_dir = getattr(settings, "asset_cache_dir", None)
-    if not cache_dir:
-        cache_dir = os.path.join(os.path.dirname(settings.library_dir), "PlayarrCache", "assets")
+    cache_dir = settings.asset_cache_dir
     dest_dir = os.path.join(cache_dir, f"{entity_type}s", str(entity_id))
     os.makedirs(dest_dir, exist_ok=True)
     dest_path = os.path.join(dest_dir, f"{kind}.jpg")

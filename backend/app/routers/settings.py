@@ -24,7 +24,6 @@ router = APIRouter(prefix="/api/settings", tags=["Settings"])
 DEFAULT_SETTINGS = {
     "library_dir": ("./data/library", "string"),
     "library_source_dirs": ("[]", "json"),
-    "archive_dir": ("./data/archive", "string"),
     "normalization_target_lufs": ("-14.0", "float"),
     "normalization_lra": ("7.0", "float"),
     "normalization_tp": ("-1.5", "float"),
@@ -110,6 +109,11 @@ def update_setting(update: SettingUpdate, user_id: Optional[str] = None, db: Ses
     # Sync directory settings to the pydantic config singleton
     _sync_dir_setting_to_config(update.key, update.value)
 
+    # Ensure critical subdirectories when library_dir changes
+    if update.key == "library_dir":
+        from app.config import ensure_library_subdirs
+        ensure_library_subdirs(update.value)
+
     return SettingOut(key=setting.key, value=setting.value, value_type=setting.value_type)
 
 
@@ -120,14 +124,13 @@ def get_defaults():
     rdirs = RuntimeDirs()
     return {
         "library_dir": str(rdirs.library_dir),
-        "archive_dir": str(rdirs.archive_dir),
     }
 
 
 def _sync_dir_setting_to_config(key: str, value: str) -> None:
     """Keep the cached pydantic Settings in sync with DB for directory/naming keys."""
     from app.config import get_settings
-    _sync_keys = {"library_dir", "library_source_dirs", "archive_dir",
+    _sync_keys = {"library_dir", "library_source_dirs",
                   "library_naming_pattern", "library_folder_structure"}
     if key in _sync_keys:
         settings = get_settings()
@@ -208,6 +211,13 @@ def update_source_directories(body: SourceDirsUpdate, db: Session = Depends(get_
 
     import_job_id = None
     cleaned_count = 0
+
+    # --- Ensure critical subdirectories for newly added source dirs ---
+    if added:
+        from app.config import ensure_library_subdirs
+        for add_dir in added:
+            if os.path.isdir(add_dir):
+                ensure_library_subdirs(add_dir)
 
     # --- Auto-import from newly added directories ---
     if added:
@@ -622,7 +632,7 @@ def open_directory(body: OpenDirectoryRequest):
         raise HTTPException(404, f"Directory does not exist: {target}")
 
     if sys.platform == "win32":
-        os.startfile(target)
+        subprocess.Popen(["explorer", target])
     elif sys.platform == "darwin":
         subprocess.Popen(["open", target])
     else:

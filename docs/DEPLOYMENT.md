@@ -106,10 +106,12 @@ CELERY_WORKER_ENABLED=1 python run_playarr.py
 | Variable | Dev Default | Production Default |
 |----------|-----------|-------------------|
 | `LIBRARY_DIR` | `./data/library` | `~/Music/Playarr` |
-| `ARCHIVE_DIR` | `./data/archive` | `~/Music/Playarr/archive` |
 | `LOG_DIR` | `./logs` | `%APPDATA%/Playarr/logs` |
 | `PREVIEW_CACHE_DIR` | `./data/previews` | `%LOCALAPPDATA%/Playarr/cache/previews` |
-| `ASSET_CACHE_DIR` | `./data/cache/assets` | `%LOCALAPPDATA%/Playarr/cache/assets` |
+
+> **Note:** `ARCHIVE_DIR` and `ASSET_CACHE_DIR` are no longer configurable. They
+> are computed automatically as `_archive` and `_PlayarrCache` subdirectories
+> inside the library directory.
 
 ### Tools
 

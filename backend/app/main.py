@@ -699,13 +699,13 @@ def _purge_orphan_previews():
 def _hydrate_dir_settings_from_db(settings):
     """Load directory settings from the DB and apply them to the config singleton.
 
-    This ensures user-configured paths (library_dir, archive_dir, etc.)
+    This ensures user-configured paths (library_dir, etc.)
     survive server restarts instead of reverting to .env / defaults.
     """
     from app.database import SessionLocal
     from app.models import AppSetting
 
-    _dir_keys = {"library_dir", "archive_dir", "library_source_dirs"}
+    _dir_keys = {"library_dir", "library_source_dirs"}
     db = SessionLocal()
     try:
         rows = db.query(AppSetting).filter(
@@ -838,7 +838,7 @@ async def lifespan(app: FastAPI):
     extra_dirs = s.get_all_library_dirs()[1:]
     if extra_dirs:
         logger.info(f"Additional source dirs: {extra_dirs}")
-    logger.info(f"Archive dir: {s.archive_dir}")
+    logger.info(f"Archive dir: {s.archive_dir} (inside library)")
 
     # Start background watchdog for stuck Finalizing jobs
     watchdog_task = asyncio.create_task(_finalizing_watchdog())

@@ -16,6 +16,7 @@ import {
 import { useLogFiles, useLogContent } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
 import { settingsApi, jobsApi } from "@/lib/api";
+import { Tooltip } from "@/components/Tooltip";
 
 
 /* ── helpers ── */
@@ -251,61 +252,69 @@ export function LogViewer() {
 
         {/* Action buttons */}
         <div className="flex items-center gap-1">
-          <button
-            onClick={() => setSearchOpen(!searchOpen)}
-            className="btn-ghost btn-sm"
-            title="Search log"
-          >
-            <Search size={14} />
-          </button>
-          <button
-            onClick={() => { refetchFiles(); refetchLog(); }}
-            disabled={isFetching}
-            className="btn-ghost btn-sm"
-            title="Refresh"
-          >
-            <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} />
-          </button>
-          <button
-            onClick={() => setAutoScroll(!autoScroll)}
-            className={`btn-ghost btn-sm ${autoScroll ? "text-accent" : ""}`}
-            title={autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF"}
-          >
-            <ArrowDown size={14} />
-          </button>
-          <button
-            onClick={async () => {
-              try {
-                const { path } = await jobsApi.logDirectory();
-                await settingsApi.openDirectory(path);
-              } catch { /* ignore */ }
-            }}
-            className="btn-ghost btn-sm"
-            title="Open log folder in file explorer"
-          >
-            <ExternalLink size={14} />
-          </button>
+          <Tooltip content="Search log">
+            <button
+              onClick={() => setSearchOpen(!searchOpen)}
+              className="btn-ghost btn-sm"
+            >
+              <Search size={14} />
+            </button>
+          </Tooltip>
+          <Tooltip content="Refresh">
+            <button
+              onClick={() => { refetchFiles(); refetchLog(); }}
+              disabled={isFetching}
+              className="btn-ghost btn-sm"
+            >
+              <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} />
+            </button>
+          </Tooltip>
+          <Tooltip content={autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF"}>
+            <button
+              onClick={() => setAutoScroll(!autoScroll)}
+              className={`btn-ghost btn-sm ${autoScroll ? "text-accent" : ""}`}
+            >
+              <ArrowDown size={14} />
+            </button>
+          </Tooltip>
+          <Tooltip content="Open log folder">
+            <button
+              onClick={async () => {
+                try {
+                  const { path } = await jobsApi.logDirectory();
+                  await settingsApi.openDirectory(path);
+                } catch {
+                  toast({ type: "error", title: "Could not open log folder" });
+                }
+              }}
+              className="btn-ghost btn-sm"
+            >
+              <ExternalLink size={14} />
+            </button>
+          </Tooltip>
         </div>
 
         {/* Download */}
         <div className="flex items-center gap-1 ml-auto">
-          <button
-            onClick={handleDownloadSelection}
-            className="btn-secondary btn-sm text-xs"
-            title="Save selected text as .txt"
-          >
-            <Scissors size={13} className="mr-1" />
-            Save Selection
-          </button>
-          <button
-            onClick={handleDownloadFull}
-            disabled={!logData?.log_text}
-            className="btn-secondary btn-sm text-xs"
-            title="Download full log as .txt"
-          >
-            <Download size={13} className="mr-1" />
-            Download
-          </button>
+          <Tooltip content="Save selected text as .txt">
+            <button
+              onClick={handleDownloadSelection}
+              className="btn-secondary btn-sm text-xs"
+            >
+              <Scissors size={13} className="mr-1" />
+              Save Selection
+            </button>
+          </Tooltip>
+          <Tooltip content="Download full log as .txt">
+            <button
+              onClick={handleDownloadFull}
+              disabled={!logData?.log_text}
+              className="btn-secondary btn-sm text-xs"
+            >
+              <Download size={13} className="mr-1" />
+              Download
+            </button>
+          </Tooltip>
         </div>
       </div>
 

@@ -4311,6 +4311,88 @@ def library_export_task(self, job_id: int, mode: str = "skip_existing"):
         db.close()
 
 
+def _restore_entity_cached_artwork(
+    db, entity_refs: dict, video_item, job_id: int
+):
+    """
+    Restore entity-level CachedAsset records from XML sidecar data.
+
+    For each entity (artist/album), if the XML contains cached_artwork
+    entries with source URLs, download them into _PlayarrCache and register
+    CachedAsset records. Skips if a valid record already exists for the
+    entity+kind combination.
+    """
+    from app.metadata.models import CachedAsset
+    from app.services.artwork_service import fetch_and_store_entity_asset
+
+    for entity_type, ref_key, entity_id in [
+        ("artist", "artist", getattr(video_item, "artist_entity_id", None)),
+        ("album",  "album",  getattr(video_item, "album_entity_id", None)),
+    ]:
+        ref = entity_refs.get(ref_key)
+        if not ref or not entity_id:
+            continue
+        cached_art = ref.get("cached_artwork", [])
+        for art in cached_art:
+            kind = art.get("kind")
+            source_url = art.get("source_url")
+            if not kind or not source_url:
+                continue
+
+            # Skip if a valid CachedAsset already exists
+            existing = db.query(CachedAsset).filter(
+                CachedAsset.entity_type == entity_type,
+                CachedAsset.entity_id == entity_id,
+                CachedAsset.kind == kind,
+                CachedAsset.status == "valid",
+            ).first()
+            if existing:
+                continue
+
+            try:
+                result = fetch_and_store_entity_asset(
+                    source_url, entity_type, entity_id, kind,
+                    provider=art.get("source_provider") or art.get("provenance") or "xml_import",
+                )
+                if result and result.success:
+                    # Create or update CachedAsset record
+                    ca = db.query(CachedAsset).filter(
+                        CachedAsset.entity_type == entity_type,
+                        CachedAsset.entity_id == entity_id,
+                        CachedAsset.kind == kind,
+                    ).first()
+                    if not ca:
+                        ca = CachedAsset(
+                            entity_type=entity_type,
+                            entity_id=entity_id,
+                            kind=kind,
+                            local_cache_path=result.path,
+                            source_url=source_url,
+                            file_hash=result.file_hash or art.get("file_hash"),
+                            checksum=result.file_hash,
+                            width=result.width,
+                            height=result.height,
+                            provenance=art.get("provenance") or "xml_import",
+                            source_provider=art.get("source_provider") or "xml_import",
+                            status="valid",
+                        )
+                        db.add(ca)
+                    else:
+                        ca.local_cache_path = result.path
+                        ca.source_url = source_url
+                        ca.file_hash = result.file_hash or art.get("file_hash")
+                        ca.status = "valid"
+                    db.flush()
+                    _append_job_log(
+                        job_id,
+                        f"  Restored {entity_type} {kind} from cache"
+                    )
+            except Exception as e:
+                logger.debug(
+                    f"Could not restore {entity_type}/{entity_id} {kind}: {e}"
+                )
+
+
 # Library scan task
 # ---------------------------------------------------------------------------
 
@@ -4613,6 +4695,11 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                             db.flush()
                         if te:
                             video_item.track_id = te.id
+
+                    # Restore entity cached artwork from XML
+                    _restore_entity_cached_artwork(
+                        db, entity_refs, video_item, job_id,
+                    )
 
                 # Poster fallback: if no poster asset was created (XML missing
                 # poster, wrong XML picked, or no XML at all), discover a poster

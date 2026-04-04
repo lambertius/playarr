@@ -223,6 +223,8 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
 
     # ── entity references (for cross-referencing on reimport) ──
     if video.artist_entity_id or video.album_entity_id or video.track_id:
+        from app.metadata.models import CachedAsset
+
         refs = SubElement(root, "entity_refs")
         if video.artist_entity:
             ae = SubElement(refs, "artist")
@@ -235,6 +237,21 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
                     p = SubElement(_prov_el, "field")
                     p.set("name", fk)
                     p.text = str(fv)
+            # Cached artwork for this artist entity
+            artist_assets = db.query(CachedAsset).filter(
+                CachedAsset.entity_type == "artist",
+                CachedAsset.entity_id == video.artist_entity_id,
+                CachedAsset.status == "valid",
+            ).all()
+            if artist_assets:
+                art_cache = SubElement(ae, "cached_artwork")
+                for ca in artist_assets:
+                    ca_el = SubElement(art_cache, "asset")
+                    _txt(ca_el, "kind", ca.kind)
+                    _opt(ca_el, "source_url", ca.source_url)
+                    _opt(ca_el, "file_hash", ca.file_hash)
+                    _opt(ca_el, "provenance", ca.provenance)
+                    _opt(ca_el, "source_provider", ca.source_provider)
         if video.album_entity:
             al = SubElement(refs, "album")
             _txt(al, "title", video.album_entity.title)
@@ -246,6 +263,21 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
                     p = SubElement(_prov_el, "field")
                     p.set("name", fk)
                     p.text = str(fv)
+            # Cached artwork for this album entity
+            album_assets = db.query(CachedAsset).filter(
+                CachedAsset.entity_type == "album",
+                CachedAsset.entity_id == video.album_entity_id,
+                CachedAsset.status == "valid",
+            ).all()
+            if album_assets:
+                art_cache = SubElement(al, "cached_artwork")
+                for ca in album_assets:
+                    ca_el = SubElement(art_cache, "asset")
+                    _txt(ca_el, "kind", ca.kind)
+                    _opt(ca_el, "source_url", ca.source_url)
+                    _opt(ca_el, "file_hash", ca.file_hash)
+                    _opt(ca_el, "provenance", ca.provenance)
+                    _opt(ca_el, "source_provider", ca.source_provider)
         if video.track_entity:
             te = SubElement(refs, "track")
             _txt(te, "title", video.track_entity.title)
@@ -539,17 +571,42 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         result["entity_refs"] = {}
         ae = refs.find("artist")
         if ae is not None:
-            result["entity_refs"]["artist"] = {
+            artist_ref = {
                 "name": _text(ae.find("name")),
                 "mb_artist_id": _text(ae.find("mb_artist_id")) or None,
             }
+            # Parse cached entity artwork
+            ac = ae.find("cached_artwork")
+            if ac is not None:
+                artist_ref["cached_artwork"] = []
+                for ca in ac.findall("asset"):
+                    artist_ref["cached_artwork"].append({
+                        "kind": _text(ca.find("kind")),
+                        "source_url": _text(ca.find("source_url")) or None,
+                        "file_hash": _text(ca.find("file_hash")) or None,
+                        "provenance": _text(ca.find("provenance")) or None,
+                        "source_provider": _text(ca.find("source_provider")) or None,
+                    })
+            result["entity_refs"]["artist"] = artist_ref
         al = refs.find("album")
         if al is not None:
-            result["entity_refs"]["album"] = {
+            album_ref = {
                 "title": _text(al.find("title")),
                 "mb_release_id": _text(al.find("mb_release_id")) or None,
                 "mb_release_group_id": _text(al.find("mb_release_group_id")) or None,
             }
+            ac = al.find("cached_artwork")
+            if ac is not None:
+                album_ref["cached_artwork"] = []
+                for ca in ac.findall("asset"):
+                    album_ref["cached_artwork"].append({
+                        "kind": _text(ca.find("kind")),
+                        "source_url": _text(ca.find("source_url")) or None,
+                        "file_hash": _text(ca.find("file_hash")) or None,
+                        "provenance": _text(ca.find("provenance")) or None,
+                        "source_provider": _text(ca.find("source_provider")) or None,
+                    })
+            result["entity_refs"]["album"] = album_ref
         te = refs.find("track")
         if te is not None:
             result["entity_refs"]["track"] = {

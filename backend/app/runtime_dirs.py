@@ -19,7 +19,7 @@ Directory layout strategy:
         previews:   %LOCALAPPDATA%/Playarr/cache/previews
         workspaces: %LOCALAPPDATA%/Playarr/cache/workspaces
         library:    user-configurable (default: ~/Music/Playarr)
-        archive:    user-configurable (default: ~/Music/Playarr/archive)
+        archive:    derived from library_dir (_archive subfolder)
 """
 import os
 import sys
@@ -75,9 +75,7 @@ class RuntimeDirs:
         self.cache_dir = repo / "data" / "cache"
         self.preview_dir = repo / "data" / "previews"
         self.workspace_dir = repo / "data" / "workspaces"
-        self.asset_cache_dir = repo / "data" / "cache" / "assets"
         self.library_dir = repo / "data" / "library"
-        self.archive_dir = repo / "data" / "archive"
         self.env_file = backend / ".env"
 
     # ── Production / installed mode ───────────────────────────────────────
@@ -97,13 +95,11 @@ class RuntimeDirs:
         self.cache_dir = local / "Playarr" / "cache"
         self.preview_dir = local / "Playarr" / "cache" / "previews"
         self.workspace_dir = local / "Playarr" / "cache" / "workspaces"
-        self.asset_cache_dir = local / "Playarr" / "cache" / "assets"
         self.env_file = appdata / "Playarr" / "config" / "playarr.conf"
 
         # User-configurable; defaults for first run
         default_music = Path.home() / "Music" / "Playarr"
         self.library_dir = default_music
-        self.archive_dir = default_music / "archive"
 
     @property
     def database_url(self) -> str:
@@ -124,9 +120,7 @@ class RuntimeDirs:
             self.cache_dir,
             self.preview_dir,
             self.workspace_dir,
-            self.asset_cache_dir,
             self.library_dir,
-            self.archive_dir,
         ]
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
