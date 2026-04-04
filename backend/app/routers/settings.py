@@ -56,6 +56,7 @@ DEFAULT_SETTINGS = {
     "startup_delay_seconds": ("0", "int"),
     "auto_open_browser": ("true", "bool"),
     "minimize_to_tray": ("true", "bool"),
+    "startup_duplicate_scan": ("false", "bool"),
 }
 
 

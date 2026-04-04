@@ -275,7 +275,8 @@ def _extract_year(upload_date: Optional[str]) -> Optional[int]:
     return None
 
 
-def select_best_format(formats: List[Dict[str, Any]], container: str = "mkv") -> str:
+def select_best_format(formats: List[Dict[str, Any]], container: str = "mkv",
+                       max_height: int | None = None) -> str:
     """
     Select the best format string for yt-dlp.
 
@@ -284,16 +285,18 @@ def select_best_format(formats: List[Dict[str, Any]], container: str = "mkv") ->
     - MP4: only supports AAC/MP3/AC3 audio; prefer m4a to avoid transcode
     - WebM: only supports VP8/VP9 video + Opus/Vorbis audio
     - Other: unrestricted, same as MKV
+
+    When max_height is set (e.g. 1080), video streams are capped at that height.
     Browser-incompatible audio is transcoded on-the-fly at playback.
     """
     container = (container or "mkv").lower()
+    h = f"[height<={max_height}]" if max_height else ""
     if container == "mp4":
-        # Prefer MP4-native audio (m4a/AAC) to avoid yt-dlp forced transcode
-        return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+        return f"bestvideo{h}[ext=mp4]+bestaudio[ext=m4a]/bestvideo{h}+bestaudio/best"
     if container == "webm":
-        return "bestvideo[ext=webm]+bestaudio[ext=webm]/bestvideo+bestaudio/best"
+        return f"bestvideo{h}[ext=webm]+bestaudio[ext=webm]/bestvideo{h}+bestaudio/best"
     # MKV, AVI, MOV — no restrictions, best quality
-    return "bestvideo+bestaudio/best"
+    return f"bestvideo{h}+bestaudio/best"
 
 
 def download_video(
@@ -304,6 +307,7 @@ def download_video(
     progress_callback=None,
     cancel_check=None,
     container: str = "mkv",
+    max_height: int | None = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Download a video using yt-dlp.
@@ -316,6 +320,7 @@ def download_video(
         progress_callback: Optional callable(percent, status_msg)
         cancel_check: Optional callable() that raises if the job was cancelled
         container: Merge output container (mkv, mp4, webm, avi, mov)
+        max_height: Cap video height (e.g. 1080). None = maximum available.
 
     Returns:
         (downloaded_file_path, metadata_dict)
@@ -325,7 +330,7 @@ def download_video(
     container = (container or "mkv").lower()
 
     if format_spec is None:
-        format_spec = select_best_format([], container=container)
+        format_spec = select_best_format([], container=container, max_height=max_height)
 
     os.makedirs(output_dir, exist_ok=True)
 

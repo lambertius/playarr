@@ -509,8 +509,10 @@ def _step_resolve_metadata_url(ws: ImportWorkspace, artist: str, title: str,
             summary = generate_ai_summary(metadata["plot"], source_url=canonical)
             if summary:
                 metadata["plot"] = summary
-        except Exception:
-            pass
+            else:
+                ws.log("AI summary returned empty — raw scraped text kept as plot", level="warning")
+        except Exception as e:
+            ws.log(f"AI summary generation failed: {e}", level="warning")
 
     ws.write_artifact("scraper_results", metadata)
     # Persist AI failures separately so the pipeline can inject them into the job record
@@ -1219,6 +1221,8 @@ def _step_download(ws: ImportWorkspace, job_id: int, url: str, opts: dict) -> No
             try:
                 from app.tasks import _get_setting_str
                 container = _get_setting_str(db, "preferred_container", "mkv")
+                _res_pref = _get_setting_str(db, "nv_preferred_resolution", "max")
+                max_height = int(_res_pref) if _res_pref.isdigit() else None
             finally:
                 db.close()
 
@@ -1231,6 +1235,7 @@ def _step_download(ws: ImportWorkspace, job_id: int, url: str, opts: dict) -> No
                     if is_cancelled(job_id) else None
                 ),
                 container=container,
+                max_height=max_height,
             )
             telemetry_store.end_attempt(job_id, "success")
             last_error = ""

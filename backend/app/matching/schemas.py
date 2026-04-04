@@ -155,6 +155,7 @@ class ReviewItemOut(BaseModel):
     quality_score: int = 0
     # Duplicate comparison
     duplicate_of: Optional[DuplicateVideoSummary] = None
+    dup_group_key: Optional[str] = None
     # Rename info
     expected_path: Optional[str] = None
 

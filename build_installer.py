@@ -39,7 +39,7 @@ def banner(msg: str):
 def run(cmd: list[str], cwd: Path | None = None, check: bool = True):
     """Run a subprocess and stream output."""
     print(f"  > {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd)
+    result = subprocess.run(cmd, cwd=cwd, shell=True)
     if check and result.returncode != 0:
         print(f"\n  ERROR: Command failed with exit code {result.returncode}")
         sys.exit(1)

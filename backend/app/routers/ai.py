@@ -304,6 +304,21 @@ def run_scene_analysis(
     _set_processing_flag(video, "scenes_analyzed", method="manual")
     db.commit()
 
+    # Persist to disk: update XML sidecar + copy thumb files to video folder
+    try:
+        from app.services.playarr_xml import write_playarr_xml
+        write_playarr_xml(video, db)
+
+        import shutil as _shutil
+        thumbs = db.query(AIThumbnail).filter(AIThumbnail.video_id == video_id).all()
+        for t in thumbs:
+            if t.file_path and os.path.isfile(t.file_path) and video.folder_path:
+                dest = os.path.join(video.folder_path, os.path.basename(t.file_path))
+                if not os.path.isfile(dest):
+                    _shutil.copy2(t.file_path, dest)
+    except Exception:
+        pass  # best-effort; don't fail the response
+
     return _scene_analysis_to_out(analysis)
 
 
@@ -928,6 +943,23 @@ def _batch_scenes_task(video_ids: List[int], force: bool):
         for vid in video_ids:
             try:
                 analyze_scenes(db, vid, force=force)
+
+                # Persist to disk: update XML + copy thumbs to video folder
+                try:
+                    video = db.query(VideoItem).get(vid)
+                    if video and video.folder_path and os.path.isdir(video.folder_path):
+                        from app.services.playarr_xml import write_playarr_xml
+                        write_playarr_xml(video, db)
+
+                        import shutil as _shutil
+                        thumbs = db.query(AIThumbnail).filter(AIThumbnail.video_id == vid).all()
+                        for t in thumbs:
+                            if t.file_path and os.path.isfile(t.file_path):
+                                dest = os.path.join(video.folder_path, os.path.basename(t.file_path))
+                                if not os.path.isfile(dest):
+                                    _shutil.copy2(t.file_path, dest)
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"Batch scene analysis failed for video {vid}: {e}")
                 db.rollback()

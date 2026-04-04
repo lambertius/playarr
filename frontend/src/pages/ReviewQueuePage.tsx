@@ -18,6 +18,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { VersionBadge } from "@/components/Badges";
 import { Tooltip } from "@/components/Tooltip";
 import { cn, formatBytes, timeAgo } from "@/lib/utils";
+import { ScrapeOptionsModal, type ScrapeOptions } from "@/components/ScrapeOptionsModal";
 
 // ── Types ───────────────────────────────────────────────
 type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned";
@@ -159,7 +160,7 @@ function StatCard({ icon, label, value, active, color, tooltip, onClick, selecte
         <span className="opacity-70">{icon}</span>
         <div className="min-w-0">
           <div className="text-lg font-bold tabular-nums leading-tight">{value}</div>
-          <div className="text-[10px] uppercase tracking-wider opacity-70 truncate">{label}</div>
+          <div className="text-[10px] uppercase tracking-wider opacity-70 whitespace-nowrap">{label}</div>
         </div>
       </button>
     </Tooltip>
@@ -287,6 +288,7 @@ export default function ReviewQueuePage() {
   const batchApplyRenameMutation = useBatchApplyRename();
   const batchDeleteMutation = useBatchDeleteReview();
   const batchScrapeMutation = useBatchScrapeReview();
+  const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
 
   const items = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
@@ -402,12 +404,16 @@ export default function ReviewQueuePage() {
   const handleBatchScrape = useCallback(async () => {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
-    const ok = await confirm({ title: `Scrape metadata for ${ids.length} item(s)?`, description: "This will queue a metadata scrape job for each selected item. Progress can be tracked in the Queue tab." });
-    if (!ok) return;
-    const result = await batchScrapeMutation.mutateAsync(ids);
+    setScrapeModalOpen(true);
+  }, [selectedIds]);
+
+  const handleScrapeConfirm = useCallback(async (options: ScrapeOptions) => {
+    const ids = Array.from(selectedIds);
+    setScrapeModalOpen(false);
+    const result = await batchScrapeMutation.mutateAsync({ videoIds: ids, options });
     toast({ type: "success", title: result.message });
     setSelectedIds(new Set());
-  }, [selectedIds, batchScrapeMutation, toast, confirm]);
+  }, [selectedIds, batchScrapeMutation, toast]);
 
   const handleExport = useCallback(async () => {
     try {
@@ -642,22 +648,81 @@ export default function ReviewQueuePage() {
           </div>
 
           <div className="space-y-1.5">
-            {items.map((item) => (
-              <ReviewCard
-                key={item.video_id}
-                item={item}
-                isSelected={selectedIds.has(item.video_id)}
-                onToggleSelect={() => toggleSelect(item.video_id)}
-                onView={() => navigate(`/video/${item.video_id}`)}
-                onApprove={() => handleApprove(item.video_id)}
-                onDismiss={() => handleDismiss(item.video_id)}
-                onDelete={() => handleDelete(item.video_id)}
-                onSetVersion={(vt) => handleSetVersion(item.video_id, vt)}
-                onSetVersionById={handleSetVersion}
-                onApplyRename={() => handleApplyRename(item.video_id)}
-                categoryFilter={categoryFilter}
-              />
-            ))}
+            {(() => {
+              // Group duplicates visually when viewing the duplicate category
+              const isDupCategory = categoryFilter === "duplicate" || categoryFilter === "all";
+              if (!isDupCategory) {
+                return items.map((item) => (
+                  <ReviewCard
+                    key={item.video_id}
+                    item={item}
+                    isSelected={selectedIds.has(item.video_id)}
+                    onToggleSelect={() => toggleSelect(item.video_id)}
+                    onView={() => navigate(`/video/${item.video_id}`)}
+                    onApprove={() => handleApprove(item.video_id)}
+                    onDismiss={() => handleDismiss(item.video_id)}
+                    onDelete={() => handleDelete(item.video_id)}
+                    onSetVersion={(vt) => handleSetVersion(item.video_id, vt)}
+                    onApplyRename={() => handleApplyRename(item.video_id)}
+                    categoryFilter={categoryFilter}
+                  />
+                ));
+              }
+
+              // Build groups for duplicate items, keep others ungrouped
+              const groups: { key: string; items: ReviewItem[] }[] = [];
+              const ungrouped: ReviewItem[] = [];
+              const groupMap = new Map<string, ReviewItem[]>();
+
+              for (const item of items) {
+                if (item.dup_group_key && (item.review_category || "").includes("duplicate")) {
+                  const existing = groupMap.get(item.dup_group_key);
+                  if (existing) {
+                    existing.push(item);
+                  } else {
+                    const arr = [item];
+                    groupMap.set(item.dup_group_key, arr);
+                    groups.push({ key: item.dup_group_key, items: arr });
+                  }
+                } else {
+                  ungrouped.push(item);
+                }
+              }
+
+              const renderCard = (item: ReviewItem) => (
+                <ReviewCard
+                  key={item.video_id}
+                  item={item}
+                  isSelected={selectedIds.has(item.video_id)}
+                  onToggleSelect={() => toggleSelect(item.video_id)}
+                  onView={() => navigate(`/video/${item.video_id}`)}
+                  onApprove={() => handleApprove(item.video_id)}
+                  onDismiss={() => handleDismiss(item.video_id)}
+                  onDelete={() => handleDelete(item.video_id)}
+                  onSetVersion={(vt) => handleSetVersion(item.video_id, vt)}
+                  onApplyRename={() => handleApplyRename(item.video_id)}
+                  categoryFilter={categoryFilter}
+                />
+              );
+
+              return (
+                <>
+                  {groups.map((g) => (
+                    <DuplicateGroupCard
+                      key={g.key}
+                      items={g.items}
+                      selectedIds={selectedIds}
+                      onToggleSelect={toggleSelect}
+                      onApprove={handleApprove}
+                      onDismiss={handleDismiss}
+                      onDelete={handleDelete}
+                      onSetVersion={handleSetVersion}
+                    />
+                  ))}
+                  {ungrouped.map(renderCard)}
+                </>
+              );
+            })()}
           </div>
 
           <Pagination
@@ -672,6 +737,14 @@ export default function ReviewQueuePage() {
       )}
 
       {dialog}
+
+      <ScrapeOptionsModal
+        open={scrapeModalOpen}
+        onClose={() => setScrapeModalOpen(false)}
+        onScrape={handleScrapeConfirm}
+        itemCount={selectedIds.size}
+        isPending={batchScrapeMutation.isPending}
+      />
     </div>
   );
 }
@@ -709,135 +782,136 @@ function QualitySpecs({ item }: { item: ReviewItem | DuplicateVideoSummary }) {
   );
 }
 
-// ── Duplicate comparison card ───────────────────────────
-function DuplicateComparisonCard({
-  item,
-  isSelected,
+// ── Duplicate group card (single tile for all members) ──
+function DuplicateGroupCard({
+  items,
+  selectedIds,
   onToggleSelect,
-  onView,
   onApprove,
   onDismiss,
-  onSetVersionById,
+  onDelete,
+  onSetVersion,
 }: {
-  item: ReviewItem;
-  isSelected: boolean;
-  onToggleSelect: () => void;
-  onView: () => void;
-  onApprove: () => void;
-  onDismiss: () => void;
-  onSetVersionById: (videoId: number, vt: string, approve?: boolean) => void;
+  items: ReviewItem[];
+  selectedIds: Set<number>;
+  onToggleSelect: (id: number) => void;
+  onApprove: (id: number) => void;
+  onDismiss: (id: number) => void;
+  onDelete: (id: number) => void;
+  onSetVersion: (videoId: number, vt: string, approve?: boolean) => void;
 }) {
   const navigate = useNavigate();
-  const dup = item.duplicate_of!;
-  const newScore = item.quality_score ?? 0;
-  const existingScore = dup.quality_score;
-  const newIsBetter = newScore > existingScore;
-  const existingIsBetter = existingScore > newScore;
+  const allIds = items.map((i) => i.video_id);
+  const allGroupSelected = allIds.every((id) => selectedIds.has(id));
+
+  // Sort by quality score descending so best is first
+  const sorted = [...items].sort((a, b) => (b.quality_score ?? 0) - (a.quality_score ?? 0));
+  const bestScore = sorted[0]?.quality_score ?? 0;
+
+  const toggleGroupSelect = () => {
+    if (allGroupSelected) {
+      allIds.forEach((id) => onToggleSelect(id));
+    } else {
+      allIds.filter((id) => !selectedIds.has(id)).forEach((id) => onToggleSelect(id));
+    }
+  };
+
+  const handleKeepAll = () => {
+    // Approve all items in the group
+    allIds.forEach((id) => onApprove(id));
+  };
+
+  const handleDismissAll = () => {
+    allIds.forEach((id) => onDismiss(id));
+  };
 
   return (
-    <div
-      className={cn(
-        "card transition-all duration-150",
-        "hover:shadow-[inset_3px_0_0_var(--color-accent)]",
-        isSelected && "ring-1 ring-accent/30 bg-accent/5",
-      )}
-    >
+    <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-3 py-2 border-b border-surface-border bg-surface-lighter/30">
-        <Tooltip content="Select this item for bulk actions">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-purple-500/10 border-b border-purple-500/20">
+        <Tooltip content="Select all items in this duplicate group">
           <input
             type="checkbox"
-            checked={isSelected}
-            onChange={(e) => { e.stopPropagation(); onToggleSelect(); }}
-            onClick={(e) => e.stopPropagation()}
+            checked={allGroupSelected}
+            onChange={toggleGroupSelect}
             className="rounded border-surface-border flex-shrink-0"
           />
         </Tooltip>
-        <GitCompare size={14} className="text-purple-400 flex-shrink-0" />
-        <p className="text-sm text-text-primary font-medium truncate flex-1">
-          {item.artist} — {item.title}
-        </p>
-        <CategoryBadge category={item.review_category} />
-        <ReviewStatusBadge status={item.review_status} />
+        <GitCompare size={13} className="text-purple-400 flex-shrink-0" />
+        <span className="text-xs font-medium text-purple-300">
+          Duplicate Group — {items[0].artist} — {items[0].title}
+        </span>
+        <span className="text-[10px] text-purple-400/70 ml-auto">{items.length} items</span>
       </div>
 
-      {/* Side-by-side comparison */}
-      <div className="grid grid-cols-2 divide-x divide-surface-border">
-        {/* NEW (review item) */}
-        <div
-          className={cn(
-            "p-3 cursor-pointer hover:bg-surface-hover/30 transition-colors",
-            newIsBetter && "bg-emerald-500/5",
-          )}
-          onClick={onView}
-        >
-          <div className="flex items-center gap-1.5 mb-2">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">New</span>
-            <span className="text-[10px] font-mono text-text-muted bg-surface-hover px-1.5 py-0.5 rounded">#{item.video_id}</span>
-            {item.version_type && item.version_type !== "normal" && (
-              <VersionBadge versionType={item.version_type} className="text-[10px] px-1.5 py-0" />
-            )}
-            {newIsBetter && (
-              <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">Better Quality</span>
-            )}
-          </div>
-          <div className="flex gap-2">
-            {item.thumbnail_url && (
-              <img src={item.thumbnail_url} alt="" className="w-20 h-14 object-cover rounded flex-shrink-0" />
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="text-xs text-text-secondary truncate">{item.filename || "—"}</p>
-              <QualitySpecs item={item} />
-            </div>
-          </div>
-          <div className="flex justify-end mt-1.5" onClick={(e) => e.stopPropagation()}>
-            <VersionTypeDropdown currentType={item.version_type} onSelect={(vt) => onSetVersionById(item.video_id, vt)} />
-          </div>
-        </div>
+      {/* Members grid */}
+      <div className={cn(
+        "grid divide-x divide-surface-border",
+        sorted.length === 2 ? "grid-cols-2" : sorted.length === 3 ? "grid-cols-3" : "grid-cols-2",
+      )}>
+        {sorted.map((item, idx) => {
+          const score = item.quality_score ?? 0;
+          const isBest = score > 0 && score === bestScore && sorted.filter((s) => (s.quality_score ?? 0) === bestScore).length === 1;
+          // For groups of 4+, wrap into rows of 2
+          const isLastOdd = sorted.length > 3 && sorted.length % 2 === 1 && idx === sorted.length - 1;
 
-        {/* EXISTING (duplicate_of) */}
-        <div
-          className={cn(
-            "p-3 cursor-pointer hover:bg-surface-hover/30 transition-colors",
-            existingIsBetter && "bg-emerald-500/5",
-          )}
-          onClick={() => navigate(`/video/${dup.video_id}`)}
-        >
-          <div className="flex items-center gap-1.5 mb-2">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">Existing</span>
-            <span className="text-[10px] font-mono text-text-muted bg-surface-hover px-1.5 py-0.5 rounded">#{dup.video_id}</span>
-            {dup.version_type && dup.version_type !== "normal" && (
-              <VersionBadge versionType={dup.version_type} className="text-[10px] px-1.5 py-0" />
-            )}
-            {existingIsBetter && (
-              <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">Better Quality</span>
-            )}
-          </div>
-          <div className="flex gap-2">
-            {dup.thumbnail_url && (
-              <img src={dup.thumbnail_url} alt="" className="w-20 h-14 object-cover rounded flex-shrink-0" />
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="text-xs text-text-secondary truncate">{dup.artist} — {dup.title}</p>
-              <QualitySpecs item={dup} />
+          return (
+            <div
+              key={item.video_id}
+              className={cn(
+                "p-3 cursor-pointer hover:bg-surface-hover/30 transition-colors",
+                isBest && "bg-emerald-500/5",
+                sorted.length > 3 && "border-b border-surface-border",
+                isLastOdd && "col-span-2",
+              )}
+              onClick={() => navigate(`/video/${item.video_id}`)}
+            >
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className={cn(
+                  "text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
+                  idx === 0 ? "text-purple-400 bg-purple-500/10" : "text-blue-400 bg-blue-500/10",
+                )}>
+                  #{item.video_id}
+                </span>
+                {item.version_type && item.version_type !== "normal" && (
+                  <VersionBadge versionType={item.version_type} className="text-[10px] px-1.5 py-0" />
+                )}
+                {isBest && (
+                  <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">Best Quality</span>
+                )}
+              </div>
+              <div className="flex gap-2">
+                {item.thumbnail_url && (
+                  <img src={item.thumbnail_url} alt="" className="w-20 h-14 object-cover rounded flex-shrink-0" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-text-secondary truncate">{item.filename || "—"}</p>
+                  <QualitySpecs item={item} />
+                </div>
+              </div>
+              <div className="flex items-center justify-between mt-1.5" onClick={(e) => e.stopPropagation()}>
+                <VersionTypeDropdown currentType={item.version_type} onSelect={(vt) => onSetVersion(item.video_id, vt)} />
+                <Tooltip content="Delete this video and its files from disk">
+                  <button onClick={() => onDelete(item.video_id)} className="btn-ghost btn-sm text-xs text-red-400/60 hover:text-red-300">
+                    <Trash2 size={13} />
+                  </button>
+                </Tooltip>
+              </div>
             </div>
-          </div>
-          <div className="flex justify-end mt-1.5" onClick={(e) => e.stopPropagation()}>
-            <VersionTypeDropdown currentType={dup.version_type} onSelect={(vt) => onSetVersionById(dup.video_id, vt, false)} />
-          </div>
-        </div>
+          );
+        })}
       </div>
 
       {/* Actions footer */}
-      <div className="flex items-center justify-end gap-1 px-3 py-1.5 border-t border-surface-border bg-surface-lighter/20" onClick={(e) => e.stopPropagation()}>
-        <Tooltip content="Approve — accept as a valid separate version and remove from review">
-          <button onClick={onApprove} className="btn-ghost btn-sm text-xs text-emerald-400 hover:text-emerald-300">
-            <Check size={14} /> Keep Both
+      <div className="flex items-center justify-end gap-1 px-3 py-1.5 border-t border-purple-500/20 bg-purple-500/10" onClick={(e) => e.stopPropagation()}>
+        <Tooltip content="Keep all — accept as valid separate versions and remove from review permanently">
+          <button onClick={handleKeepAll} className="btn-ghost btn-sm text-xs text-emerald-400 hover:text-emerald-300">
+            <Check size={14} /> Keep All
           </button>
         </Tooltip>
-        <Tooltip content="Dismiss — clear the review flag and remove from queue">
-          <button onClick={onDismiss} className="btn-ghost btn-sm text-xs text-red-400 hover:text-red-300">
-            <X size={14} /> Dismiss
+        <Tooltip content="Dismiss — clear duplicate flags and remove from review permanently">
+          <button onClick={handleDismissAll} className="btn-ghost btn-sm text-xs text-red-400 hover:text-red-300">
+            <X size={14} /> Dismiss All
           </button>
         </Tooltip>
       </div>
@@ -855,7 +929,6 @@ function ReviewCard({
   onDismiss,
   onDelete,
   onSetVersion,
-  onSetVersionById,
   onApplyRename,
   categoryFilter,
 }: {
@@ -867,27 +940,10 @@ function ReviewCard({
   onDismiss: () => void;
   onDelete: () => void;
   onSetVersion: (vt: string) => void;
-  onSetVersionById: (videoId: number, vt: string, approve?: boolean) => void;
   onApplyRename: () => void;
   categoryFilter: ReviewCategory;
 }) {
   const reasons = parseReviewReason(item.review_reason);
-  const isDuplicate = (item.review_category || "").includes("duplicate");
-
-  // Use the comparison card if we have duplicate_of data
-  if (isDuplicate && item.duplicate_of) {
-    return (
-      <DuplicateComparisonCard
-        item={item}
-        isSelected={isSelected}
-        onToggleSelect={onToggleSelect}
-        onView={onView}
-        onApprove={onApprove}
-        onDismiss={onDismiss}
-        onSetVersionById={onSetVersionById}
-      />
-    );
-  }
 
   return (
     <div

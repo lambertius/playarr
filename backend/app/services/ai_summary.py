@@ -45,6 +45,7 @@ def generate_ai_summary(
         provider = settings.ai_provider
 
     if provider == "none":
+        logger.debug("AI provider set to 'none' — skipping AI summary")
         return None
 
     if provider == "gemini":

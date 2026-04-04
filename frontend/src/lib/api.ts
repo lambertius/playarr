@@ -175,6 +175,9 @@ export const jobsApi = {
   libraryScan: (importNew = true) =>
     api.post<JobSummary>("/jobs/library-scan", { import_new: importNew }).then(r => r.data),
 
+  libraryDuplicateScan: () =>
+    api.post<JobSummary>("/jobs/library-duplicate-scan").then(r => r.data),
+
   libraryExport: (mode: string) =>
     api.post<JobSummary>("/jobs/library-export", { mode }).then(r => r.data),
 
@@ -348,8 +351,8 @@ export const reviewApi = {
     api.post<{ status: string; renamed: number; failed: number; errors: string[] }>("/review/batch/apply-rename", videoIds).then(r => r.data),
   batchDelete: (videoIds: number[]) =>
     api.post<{ deleted: number[]; errors: number[]; count: number }>("/review/batch/delete", videoIds).then(r => r.data),
-  batchScrape: (videoIds: number[]) =>
-    api.post<{ job_id: number; message: string }>("/review/batch/scrape", videoIds).then(r => r.data),
+  batchScrape: (videoIds: number[], options?: { scrape_wikipedia?: boolean; scrape_musicbrainz?: boolean; ai_auto?: boolean; ai_only?: boolean; normalize?: boolean }) =>
+    api.post<{ job_id: number; message: string }>("/review/batch/scrape", { video_ids: videoIds, ...options }).then(r => r.data),
 };
 
 // ─── Search (MusicBrainz Manual) ─────────────────────────

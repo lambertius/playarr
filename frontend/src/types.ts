@@ -224,11 +224,12 @@ export type TelemetrySnapshot = Record<string, JobTelemetry>;
 // ─── Log Viewer ───────────────────────────────────────────
 export interface LogFileEntry {
   filename: string;
-  category: "app" | "job";
+  category: "app" | "job" | "scraper_test";
   size_bytes: number;
   modified: string;
   label: string;
   job_id?: string;
+  job_type?: string;
 }
 
 export interface LogReadResponse {
@@ -635,6 +636,7 @@ export interface ReviewItem {
   quality_score?: number;
   // Duplicate comparison
   duplicate_of?: DuplicateVideoSummary | null;
+  dup_group_key?: string | null;
   // Rename info
   expected_path?: string | null;
 }

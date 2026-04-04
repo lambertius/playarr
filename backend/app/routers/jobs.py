@@ -20,7 +20,7 @@ from app.schemas import (
     BatchRescanRequest, BatchActionResponse, LibraryScanRequest,
     NormalizationHistoryOut,
 )
-from app.tasks import import_video_task, rescan_metadata_task, normalize_task, library_scan_task, library_export_task, complete_batch_job_task, scrape_wikipedia_task, redownload_video_task, batch_import_task
+from app.tasks import import_video_task, rescan_metadata_task, normalize_task, library_scan_task, library_export_task, complete_batch_job_task, scrape_wikipedia_task, redownload_video_task, batch_import_task, duplicate_scan_task
 from app.worker import dispatch_task
 from app.services.url_utils import is_playlist_url
 from app.services.downloader import extract_playlist_entries, get_available_formats
@@ -523,6 +523,23 @@ def scan_library(req: LibraryScanRequest = LibraryScanRequest(), db: Session = D
     return job
 
 
+@router.post("/library-duplicate-scan", response_model=JobOut)
+def scan_duplicates(db: Session = Depends(get_db)):
+    """Scan the library for potential duplicate video items."""
+    job = ProcessingJob(
+        job_type="duplicate_scan",
+        status=JobStatus.queued,
+        display_name="Duplicate Scan",
+        action_label="Duplicate Scan",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    dispatch_task(duplicate_scan_task, job_id=job.id)
+    return job
+
+
 class LibraryExportRequest(BaseModel):
     mode: str = "skip_existing"  # skip_existing | overwrite_new | overwrite_all
 
@@ -741,12 +758,13 @@ def read_app_log(
 
 
 @router.get("/logs/files")
-def list_log_files():
-    """List all available log files (app logs, rotated backups, and job logs)."""
+def list_log_files(db: Session = Depends(get_db)):
+    """List all available log files (app logs, rotated backups, job logs, and scraper test logs)."""
     import os
     from app.config import get_settings
     log_dir = get_settings().log_dir
     jobs_dir = os.path.join(log_dir, "jobs")
+    scraper_dir = os.path.join(log_dir, "scraper_tests")
 
     result: list[dict] = []
 
@@ -769,6 +787,17 @@ def list_log_files():
             except OSError:
                 pass
 
+    # Build a map of job_id -> (job_type, display_name) from the DB
+    job_meta: dict[str, tuple[str, str | None]] = {}
+    try:
+        rows = db.query(
+            ProcessingJob.id, ProcessingJob.job_type, ProcessingJob.display_name
+        ).all()
+        for jid, jtype, dname in rows:
+            job_meta[str(jid)] = (jtype or "", dname)
+    except Exception:
+        pass
+
     # Per-job logs
     if os.path.isdir(jobs_dir):
         for fname in sorted(os.listdir(jobs_dir), reverse=True):
@@ -778,13 +807,40 @@ def list_log_files():
             try:
                 stat = os.stat(fpath)
                 job_id_str = fname.replace(".log", "")
+                jtype, dname = job_meta.get(job_id_str, ("", None))
                 result.append({
                     "filename": f"jobs/{fname}",
                     "category": "job",
                     "size_bytes": stat.st_size,
                     "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                    "label": f"Job {job_id_str}",
+                    "label": dname or f"Job {job_id_str}",
                     "job_id": job_id_str,
+                    "job_type": jtype,
+                })
+            except OSError:
+                pass
+
+    # Scraper test logs
+    if os.path.isdir(scraper_dir):
+        for fname in sorted(os.listdir(scraper_dir), reverse=True):
+            if not fname.endswith(".txt"):
+                continue
+            fpath = os.path.join(scraper_dir, fname)
+            try:
+                stat = os.stat(fpath)
+                # Derive a friendlier label from filename like "20260402_101803_AC_DC_Back_In_Black.txt"
+                base = fname.rsplit(".", 1)[0]
+                parts = base.split("_", 2)
+                if len(parts) >= 3:
+                    label = parts[2].replace("_", " ")
+                else:
+                    label = base
+                result.append({
+                    "filename": f"scraper_tests/{fname}",
+                    "category": "scraper_test",
+                    "size_bytes": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    "label": label,
                 })
             except OSError:
                 pass
@@ -797,7 +853,9 @@ def get_log_directory():
     """Return the absolute path to the log directory."""
     from app.config import get_settings
     log_dir = get_settings().log_dir
-    return {"path": os.path.abspath(log_dir)}
+    abs_path = os.path.abspath(log_dir)
+    os.makedirs(abs_path, exist_ok=True)
+    return {"path": abs_path}
 
 
 @router.get("/logs/read")

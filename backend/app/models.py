@@ -137,6 +137,14 @@ class VideoItem(Base):
     # Structured category: version_detection, duplicate, import_error, url_import_error, manual_review
     review_category: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
 
+    # Review history — tracks past review dismiss/clear actions so items don't get re-flagged.
+    # JSON list: [{"action": "dismissed", "category": "scanned", "reason": "...", "timestamp": "..."}]
+    review_history: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+    # Dismissed duplicate video IDs — IDs explicitly confirmed as "not a duplicate".
+    # JSON list: [93, 142]  Checked by duplicate_scan_task to skip known non-duplicates.
+    dismissed_duplicate_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     # File system
     folder_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     file_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)

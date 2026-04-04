@@ -938,8 +938,16 @@ def resolve_metadata_unified(
                 if field_name == "album" and _album_is_title_duplicate(
                     str(proposed), str(metadata.get("title", ""))
                 ):
-                    _log(f"AI Final Review: album '{proposed}' matches title — discarded")
-                    continue
+                    # Allow self-titled correction when AI replaces a different (wrong) album
+                    _current_album = metadata.get("album")
+                    if _current_album and not _album_is_title_duplicate(
+                        str(_current_album), str(metadata.get("title", ""))
+                    ):
+                        _log(f"AI Final Review: allowing self-titled album '{proposed}' "
+                             f"(replacing different album '{_current_album}')")
+                    else:
+                        _log(f"AI Final Review: album '{proposed}' matches title — discarded")
+                        continue
 
                 # Reject AI album when it's a sentinel / placeholder value
                 if field_name == "album":

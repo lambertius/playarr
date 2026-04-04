@@ -234,6 +234,53 @@ def _export_artwork(
     return stats
 
 
+# ── scene-analysis thumbnails ───────────────────────────────
+
+def _export_thumbnails(
+    video: VideoItem,
+    db: Session,
+    mode: str,
+    log: Callable[[str], None],
+) -> dict:
+    """Copy scene-analysis thumbnail files into the video folder so they
+    survive cache cleanup and are discoverable by the library scan fallback."""
+    from app.ai.models import AIThumbnail
+
+    stats = {"written": 0, "skipped": 0, "unchanged": 0}
+    if not video.folder_path or not os.path.isdir(video.folder_path):
+        return stats
+
+    locked = _is_locked(video)
+    thumbs = db.query(AIThumbnail).filter(AIThumbnail.video_id == video.id).all()
+
+    for t in thumbs:
+        if not t.file_path or not os.path.isfile(t.file_path):
+            continue
+        dest = os.path.join(video.folder_path, os.path.basename(t.file_path))
+
+        if mode == "skip_existing" or locked:
+            if os.path.isfile(dest):
+                stats["skipped"] += 1
+                continue
+
+        if os.path.isfile(dest) and dest == t.file_path:
+            stats["unchanged"] += 1
+            continue
+
+        if mode == "overwrite_new" and os.path.isfile(dest):
+            if _files_identical(t.file_path, dest):
+                stats["unchanged"] += 1
+                continue
+
+        try:
+            shutil.copy2(t.file_path, dest)
+            stats["written"] += 1
+        except OSError as exc:
+            log(f"  Failed to copy thumbnail {t.file_path} → {dest}: {exc}")
+
+    return stats
+
+
 # ── entity artwork (artist/album folders) ──────────────────
 
 def _export_entity_artwork(
@@ -327,6 +374,7 @@ def export_library(
         "nfo_written": 0, "nfo_skipped": 0, "nfo_unchanged": 0,
         "xml_written": 0, "xml_skipped": 0, "xml_unchanged": 0,
         "art_written": 0, "art_skipped": 0, "art_unchanged": 0,
+        "thumb_written": 0, "thumb_skipped": 0, "thumb_unchanged": 0,
         "entity_written": 0, "entity_skipped": 0, "entity_unchanged": 0,
         "locked_skipped": 0,
         "total": total,
@@ -360,6 +408,12 @@ def export_library(
         totals["art_skipped"] += art["skipped"]
         totals["art_unchanged"] += art["unchanged"]
 
+        # Scene-analysis thumbnails
+        th = _export_thumbnails(video, db, mode, log)
+        totals["thumb_written"] += th["written"]
+        totals["thumb_skipped"] += th["skipped"]
+        totals["thumb_unchanged"] += th["unchanged"]
+
     # Entity artwork (artist/album folders)
     log("Exporting entity artwork (artists/albums)...")
     ent = _export_entity_artwork(db, mode, log)
@@ -374,6 +428,7 @@ def export_library(
         f"Export complete — NFO: {totals['nfo_written']} written / {totals['nfo_skipped']} skipped / {totals['nfo_unchanged']} unchanged  |  "
         f"XML: {totals['xml_written']} written / {totals['xml_skipped']} skipped / {totals['xml_unchanged']} unchanged  |  "
         f"Art: {totals['art_written']} written / {totals['art_skipped']} skipped / {totals['art_unchanged']} unchanged  |  "
+        f"Thumbs: {totals['thumb_written']} written / {totals['thumb_skipped']} skipped  |  "
         f"Entity: {totals['entity_written']} written / {totals['entity_skipped']} skipped  |  "
         f"Locked: {totals['locked_skipped']}"
     )

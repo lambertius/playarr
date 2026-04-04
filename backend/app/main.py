@@ -73,6 +73,10 @@ def _apply_schema_upgrades(eng):
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN review_reason VARCHAR(500)"))
             if "review_category" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN review_category VARCHAR(40)"))
+            if "review_history" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN review_history JSON"))
+            if "dismissed_duplicate_ids" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN dismissed_duplicate_ids JSON"))
             if "processing_state" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN processing_state JSON"))
 
@@ -765,6 +769,40 @@ def _version_tuple(v: str):
         return (0, 0, 0)
 
 
+def _maybe_startup_duplicate_scan():
+    """Fire a duplicate scan at startup if the setting is enabled."""
+    try:
+        from app.database import SessionLocal
+        from app.models import AppSetting, ProcessingJob, JobStatus
+        from app.tasks import duplicate_scan_task
+        from app.worker import dispatch_task
+
+        db = SessionLocal()
+        try:
+            row = db.query(AppSetting).filter(
+                AppSetting.key == "startup_duplicate_scan",
+                AppSetting.user_id.is_(None),
+            ).first()
+            enabled = row and row.value.lower() in ("true", "1", "yes")
+            if not enabled:
+                return
+            logger.info("Startup duplicate scan enabled — dispatching task")
+            job = ProcessingJob(
+                job_type="duplicate_scan",
+                status=JobStatus.queued,
+                display_name="Duplicate Scan (Startup)",
+                action_label="Duplicate Scan",
+            )
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+            dispatch_task(duplicate_scan_task, job_id=job.id)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Startup duplicate scan failed (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
@@ -842,6 +880,9 @@ async def lifespan(app: FastAPI):
 
     # Start background watchdog for stuck Finalizing jobs
     watchdog_task = asyncio.create_task(_finalizing_watchdog())
+
+    # --- Optional startup duplicate scan ---
+    _maybe_startup_duplicate_scan()
 
     yield
 
