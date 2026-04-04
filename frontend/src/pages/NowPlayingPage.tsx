@@ -144,11 +144,14 @@ const ArtworkBackground = memo(function ArtworkBackground() {
     const scheduleSwap = () => {
       const rate = changeRateRef.current * 1000;
       const swapCount = Math.min(artChangeCountRef.current, cellCountRef.current);
-      // Distribute swaps evenly: interval = rate / swapCount, with ±25% jitter
-      const perTileInterval = Math.max(200, rate / Math.max(1, swapCount));
-      const min = Math.max(200, perTileInterval * 0.75);
-      const max = perTileInterval * 1.25;
-      const delay = min + Math.random() * (max - min);
+      // Batch multiple swaps per tick when the per-tile interval would be too short.
+      // TICK_MS is the minimum time between ticks; we compute how many tiles to
+      // swap in each tick so the total matches the requested swapCount / rate.
+      const TICK_MS = 150;
+      const tilesPerTick = Math.max(1, Math.round(swapCount * TICK_MS / rate));
+      const interval = (rate * tilesPerTick) / Math.max(1, swapCount);
+      const jitter = interval * 0.15;
+      const delay = Math.max(TICK_MS, interval - jitter + Math.random() * jitter * 2);
 
       outerTimeout = setTimeout(() => {
         if (!alive) return;
@@ -157,8 +160,16 @@ const ArtworkBackground = memo(function ArtworkBackground() {
         const pool = poolRef.current;
         if (pool.length === 0 || count === 0) { scheduleSwap(); return; }
 
-        // Swap exactly ONE tile per tick
-        const idx = Math.floor(Math.random() * count);
+        // Pick tilesPerTick unique random indices
+        const actualBatch = Math.min(tilesPerTick, count);
+        const used = new Set<number>();
+        const swapIndices: number[] = [];
+        for (let t = 0; t < actualBatch; t++) {
+          let idx: number;
+          do { idx = Math.floor(Math.random() * count); } while (used.has(idx));
+          used.add(idx);
+          swapIndices.push(idx);
+        }
 
         // Resolve transition style
         const styleChoices: TransitionKind[] = ["fade", "flip", "spin"];
@@ -168,38 +179,43 @@ const ArtworkBackground = memo(function ArtworkBackground() {
           return s;
         };
 
-        const newUrl = pickNextUrl();
-        const transition = pickTransition();
+        // Build swap descriptors
+        const swaps = swapIndices.map((idx) => ({
+          idx,
+          url: pickNextUrl(),
+          transition: pickTransition(),
+        }));
 
-        // Apply penalty to newly shown image
-        penaltyMapRef.current.set(newUrl, 1);
-
-        // Set nextUrl to trigger transition
+        // Apply all swaps in a single setGrid call
         setGrid((prev) => {
-          if (idx >= prev.length) return prev;
-          const outgoing = prev[idx].url;
-          const map = penaltyMapRef.current;
-          const existing = map.get(outgoing) ?? 0;
-          map.set(outgoing, Math.max(0, existing - 0.3));
-
           const copy = [...prev];
-          copy[idx] = { ...copy[idx], nextUrl: newUrl, transition };
+          const map = penaltyMapRef.current;
+          for (const { idx, url, transition } of swaps) {
+            if (idx >= copy.length) continue;
+            const outgoing = copy[idx].url;
+            const existing = map.get(outgoing) ?? 0;
+            map.set(outgoing, Math.max(0, existing - 0.3));
+            map.set(url, 1);
+            copy[idx] = { ...copy[idx], nextUrl: url, transition };
+          }
           return copy;
         });
 
-        // After transition completes, promote nextUrl to url
+        // After transition completes, promote all nextUrls
         const fadeDur = fadeDurationRef.current * 1000;
         const fadeId = setTimeout(() => {
           fadeTimeouts.delete(fadeId);
           if (!alive) return;
           setGrid((prev) => {
-            if (idx >= prev.length) return prev;
-            if (prev[idx]?.nextUrl) {
-              const copy = [...prev];
-              copy[idx] = { url: copy[idx].nextUrl!, nextUrl: null, transition: "fade" };
-              return copy;
+            const copy = [...prev];
+            let changed = false;
+            for (const { idx } of swaps) {
+              if (idx < copy.length && copy[idx].nextUrl) {
+                copy[idx] = { url: copy[idx].nextUrl!, nextUrl: null, transition: "fade" };
+                changed = true;
+              }
             }
-            return prev;
+            return changed ? copy : prev;
           });
         }, fadeDur);
         fadeTimeouts.add(fadeId);

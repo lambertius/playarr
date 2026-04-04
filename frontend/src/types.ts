@@ -221,6 +221,24 @@ export interface JobTelemetry {
 
 export type TelemetrySnapshot = Record<string, JobTelemetry>;
 
+// ─── Log Viewer ───────────────────────────────────────────
+export interface LogFileEntry {
+  filename: string;
+  category: "app" | "job";
+  size_bytes: number;
+  modified: string;
+  label: string;
+  job_id?: string;
+}
+
+export interface LogReadResponse {
+  file: string;
+  log_text: string;
+  total_lines: number;
+  returned_lines: number;
+  offset: number;
+}
+
 // ─── Metadata Snapshots ───────────────────────────────────
 export interface MetadataSnapshot {
   id: number;
@@ -281,11 +299,32 @@ export interface StaleItem {
   folder_path: string;
 }
 
+export interface RedundantFile {
+  file_name: string;
+  file_path: string;
+  reason: string;
+  size_bytes: number;
+}
+
+export interface RedundantItem {
+  video_id: number;
+  artist: string;
+  title: string;
+  folder_path: string;
+  video_stem: string;
+  files: RedundantFile[];
+  total_size_bytes: number;
+}
+
 export interface LibraryHealthResponse {
   stale_count: number;
   stale_items: StaleItem[];
+  unmanaged_count: number;
+  unmanaged_items: StaleItem[];
   orphan_count: number;
   orphan_folders: OrphanFolder[];
+  redundant_count: number;
+  redundant_items: RedundantItem[];
 }
 
 // ─── Normalization ────────────────────────────────────────

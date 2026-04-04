@@ -25,6 +25,42 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/video-editor", tags=["Video Editor"])
 
+# Video extensions for archive file matching
+_VIDEO_EXTS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m4v"}
+
+
+def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Optional[str]:
+    """Locate the archived original for a library file.
+
+    Handles extension and name mismatches (e.g. resolution label changed
+    after crop, or .mkv→.mp4 after re-encode) by searching the archive
+    folder for any video file.
+    Returns the full path to the archive file, or None.
+    """
+    if not file_path:
+        return None
+
+    library_root = os.path.normpath(library_dir)
+    norm_fp = os.path.normpath(file_path)
+    if norm_fp.startswith(library_root + os.sep):
+        rel = os.path.relpath(norm_fp, library_root)
+    else:
+        rel = os.path.basename(file_path)
+
+    # 1) Exact match (same extension and name)
+    archive_path = os.path.join(archive_dir, rel)
+    if os.path.isfile(archive_path):
+        return archive_path
+
+    # 2) Check archive folder for ANY video file (handles extension + name changes)
+    archive_folder = os.path.dirname(archive_path)
+    if os.path.isdir(archive_folder):
+        for fname in os.listdir(archive_folder):
+            if os.path.splitext(fname)[1].lower() in _VIDEO_EXTS:
+                return os.path.join(archive_folder, fname)
+
+    return None
+
 
 # ── Pydantic Schemas ──────────────────────────────────────
 
@@ -181,16 +217,8 @@ def get_editor_queue(
     for v in videos:
         qs = db.query(QualitySignature).filter(QualitySignature.video_id == v.id).first()
 
-        # Check if archived original exists
-        has_archive = False
-        if v.file_path:
-            norm_fp = os.path.normpath(v.file_path)
-            if norm_fp.startswith(library_root + os.sep):
-                rel = os.path.relpath(norm_fp, library_root)
-            else:
-                rel = os.path.basename(v.file_path)
-            archive_path = os.path.join(_settings.archive_dir, rel)
-            has_archive = os.path.isfile(archive_path)
+        # Check if archived original exists (extension-agnostic)
+        archive_file = find_archive_file(v.file_path, _settings.library_dir, _settings.archive_dir) if v.file_path else None
 
         result.append(EditorQueueItem(
             video_id=v.id,
@@ -207,7 +235,7 @@ def get_editor_queue(
             audio_codec=qs.audio_codec if qs else None,
             audio_bitrate=qs.audio_bitrate if qs else None,
             audio_channels=qs.audio_channels if qs else None,
-            has_archive=has_archive,
+            has_archive=archive_file is not None,
             exclude_from_scan=v.exclude_from_editor_scan,
         ))
 
@@ -541,15 +569,9 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
         raise HTTPException(400, "Video has no file path")
 
     _settings = _get_settings()
-    library_root = os.path.normpath(_settings.library_dir)
-    norm_fp = os.path.normpath(video.file_path)
-    if norm_fp.startswith(library_root + os.sep):
-        rel = os.path.relpath(norm_fp, library_root)
-    else:
-        rel = os.path.basename(video.file_path)
-    archive_path = os.path.join(_settings.archive_dir, rel)
+    archive_file = find_archive_file(video.file_path, _settings.library_dir, _settings.archive_dir)
 
-    if not os.path.isfile(archive_path):
+    if not archive_file:
         raise HTTPException(404, "Archived original not found")
 
     # Kill any active streaming processes (ffmpeg remux/transcode) holding the file
@@ -573,9 +595,25 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
                         "Stop playback and try again."
                     )
 
+    # Determine restored file path — extension may differ from current
+    archive_ext = os.path.splitext(archive_file)[1]
+    current_ext = os.path.splitext(video.file_path)[1]
+    if archive_ext.lower() != current_ext.lower():
+        # Extension changed during encoding, restore with original extension
+        restored_path = os.path.splitext(video.file_path)[0] + archive_ext
+    else:
+        restored_path = video.file_path
+
     # Restore original from archive
-    os.makedirs(os.path.dirname(video.file_path), exist_ok=True)
-    shutil.move(archive_path, video.file_path)
+    os.makedirs(os.path.dirname(restored_path), exist_ok=True)
+    shutil.move(archive_file, restored_path)
+
+    # Update DB file_path if extension changed
+    if restored_path != video.file_path:
+        video.file_path = restored_path
+        # Also update folder name if the extension is in the folder name
+        folder_name = os.path.basename(os.path.dirname(restored_path))
+        video.folder_path = os.path.dirname(restored_path)
 
     # Re-analyze quality signature
     try:
@@ -591,8 +629,8 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
     except Exception as e:
         logger.warning(f"Post-restore analysis failed: {e}")
 
-    logger.info(f"Restored video {video_id} from archive: {archive_path} -> {video.file_path}")
-    return {"message": "Original restored from archive", "archive_path": archive_path}
+    logger.info(f"Restored video {video_id} from archive: {archive_file} -> {video.file_path}")
+    return {"message": "Original restored from archive", "archive_path": archive_file}
 
 
 @router.post("/exclude-from-scan")

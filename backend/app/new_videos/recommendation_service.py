@@ -39,7 +39,7 @@ from app.new_videos import feedback_service
 logger = logging.getLogger(__name__)
 
 # ── Category definitions ──────────────────────────────────────────────────────
-CATEGORIES = ["new", "popular", "rising", "by_artist", "taste", "famous"]
+CATEGORIES = ["famous", "popular", "by_artist", "taste"]
 
 # ── Famous music videos seed list ─────────────────────────────────────────────
 # Curated list of historically significant / iconic music videos.
@@ -47,15 +47,20 @@ CATEGORIES = ["new", "popular", "rising", "by_artist", "taste", "famous"]
 FAMOUS_SEEDS = [
     ("A-ha", "Take On Me", "djV11Xbc914"),
     ("Michael Jackson", "Thriller", "sOnqjkJTMaA"),
+    ("Michael Jackson", "Billie Jean", "Zi_XLOBDo_Y"),
+    ("Michael Jackson", "Beat It", "oRdxUFDoQe0"),
     ("Peter Gabriel", "Sledgehammer", "OJWJE0x7T4Q"),
     ("Nirvana", "Smells Like Teen Spirit", "hTWKbfoikeg"),
+    ("Nirvana", "Heart-Shaped Box", "n6P0SitGwy8"),
     ("OK Go", "Here It Goes Again", "dTAAsCNK7RA"),
     ("Fatboy Slim", "Weapon of Choice", "wCDIYvFmgW8"),
     ("Radiohead", "Karma Police", "1uYWYWPc9HU"),
+    ("Radiohead", "No Surprises", "u5CVsCnxyXg"),
     ("Beastie Boys", "Sabotage", "z5rRZdiu1UE"),
     ("Jamiroquai", "Virtual Insanity", "4JkIs37a2JE"),
     ("Daft Punk", "Around the World", "LKYPYj2XX80"),
     ("Gorillaz", "Clint Eastwood", "1V_xRb0x9aw"),
+    ("Gorillaz", "Feel Good Inc.", "HyHNuVaZJ-k"),
     ("The White Stripes", "Seven Nation Army", "0J2QdDbelmY"),
     ("Missy Elliott", "Get Ur Freak On", "FPoKiGQzbSQ"),
     ("Childish Gambino", "This Is America", "VYOjWnS4cMY"),
@@ -66,12 +71,15 @@ FAMOUS_SEEDS = [
     ("Beyoncé", "Single Ladies", "4m1EFMoRFvY"),
     ("Foo Fighters", "Everlong", "eBG7P-K-r1Y"),
     ("Red Hot Chili Peppers", "Californication", "YlUKcNNmywk"),
+    ("Red Hot Chili Peppers", "Under the Bridge", "lwlogyj7nFE"),
     ("Johnny Cash", "Hurt", "8AHCfZTRGiI"),
     ("Queen", "Bohemian Rhapsody", "fJ9rUzIMcZQ"),
     ("Guns N' Roses", "November Rain", "8SbUC-UaAxE"),
+    ("Guns N' Roses", "Sweet Child O' Mine", "1w7OgIMMRc4"),
     ("Pearl Jam", "Jeremy", "MS91knuzoOA"),
     ("R.E.M.", "Losing My Religion", "xwtdhWltSIg"),
     ("Eminem", "Without Me", "YVkUvmDQ3HY"),
+    ("Eminem", "The Real Slim Shady", "eJO5HU_7_1w"),
     ("Talking Heads", "Once in a Lifetime", "5IsSpAOD6K8"),
     ("The Prodigy", "Firestarter", "wmin5WkOuPw"),
     ("Sia", "Chandelier", "2vjPBrBU-TM"),
@@ -83,32 +91,117 @@ FAMOUS_SEEDS = [
     ("Lauryn Hill", "Doo Wop (That Thing)", "T6QKqFPRZSA"),
     ("Arcade Fire", "The Suburbs", "5Euj9f3gdyM"),
     ("David Bowie", "Space Oddity", "iYYRH4apXDo"),
+    ("David Bowie", "Heroes", "lXgkuM2NhYI"),
     ("Madonna", "Like a Prayer", "79fzeNUqQbQ"),
     ("Prince", "When Doves Cry", "UG3VcCAlUgE"),
+    ("The Verve", "Bitter Sweet Symphony", "1lyu1KKwC74"),
+    ("TLC", "Waterfalls", "8WEtxJ4-sh4"),
+    ("Soundgarden", "Black Hole Sun", "3mbBbFH9fAg"),
+    ("Green Day", "Basket Case", "NUTGr5t3MoY"),
+    ("Alanis Morissette", "Ironic", "Jne9t8sHpUc"),
+    ("No Doubt", "Don't Speak", "TR3Vdo5etCQ"),
+    ("Oasis", "Wonderwall", "bx1Bh8ZvH84"),
+    ("Oasis", "Don't Look Back in Anger", "cmpRLQZkTb8"),
+    ("Blur", "Song 2", "SSbBvKaM6sk"),
+    ("The Cranberries", "Zombie", "6Ejga4kJUts"),
+    ("Backstreet Boys", "I Want It That Way", "4fndeDfaWCg"),
+    ("The Killers", "Mr. Brightside", "gGdGFtwCNBE"),
+    ("Muse", "Supermassive Black Hole", "Xsp3_a-PMTw"),
+    ("Franz Ferdinand", "Take Me Out", "GhCXAiNT9_A"),
+    ("Arctic Monkeys", "Do I Wanna Know?", "bpOSxM0rNPM"),
+    ("Tame Impala", "The Less I Know the Better", "2SUwOgmvzK4"),
+    ("Joy Division", "Love Will Tear Us Apart", "zuuObGsB0No"),
+    ("Depeche Mode", "Enjoy the Silence", "aGSKrC7dGcY"),
+    ("New Order", "Blue Monday", "FYH8DsU2WCk"),
+    ("The Cure", "Friday I'm in Love", "mGgMZpGYiy8"),
+    ("The Smiths", "How Soon Is Now?", "hnpILIIo9ek"),
+    ("Duran Duran", "Hungry Like the Wolf", "oJL-lCzEXgI"),
+    ("Tears for Fears", "Everybody Wants to Rule the World", "aGCdLKXNF3w"),
+    ("Cyndi Lauper", "Girls Just Want to Have Fun", "PIb6AZdTr-A"),
+    ("Eurythmics", "Sweet Dreams", "qeMFqkcPYcg"),
+    ("Softcell", "Tainted Love", "XZVpR3Pk-r8"),
+    ("The Police", "Every Breath You Take", "OMOGaugKpzs"),
+    ("Blondie", "Heart of Glass", "WGU_4-5RaxU"),
+    ("Fleetwood Mac", "Dreams", "mrZRURcb1cM"),
+    ("Eagles", "Hotel California", "BciS5krYL80"),
+    ("Led Zeppelin", "Stairway to Heaven", "QkF3oxziUI4"),
+    ("Pink Floyd", "Comfortably Numb", "x-xTttimcNk"),
+    ("AC/DC", "Back in Black", "pAgnJDJN4VA"),
+    ("Metallica", "Enter Sandman", "CD-E-LDc384"),
+    ("Black Sabbath", "Paranoid", "0qanF-91aJo"),
+    ("Iron Maiden", "The Trooper", "X4bgXH3sJ2Q"),
+    ("Mötley Crüe", "Girls, Girls, Girls", "d2XdmyBtCRQ"),
+    ("Def Leppard", "Pour Some Sugar on Me", "0UIB9Y4OFPs"),
+    ("Aerosmith", "I Don't Want to Miss a Thing", "JkK8g6FMEXE"),
+    ("Bon Jovi", "Livin' on a Prayer", "lDK9QqIzhwk"),
+    ("Van Halen", "Jump", "SwYN7mTi6HM"),
+    ("U2", "One", "ftjEcrrf7r0"),
+    ("Coldplay", "The Scientist", "RB-RcX5DS5A"),
+    ("Coldplay", "Yellow", "yKNxeF4KMsY"),
 ]
 
 # ── Popular seeds (well-known, high-view-count official videos) ───────────────
 POPULAR_SEEDS = [
     ("Luis Fonsi ft. Daddy Yankee", "Despacito", "kJQP7kiw5Fk"),
     ("Ed Sheeran", "Shape of You", "JGwWNGJdvx8"),
+    ("Ed Sheeran", "Perfect", "2Vv-BfVoq4g"),
     ("Wiz Khalifa ft. Charlie Puth", "See You Again", "RgKAFK5djSk"),
     ("Mark Ronson ft. Bruno Mars", "Uptown Funk", "OPf0YbXqDm0"),
+    ("Bruno Mars", "24K Magic", "UqyT8IEBkvY"),
     ("PSY", "Gangnam Style", "9bZkp7q19f0"),
     ("Maroon 5", "Sugar", "09R8_2nJtjg"),
     ("Katy Perry", "Roar", "CevxZvSJLk8"),
+    ("Katy Perry", "Firework", "QGJuMBdaqIw"),
     ("Taylor Swift", "Shake It Off", "nfWlot6h_JM"),
+    ("Taylor Swift", "Blank Space", "e-ORhEE9VVg"),
     ("Adele", "Hello", "YQHsXMglC9A"),
+    ("Adele", "Rolling in the Deep", "rYEDA3JcQqw"),
     ("The Weeknd", "Blinding Lights", "4NRXx6U8ABQ"),
+    ("The Weeknd", "Starboy", "34Na4j8AVgA"),
     ("Imagine Dragons", "Believer", "7wtfhZwyrcc"),
+    ("Imagine Dragons", "Radioactive", "ktvTqknDobU"),
     ("Billie Eilish", "Bad Guy", "DyDfgMOUjCI"),
+    ("Billie Eilish", "Lovely", "V1Pl8CzNzCw"),
     ("Dua Lipa", "Levitating", "TUVcZfQe-Kw"),
+    ("Dua Lipa", "Don't Start Now", "oygrmJFKYZY"),
     ("Harry Styles", "Watermelon Sugar", "E07s5ZYadZs"),
+    ("Harry Styles", "As It Was", "H5v3kku4y6Q"),
     ("Post Malone", "Circles", "wXhTHyIgQ_U"),
+    ("Post Malone", "Sunflower", "ApXoWvfEYVU"),
     ("Lizzo", "Juice", "XaCrQL_8eMY"),
     ("Doja Cat", "Say So", "pok8H_KF1FA"),
     ("Glass Animals", "Heat Waves", "mRD0-GxKHPk"),
-    ("The Cranberries", "Zombie", "6Ejga4kJUts"),
     ("Linkin Park", "In the End", "eVTXPUF4Oz4"),
+    ("Linkin Park", "Numb", "kXYiU_JCYtU"),
+    ("LMFAO", "Party Rock Anthem", "KQ6zr6kCPj8"),
+    ("Gotye", "Somebody That I Used to Know", "8UVNT4wvIGY"),
+    ("Carly Rae Jepsen", "Call Me Maybe", "fWNaR-rxAic"),
+    ("Pharrell Williams", "Happy", "ZbZSe6N_BXs"),
+    ("Macklemore & Ryan Lewis", "Thrift Shop", "QK8mJJJvaes"),
+    ("Lorde", "Royals", "nlcIKh6sBtc"),
+    ("Hozier", "Take Me to Church", "PVjiKRfKpPI"),
+    ("Passenger", "Let Her Go", "RBumgq5yVrA"),
+    ("John Legend", "All of Me", "450p7goxZqg"),
+    ("Sam Smith", "Stay with Me", "pB-5XG-DbAA"),
+    ("Avicii", "Wake Me Up", "IcrbM1l_BoI"),
+    ("Clean Bandit", "Rather Be", "m-M1AtrxztU"),
+    ("Major Lazer & DJ Snake", "Lean On", "YqeW9_5kURI"),
+    ("Shawn Mendes", "Stitches", "VbfpW0pbvaU"),
+    ("Camila Cabello", "Havana", "BQ0mxQXmLsk"),
+    ("Lady Gaga", "Bad Romance", "qrO4YZeyl0I"),
+    ("Lady Gaga", "Poker Face", "bESGLojNYSo"),
+    ("Rihanna", "Umbrella", "CvBfHwUxHIk"),
+    ("Rihanna", "We Found Love", "tg00YEETFzg"),
+    ("Drake", "Hotline Bling", "uxpDa-c-4Mc"),
+    ("Travis Scott", "SICKO MODE", "6ONRf7h3Mdk"),
+    ("Cardi B", "Bodak Yellow", "PEGccV-NOm8"),
+    ("SZA", "Kill Bill", "hIiPErz2cms"),
+    ("Olivia Rodrigo", "Drivers License", "ZmDBbnmKFnI"),
+    ("Olivia Rodrigo", "Good 4 U", "gNi_6U5Pm_o"),
+    ("Miley Cyrus", "Flowers", "G7KNmW9a75Y"),
+    ("Miley Cyrus", "Wrecking Ball", "My2FRPA3Gf8"),
+    ("Justin Bieber", "Sorry", "fRh_vgS2dFE"),
+    ("Ariana Grande", "Thank U, Next", "gl1aHhXnN1k"),
 ]
 
 
@@ -203,6 +296,38 @@ def _get_cart_provider_ids(db: Session) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _normalize_title(s: str) -> str:
+    """Normalize a string for fuzzy title comparison."""
+    s = s.lower().strip()
+    # Remove common suffixes/noise
+    for noise in ("(official video)", "(official music video)",
+                  "(official hd video)", "(music video)", "[official video]",
+                  "(lyric video)", "(lyrics)", "(audio)", "(visualizer)",
+                  "(remastered)", "[remastered]", "(hd remaster)"):
+        s = s.replace(noise, "")
+    # Strip punctuation except apostrophes inside words
+    s = re.sub(r"[^\w\s']", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _get_library_titles(db: Session) -> set[tuple[str, str]]:
+    """Return set of normalized (artist, title) tuples from the library.
+
+    Used to detect when a suggested video already exists in the library
+    even if the YouTube video ID differs (e.g. remastered upload).
+    """
+    from app.models import VideoItem
+    rows = db.query(VideoItem.artist, VideoItem.title).filter(
+        VideoItem.artist.isnot(None),
+        VideoItem.title.isnot(None),
+    ).all()
+    return {
+        (_normalize_title(r[0]), _normalize_title(r[1]))
+        for r in rows
+        if r[0] and r[1]
+    }
+
+
 # ── Source strategies ─────────────────────────────────────────────────────────
 # Each returns a list of RecommendationCandidate objects.
 # These are the pluggable candidate generators.
@@ -210,11 +335,14 @@ def _get_cart_provider_ids(db: Session) -> set[str]:
 def _generate_famous_candidates(db: Session, limit: int = 20) -> list[RecommendationCandidate]:
     """Generate candidates from the curated famous videos seed list."""
     library_ids = _get_library_video_ids(db)
+    library_titles = _get_library_titles(db)
     dismissed_ids = _get_dismissed_provider_ids(db)
     candidates = []
 
     for artist, title, vid_id in FAMOUS_SEEDS:
         if vid_id in library_ids or vid_id in dismissed_ids:
+            continue
+        if (_normalize_title(artist), _normalize_title(title)) in library_titles:
             continue
         candidates.append(RecommendationCandidate(
             provider="youtube",
@@ -238,11 +366,14 @@ def _generate_famous_candidates(db: Session, limit: int = 20) -> list[Recommenda
 def _generate_popular_candidates(db: Session, limit: int = 20) -> list[RecommendationCandidate]:
     """Generate candidates from the popular videos seed list."""
     library_ids = _get_library_video_ids(db)
+    library_titles = _get_library_titles(db)
     dismissed_ids = _get_dismissed_provider_ids(db)
     candidates = []
 
     for artist, title, vid_id in POPULAR_SEEDS:
         if vid_id in library_ids or vid_id in dismissed_ids:
+            continue
+        if (_normalize_title(artist), _normalize_title(title)) in library_titles:
             continue
         candidates.append(RecommendationCandidate(
             provider="youtube",
@@ -276,6 +407,7 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
     max_per_artist = _get_setting(db, "nv_max_recs_per_artist", "5", "int")
     library_artists = _get_library_artists(db)
     library_ids = _get_library_video_ids(db)
+    library_titles = _get_library_titles(db)
     dismissed_ids = _get_dismissed_provider_ids(db)
     candidates = []
 
@@ -293,6 +425,8 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
         added = 0
         for artist, title, vid_id in seeds:
             if vid_id in library_ids or vid_id in dismissed_ids:
+                continue
+            if (_normalize_title(artist), _normalize_title(title)) in library_titles:
                 continue
             candidates.append(RecommendationCandidate(
                 provider="youtube",
@@ -339,6 +473,7 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
         return []
 
     library_ids = _get_library_video_ids(db)
+    library_titles = _get_library_titles(db)
     dismissed_ids = _get_dismissed_provider_ids(db)
     candidates = []
 
@@ -346,6 +481,8 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
     for artist, title, vid_id in all_seeds:
         if artist.lower() in fav_artist_names:
             if vid_id in library_ids or vid_id in dismissed_ids:
+                continue
+            if (_normalize_title(artist), _normalize_title(title)) in library_titles:
                 continue
             candidates.append(RecommendationCandidate(
                 provider="youtube",
@@ -479,7 +616,19 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
             logger.info(f"Category '{category}' cache still fresh, skipping")
             return 0
 
-    limit = _get_setting(db, "nv_videos_per_category", "12", "int")
+    # Per-category count overrides: nv_famous_count, nv_popular_count, etc.
+    CATEGORY_COUNT_KEYS = {
+        "famous": "nv_famous_count",
+        "popular": "nv_popular_count",
+        "rising": "nv_rising_count",
+        "new": "nv_new_count",
+    }
+    default_limit = _get_setting(db, "nv_videos_per_category", "15", "int")
+    count_key = CATEGORY_COUNT_KEYS.get(category)
+    if count_key:
+        limit = _get_setting(db, count_key, str(default_limit), "int")
+    else:
+        limit = default_limit
     min_trust = _get_setting(db, "nv_min_trust_threshold", "0.3", "float")
 
     # Generate candidates
@@ -603,14 +752,27 @@ def get_feed(db: Session) -> dict:
         elif d.dismissal_type == "temporary" and d.suggested_video_id:
             dismissed_temp_ids.add(d.suggested_video_id)
 
+    # Also filter by library contents (video ID + title match)
+    library_ids = _get_library_video_ids(db)
+    library_titles = _get_library_titles(db)
+
     cart_count = db.query(SuggestedVideoCartItem).count()
     cart_video_ids = {r[0] for r in db.query(SuggestedVideoCartItem.suggested_video_id).all()}
 
-    limit = _get_setting(db, "nv_videos_per_category", "12", "int")
+    default_limit = _get_setting(db, "nv_videos_per_category", "15", "int")
+    CATEGORY_COUNT_KEYS = {
+        "famous": "nv_famous_count",
+        "popular": "nv_popular_count",
+        "rising": "nv_rising_count",
+        "new": "nv_new_count",
+    }
 
     result: dict = {"categories": {}, "cart_count": cart_count}
 
     for cat in CATEGORIES:
+        count_key = CATEGORY_COUNT_KEYS.get(cat)
+        limit = _get_setting(db, count_key, str(default_limit), "int") if count_key else default_limit
+
         snapshot = db.query(RecommendationSnapshot).filter(
             RecommendationSnapshot.category == cat
         ).first()
@@ -642,6 +804,18 @@ def get_feed(db: Session) -> dict:
                 continue
             if v.id in dismissed_temp_ids:
                 continue
+            # Skip if already in library (video ID or title match)
+            if v.provider_video_id in library_ids:
+                continue
+            if v.artist and v.title:
+                raw_title = v.title
+                # Strip "Artist - " prefix if present for matching
+                if " - " in raw_title:
+                    raw_title = raw_title.split(" - ", 1)[1]
+                # Remove "(Official Video)" etc.
+                raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
+                if (_normalize_title(v.artist), _normalize_title(raw_title)) in library_titles:
+                    continue
             ordered.append(_serialize_video(v, in_cart=v.id in cart_video_ids))
 
         # Backfill from other SuggestedVideo rows for this category if
@@ -667,6 +841,15 @@ def get_feed(db: Session) -> dict:
                     continue
                 if v.provider_video_id in used_provider_ids:
                     continue
+                if v.provider_video_id in library_ids:
+                    continue
+                if v.artist and v.title:
+                    raw_title = v.title
+                    if " - " in raw_title:
+                        raw_title = raw_title.split(" - ", 1)[1]
+                    raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
+                    if (_normalize_title(v.artist), _normalize_title(raw_title)) in library_titles:
+                        continue
                 used_provider_ids.add(v.provider_video_id)
                 ordered.append(_serialize_video(v, in_cart=v.id in cart_video_ids))
 

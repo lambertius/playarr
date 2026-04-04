@@ -154,8 +154,14 @@ def _export_xml(
             stats["skipped"] += 1
             return stats
 
-    # Build XML content
-    root = build_playarr_xml(video, db)
+    # Build XML content (include archive info if available)
+    from app.routers.video_editor import find_archive_file
+    from app.config import get_settings as _get_settings
+    _cfg = _get_settings()
+    archive_file = find_archive_file(video.file_path, _cfg.library_dir, _cfg.archive_dir) if video.file_path else None
+    archive_filename = os.path.basename(archive_file) if archive_file else None
+
+    root = build_playarr_xml(video, db, archive_filename=archive_filename)
     indent(root, space="    ")
     xml_bytes = tostring(root, encoding="unicode", xml_declaration=True)
 

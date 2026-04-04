@@ -56,7 +56,8 @@ _DEFERRED_TIMEOUT = 300
 #  PUBLIC API
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> None:
+def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
+                      update_job_progress: bool = True) -> None:
     """Execute deferred tasks with parallel I/O, serialised DB writes.
 
     All I/O (image downloads, preview generation, AI calls) runs in
@@ -92,6 +93,7 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
     _PHASE1_TASKS = {"ai_enrichment"}
 
     total_tasks = len(tasks)
+    _update_progress = update_job_progress  # capture for closure
 
     def _coordinator():
         completed_tasks = []
@@ -110,7 +112,8 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
                 fn = _DISPATCH.get(task_name)
                 if fn:
                     label = _TASK_LABELS.get(task_name, task_name)
-                    _update_child_step(ws.job_id, label, progress=_bump_progress())
+                    if _update_progress:
+                        _update_child_step(ws.job_id, label, progress=_bump_progress())
                     try:
                         _run_safe(fn, video_id, ws, task_name)
                         completed_tasks.append(task_name)
@@ -118,7 +121,8 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
                         failed_tasks.append(task_name)
 
             # Phase 2: remaining tasks in parallel
-            _update_child_step(ws.job_id, "Finalizing", progress=_bump_progress())
+            if _update_progress:
+                _update_child_step(ws.job_id, "Finalizing", progress=_bump_progress())
             pool = ThreadPoolExecutor(
                 max_workers=4,
                 thread_name_prefix=f"def-{video_id}",
@@ -138,7 +142,8 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
                         completed_tasks.append(task_name)
                     except Exception:
                         failed_tasks.append(task_name)
-                    _update_child_step(ws.job_id, "Finalizing", progress=_bump_progress())
+                    if _update_progress:
+                        _update_child_step(ws.job_id, "Finalizing", progress=_bump_progress())
             except FuturesTimeoutError:
                 timed_out = [n for f, n in futures.items() if not f.done()]
                 for n in timed_out:
@@ -148,7 +153,8 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
                 pool.shutdown(wait=False, cancel_futures=True)
         finally:
             try:
-                _update_child_step(ws.job_id, "Import complete", progress=100)
+                if _update_progress:
+                    _update_child_step(ws.job_id, "Import complete", progress=100)
             except Exception as e:
                 logger.error(f"Failed to set 'Import complete' for job {ws.job_id}: {e}")
             try:

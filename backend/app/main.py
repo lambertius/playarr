@@ -411,7 +411,7 @@ def _detect_untracked_library_files():
         if not os.path.isdir(library_dir):
             continue
         for root, dirs, files in os.walk(library_dir):
-            dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("_")]
+            dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("_") and d.lower() != "archive"]
             for fname in files:
                 if os.path.splitext(fname)[1].lower() in video_extensions:
                     full = os.path.join(root, fname)

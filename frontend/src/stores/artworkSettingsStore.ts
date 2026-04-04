@@ -25,7 +25,7 @@ interface ArtworkSettings {
   queueClock: boolean;
   /** Enable artwork tile swapping */
   artChangeEnabled: boolean;
-  /** Number of tiles to swap per interval (1-10) */
+  /** Number of tiles to swap per interval (1-50) */
   artChangeCount: number;
   /** Transition style for artwork swaps */
   artChangeStyle: ArtChangeStyle;

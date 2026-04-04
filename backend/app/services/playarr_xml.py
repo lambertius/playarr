@@ -58,7 +58,7 @@ def _rel_path(file_path: str, folder_path: str) -> str:
 #  Write
 # ═══════════════════════════════════════════════════════════
 
-def build_playarr_xml(video, db: Session) -> Element:
+def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -> Element:
     """
     Build an ElementTree root for a VideoItem.
 
@@ -177,6 +177,11 @@ def build_playarr_xml(video, db: Session) -> Element:
         if video.video_rating_set:
             _txt(ratings, "video_rating", video.video_rating)
 
+    # ── archive ──
+    if archive_filename:
+        archive_el = SubElement(root, "archive")
+        _txt(archive_el, "original_filename", archive_filename)
+
     # ── processing state ──
     ps = video.processing_state
     if ps:
@@ -281,7 +286,14 @@ def write_playarr_xml(video, db: Session) -> Optional[str]:
     if not video.folder_path or not os.path.isdir(video.folder_path):
         return None
 
-    root = build_playarr_xml(video, db)
+    # Check for archived original (extension-agnostic)
+    from app.routers.video_editor import find_archive_file
+    from app.config import get_settings as _get_settings
+    _cfg = _get_settings()
+    archive_file = find_archive_file(video.file_path, _cfg.library_dir, _cfg.archive_dir) if video.file_path else None
+    archive_filename = os.path.basename(archive_file) if archive_file else None
+
+    root = build_playarr_xml(video, db, archive_filename=archive_filename)
     indent(root, space="    ")
 
     # Name it after the video file: "Artist - Title [1080p].playarr.xml"
@@ -472,6 +484,13 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
             result["video_rating"] = _int(vr, 3)
             result["video_rating_set"] = True
 
+    # ── archive ──
+    archive_el = root.find("archive")
+    if archive_el is not None:
+        orig = archive_el.findtext("original_filename")
+        if orig:
+            result["archive_original_filename"] = orig
+
     # ── processing state ──
     state_el = root.find("processing_state")
     if state_el is not None:
@@ -559,11 +578,35 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
     return result
 
 
-def find_playarr_xml(folder_path: str) -> Optional[str]:
-    """Find the .playarr.xml file in a video folder, if any."""
+def find_playarr_xml(folder_path: str, video_file: Optional[str] = None) -> Optional[str]:
+    """Find the .playarr.xml file in a video folder, if any.
+
+    When *video_file* is provided (full path or filename), prefer the XML
+    whose stem matches the video file stem (``foo.mkv`` → ``foo.playarr.xml``).
+    Falls back to the first XML found if no stem-match exists.
+    """
     if not os.path.isdir(folder_path):
         return None
+
+    # Collect all .playarr.xml files
+    xml_files: list[str] = []
     for entry in os.scandir(folder_path):
         if entry.is_file() and entry.name.endswith(".playarr.xml"):
-            return entry.path
-    return None
+            xml_files.append(entry.path)
+
+    if not xml_files:
+        return None
+
+    # If a video filename is given, prefer the matching XML
+    if video_file:
+        video_stem = os.path.splitext(os.path.basename(video_file))[0]
+        for xp in xml_files:
+            # XML name is  <stem>.playarr.xml  → strip .playarr.xml
+            xml_stem = os.path.basename(xp)
+            if xml_stem.endswith(".playarr.xml"):
+                xml_stem = xml_stem[: -len(".playarr.xml")]
+            if xml_stem == video_stem:
+                return xp
+
+    # Fallback: return the first one
+    return xml_files[0]
