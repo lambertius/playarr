@@ -44,6 +44,8 @@ export const qk = {
   editorScanResults: (jobId: number) => ["editorScanResults", jobId] as const,
   editorEncodeStatus: (jobId: number) => ["editorEncodeStatus", jobId] as const,
   genreBlacklist: ["genreBlacklist"] as const,
+  logFiles: ["logFiles"] as const,
+  logContent: (file: string) => ["logContent", file] as const,
 };
 
 // ─── Library Queries ──────────────────────────────────────
@@ -252,6 +254,33 @@ export function useCleanStale() {
       qc.invalidateQueries({ queryKey: ["library-health"] });
       qc.invalidateQueries({ queryKey: ["library"] });
     },
+  });
+}
+
+export function useCleanRedundant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (filePaths: string[]) => libraryApi.cleanRedundant(filePaths),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["library-health"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}
+
+// ─── Log Viewer ───────────────────────────────────────────
+export function useLogFiles() {
+  return useQuery({
+    queryKey: qk.logFiles,
+    queryFn: () => jobsApi.logFiles(),
+  });
+}
+
+export function useLogContent(file: string, tail?: number) {
+  return useQuery({
+    queryKey: qk.logContent(file),
+    queryFn: () => jobsApi.readLog({ file, tail }),
+    enabled: !!file,
   });
 }
 

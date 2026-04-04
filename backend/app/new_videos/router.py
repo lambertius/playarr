@@ -383,6 +383,16 @@ def add_video(req: CartAddRequest, db: Session = Depends(get_db)):
     db.add(job)
     db.flush()
 
+    # Auto-dismiss so the suggestion disappears from the feed
+    dismissal = SuggestedVideoDismissal(
+        suggested_video_id=sv.id,
+        dismissal_type="permanent",
+        reason="auto-dismissed on add",
+        provider=sv.provider,
+        provider_video_id=sv.provider_video_id,
+    )
+    db.add(dismissal)
+
     feedback_service.record_feedback(
         db,
         feedback_type="added",

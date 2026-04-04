@@ -113,6 +113,17 @@ def update_setting(update: SettingUpdate, user_id: Optional[str] = None, db: Ses
     return SettingOut(key=setting.key, value=setting.value, value_type=setting.value_type)
 
 
+@router.get("/defaults")
+def get_defaults():
+    """Return platform-appropriate default directory values."""
+    from app.runtime_dirs import RuntimeDirs
+    rdirs = RuntimeDirs()
+    return {
+        "library_dir": str(rdirs.library_dir),
+        "archive_dir": str(rdirs.archive_dir),
+    }
+
+
 def _sync_dir_setting_to_config(key: str, value: str) -> None:
     """Keep the cached pydantic Settings in sync with DB for directory/naming keys."""
     from app.config import get_settings

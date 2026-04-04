@@ -121,8 +121,8 @@ def scan_directory_for_videos(
 
     if recursive:
         for root, dirs, files in os.walk(directory):
-            # Skip hidden directories and Playarr internal directories
-            dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("_")]
+            # Skip hidden directories, Playarr internal directories, and archive folders
+            dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("_") and d.lower() != "archive"]
             for fname in files:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in VIDEO_EXTENSIONS:

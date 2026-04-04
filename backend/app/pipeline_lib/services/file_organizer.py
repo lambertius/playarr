@@ -325,8 +325,8 @@ def scan_library_directory() -> list:
             continue
 
         for root, dirs, files in os.walk(library_dir):
-            # Skip hidden/internal directories
-            dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("_")]
+            # Skip hidden/internal directories and archive folders
+            dirs[:] = [d for d in dirs if not d.startswith(".") and not d.startswith("_") and d.lower() != "archive"]
             for fname in files:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in video_extensions:

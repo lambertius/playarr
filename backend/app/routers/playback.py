@@ -120,6 +120,15 @@ async def stream_video(video_id: int, request: Request, db: Session = Depends(ge
     if not item or not item.file_path or not os.path.isfile(item.file_path):
         raise HTTPException(status_code=404, detail="Video file not found")
 
+    # Reject files outside all configured library directories
+    from app.config import get_settings
+    all_dirs = get_settings().get_all_library_dirs()
+    norm_path = os.path.normcase(os.path.normpath(item.file_path))
+    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
+               for d in all_dirs):
+        raise HTTPException(status_code=403,
+                            detail="Video file is outside configured library directories")
+
     file_path = item.file_path
 
     # Check if container/codec combo needs remuxing for browser playback

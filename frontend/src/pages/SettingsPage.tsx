@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, Check, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Search, Eye, EyeOff, Compass, Download, Power } from "lucide-react";
+import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, Check, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Search, Eye, EyeOff, Compass, Download, Power, ScrollText } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport } from "@/hooks/queries";
 import { useGenreBlacklist, useUpdateGenreBlacklist, useCreateGenre } from "@/hooks/queries";
@@ -9,6 +9,7 @@ import { ErrorState, Skeleton } from "@/components/Feedback";
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
 import { CleanLibraryDialog } from "@/components/CleanLibraryDialog";
+import { LogViewer } from "@/components/LogViewer";
 import { NewVideosSettings } from "@/components/new-videos/NewVideosSettings";
 import { AISettingsPanel } from "@/components/AISettingsPanel";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
@@ -336,6 +337,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   { id: "system",   label: "System",   icon: <Server size={16} />,    groups: ["server"], extras: ["system"] },
   { id: "tmvdb",    label: "TMVDB",    icon: <Compass size={16} />,   groups: ["tmvdb"] },
   { id: "discovery", label: "Discovery", icon: <Compass size={16} />,  groups: [], extras: ["newvideos"] },
+  { id: "logs",      label: "Logs",      icon: <ScrollText size={16} />, groups: [], extras: ["logviewer"] },
 ];
 
 export function SettingsPage() {
@@ -345,6 +347,11 @@ export function SettingsPage() {
   const { data: settings, isLoading, isError, refetch } = useSettings();
   const updateMutation = useUpdateSetting();
   const [activeTab, setActiveTab] = useState("library");
+  const [dirDefaults, setDirDefaults] = useState<{ library_dir: string; archive_dir: string } | null>(null);
+
+  useEffect(() => {
+    settingsApi.defaults().then(setDirDefaults).catch(() => {});
+  }, []);
 
   if (isLoading) {
     return (
@@ -457,6 +464,7 @@ export function SettingsPage() {
                     );
                   }}
                   isPending={updateMutation.isPending}
+                  defaultValue={dirDefaults?.library_dir}
                 />
               );
             })()}
@@ -486,6 +494,7 @@ export function SettingsPage() {
                     );
                   }}
                   isPending={updateMutation.isPending}
+                  defaultValue={dirDefaults?.archive_dir}
                 />
               );
             })()}
@@ -687,7 +696,7 @@ export function SettingsPage() {
   };
 
   return (
-    <div className="p-4 md:p-6 max-w-3xl">
+    <div className={`p-4 md:p-6 ${activeTab === "logs" ? "max-w-5xl" : "max-w-3xl"}`}>
       <h1 className="text-2xl font-bold text-text-primary mb-4">Settings</h1>
 
       {/* ── Tab bar ── */}
@@ -792,6 +801,17 @@ export function SettingsPage() {
             </h2>
             <div className="card space-y-5">
               <RestartServerButton />
+            </div>
+          </section>
+        )}
+
+        {currentTabDef.extras?.includes("logviewer") && (
+          <section>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
+              Log Viewer
+            </h2>
+            <div className="card">
+              <LogViewer />
             </div>
           </section>
         )}
@@ -1067,12 +1087,14 @@ function DirectoryRow({
   setting,
   onSave,
   isPending,
+  defaultValue,
 }: {
   label: string;
   description: string;
   setting: AppSetting;
   onSave: (value: string) => void;
   isPending: boolean;
+  defaultValue?: string;
 }) {
   const [value, setValue] = useState(setting.value);
 
@@ -1104,6 +1126,16 @@ function DirectoryRow({
             <FolderOpen size={14} />
           </button>
         </Tooltip>
+        {defaultValue && value !== defaultValue && (
+          <Tooltip content={`Restore default: ${defaultValue}`}>
+            <button
+              onClick={() => setValue(defaultValue)}
+              className="btn-secondary btn-sm flex items-center gap-1"
+            >
+              <RefreshCw size={14} />
+            </button>
+          </Tooltip>
+        )}
         {isDirty && (
           <Tooltip content="Save changes">
             <button onClick={() => onSave(value)} disabled={isPending} className="btn-primary btn-sm">

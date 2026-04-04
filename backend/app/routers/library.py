@@ -591,7 +591,17 @@ def list_video_ratings(
 # ─── Orphan folder detection & cleanup ────────────────────
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".mpg"}
-SKIP_DIRS = {"_artists", "_albums"}
+SKIP_DIRS = {"_artists", "_albums", "archive"}
+
+
+def _is_under_managed_dirs(file_path: str, all_dirs: list[str]) -> bool:
+    """Return True if file_path is under any of the managed library directories."""
+    norm_path = os.path.normcase(os.path.normpath(file_path))
+    for d in all_dirs:
+        norm_dir = os.path.normcase(os.path.normpath(d))
+        if norm_path.startswith(norm_dir + os.sep) or norm_path == norm_dir:
+            return True
+    return False
 
 
 def _folder_size(path: str) -> int:
@@ -635,8 +645,8 @@ def detect_orphans(db: Session = Depends(get_db)):
         if not os.path.isdir(library_dir):
             continue
         for root, dirs, files in os.walk(library_dir):
-            # Skip hidden/internal directories
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS
+            # Skip hidden/internal directories and archive folders
+            dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS
                        and not d.startswith(".") and not d.startswith("_")]
             if os.path.normcase(os.path.normpath(root)) in tracked:
                 continue
@@ -738,7 +748,8 @@ def clean_orphans(body: OrphanCleanRequest, db: Session = Depends(get_db)):
 @router.get("/health")
 def library_health(db: Session = Depends(get_db)):
     """
-    Check library health — find DB entries with missing files (stale)
+    Check library health — find DB entries with missing files (stale),
+    DB entries whose file is outside all configured library dirs (unmanaged),
     and on-disk folders not tracked in the DB (orphans).
     """
     from app.config import get_settings
@@ -746,11 +757,29 @@ def library_health(db: Session = Depends(get_db)):
     all_dirs = settings.get_all_library_dirs()
 
     # --- Stale entries: DB records whose file is missing on disk ---
+    # --- Unmanaged entries: file exists but outside all library dirs ---
     stale_items = []
+    unmanaged_items = []
     all_videos = db.query(VideoItem).all()
     for v in all_videos:
-        if v.file_path and not os.path.isfile(v.file_path):
+        if not v.file_path:
             stale_items.append({
+                "id": v.id,
+                "artist": v.artist,
+                "title": v.title,
+                "file_path": v.file_path,
+                "folder_path": v.folder_path,
+            })
+        elif not os.path.isfile(v.file_path):
+            stale_items.append({
+                "id": v.id,
+                "artist": v.artist,
+                "title": v.title,
+                "file_path": v.file_path,
+                "folder_path": v.folder_path,
+            })
+        elif not _is_under_managed_dirs(v.file_path, all_dirs):
+            unmanaged_items.append({
                 "id": v.id,
                 "artist": v.artist,
                 "title": v.title,
@@ -769,7 +798,7 @@ def library_health(db: Session = Depends(get_db)):
         if not os.path.isdir(library_dir):
             continue
         for root, dirs, files in os.walk(library_dir):
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS
+            dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS
                        and not d.startswith(".") and not d.startswith("_")]
             if os.path.normcase(os.path.normpath(root)) in tracked:
                 continue
@@ -787,12 +816,121 @@ def library_health(db: Session = Depends(get_db)):
                 "has_video": True,
             })
 
+    # --- Redundant files: tracked folders with extra/mismatched sidecars ---
+    redundant_items = _detect_redundant_files(all_videos)
+
     return {
         "stale_count": len(stale_items),
         "stale_items": stale_items,
+        "unmanaged_count": len(unmanaged_items),
+        "unmanaged_items": unmanaged_items,
         "orphan_count": len(orphan_folders),
         "orphan_folders": orphan_folders,
+        "redundant_count": len(redundant_items),
+        "redundant_items": redundant_items,
     }
+
+
+def _detect_redundant_files(all_videos: list) -> list:
+    """Find duplicate/mismatched sidecar files in tracked video folders.
+
+    For each tracked video, the *correct* stem-based files are:
+      ``<stem>.playarr.xml``, ``<stem>.nfo``, ``<stem>-poster.jpg``,
+      ``<stem>-thumb.jpg``, ``<stem>-album-thumb.jpg``, ``poster.jpg``,
+      and thumbnail extracts (``thumb_*.jpg``).
+
+    Anything else with a sidecar-like extension that doesn't match the
+    tracked video's stem is flagged as redundant.
+    """
+    IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
+    redundant_items: list[dict] = []
+
+    # Group videos by folder — only folders with a single tracked video
+    # should be checked (multi-video folders are a different concern).
+    folder_to_videos: dict[str, list] = {}
+    for v in all_videos:
+        if v.folder_path and v.file_path and os.path.isdir(v.folder_path):
+            key = os.path.normcase(os.path.normpath(v.folder_path))
+            folder_to_videos.setdefault(key, []).append(v)
+
+    for _norm_folder, vids in folder_to_videos.items():
+        if len(vids) != 1:
+            continue
+        v = vids[0]
+        folder = v.folder_path
+        video_stem = os.path.splitext(os.path.basename(v.file_path))[0]
+        video_stem_lower = video_stem.lower()
+
+        # Build set of "expected" filenames (case-insensitive on Windows)
+        expected_lower = {
+            os.path.basename(v.file_path).lower(),           # the video itself
+            f"{video_stem_lower}.playarr.xml",
+            f"{video_stem_lower}.nfo",
+            f"{video_stem_lower}-poster.jpg",
+            f"{video_stem_lower}-thumb.jpg",
+            f"{video_stem_lower}-album-thumb.jpg",
+            "poster.jpg",
+        }
+
+        extra_files: list[dict] = []
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            name = entry.name
+            name_lower = name.lower()
+
+            # Always keep the video file, generic poster, and thumb extracts
+            if name_lower in expected_lower:
+                continue
+            if name_lower.startswith("thumb_") and name_lower.endswith(".jpg"):
+                continue
+
+            # Detect sidecar-like files that don't match the video stem
+            reason = None
+            if name_lower.endswith(".playarr.xml"):
+                reason = "Mismatched XML sidecar"
+            elif name_lower.endswith(".nfo"):
+                reason = "Mismatched NFO file"
+            elif name_lower.endswith("-poster.jpg") or name_lower.endswith("-poster.jpeg"):
+                reason = "Mismatched poster"
+            elif name_lower.endswith("-thumb.jpg") or name_lower.endswith("-thumb.jpeg"):
+                reason = "Mismatched thumbnail"
+            elif name_lower.endswith("-album-thumb.jpg") or name_lower.endswith("-album-thumb.jpeg"):
+                reason = "Mismatched album thumbnail"
+            elif name_lower.endswith(".srt") or name_lower.endswith(".vtt"):
+                # Subtitle files that don't match — leave them alone
+                pass
+
+            if reason:
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    size = 0
+                extra_files.append({
+                    "file_name": name,
+                    "file_path": entry.path,
+                    "reason": reason,
+                    "size_bytes": size,
+                })
+
+        if extra_files:
+            redundant_items.append({
+                "video_id": v.id,
+                "artist": v.artist,
+                "title": v.title,
+                "folder_path": folder,
+                "video_stem": video_stem,
+                "files": extra_files,
+                "total_size_bytes": sum(f["size_bytes"] for f in extra_files),
+            })
+
+    return redundant_items
 
 
 class CleanStaleRequest(BaseModel):
@@ -802,18 +940,23 @@ class CleanStaleRequest(BaseModel):
 @router.post("/clean-stale")
 def clean_stale_entries(body: CleanStaleRequest, db: Session = Depends(get_db)):
     """
-    Remove library entries whose files no longer exist on disk.
-    Only removes items whose file_path does not point to an existing file.
+    Remove library entries whose files no longer exist on disk or are
+    outside all configured library directories.
     """
+    from app.config import get_settings
+    all_dirs = get_settings().get_all_library_dirs()
+
     results = []
     for vid in body.video_ids:
         item = db.query(VideoItem).get(vid)
         if not item:
             results.append({"id": vid, "status": "skipped", "reason": "Not found"})
             continue
-        # Safety: only remove if the file is truly missing
-        if item.file_path and os.path.isfile(item.file_path):
-            results.append({"id": vid, "status": "skipped", "reason": "File still exists"})
+        # Allow removal if file is missing OR outside all managed dirs
+        file_exists = item.file_path and os.path.isfile(item.file_path)
+        file_managed = item.file_path and _is_under_managed_dirs(item.file_path, all_dirs)
+        if file_exists and file_managed:
+            results.append({"id": vid, "status": "skipped", "reason": "File still exists in library"})
             continue
 
         _cleanup_orphaned_child_rows(db, [vid])
@@ -836,6 +979,69 @@ def clean_stale_entries(body: CleanStaleRequest, db: Session = Depends(get_db)):
 
     db.commit()
     return {"results": results, "removed": sum(1 for r in results if r["status"] == "removed")}
+
+
+class CleanRedundantRequest(BaseModel):
+    file_paths: List[str]
+
+
+@router.post("/clean-redundant")
+def clean_redundant_files(body: CleanRedundantRequest, db: Session = Depends(get_db)):
+    """Delete redundant/mismatched sidecar files from tracked library folders.
+
+    Safety: each file must be inside a tracked video folder and must NOT be
+    the tracked video file itself.
+    """
+    from app.config import get_settings
+    all_library_dirs = [
+        os.path.normcase(os.path.normpath(d))
+        for d in get_settings().get_all_library_dirs()
+    ]
+
+    # Build tracked set: folder_path -> file_path
+    tracked_folders: dict[str, str] = {}
+    for v in db.query(VideoItem).all():
+        if v.folder_path and v.file_path:
+            tracked_folders[os.path.normcase(os.path.normpath(v.folder_path))] = \
+                os.path.normcase(os.path.normpath(v.file_path))
+
+    results = []
+    for fp in body.file_paths:
+        norm = os.path.normcase(os.path.normpath(fp))
+        parent = os.path.normcase(os.path.normpath(os.path.dirname(fp)))
+
+        # Safety: must be inside a library dir
+        if not any(norm.startswith(ld + os.sep) or norm.startswith(ld) for ld in all_library_dirs):
+            results.append({"file": fp, "status": "skipped", "reason": "Not inside library directory"})
+            continue
+        # Must be inside a tracked folder
+        if parent not in tracked_folders:
+            results.append({"file": fp, "status": "skipped", "reason": "Parent folder not tracked"})
+            continue
+        # Must NOT be the video file itself
+        if norm == tracked_folders[parent]:
+            results.append({"file": fp, "status": "skipped", "reason": "Cannot delete tracked video file"})
+            continue
+        if not os.path.isfile(fp):
+            results.append({"file": fp, "status": "skipped", "reason": "File does not exist"})
+            continue
+
+        try:
+            os.remove(fp)
+            # Also remove any MediaAsset records pointing at this file
+            db.query(MediaAsset).filter(
+                MediaAsset.file_path == fp,
+            ).delete(synchronize_session="fetch")
+            results.append({"file": fp, "status": "deleted"})
+        except Exception as exc:
+            logger.warning(f"Failed to delete redundant file {fp}: {exc}")
+            results.append({"file": fp, "status": "error", "reason": str(exc)})
+
+    db.commit()
+    return {
+        "results": results,
+        "deleted": sum(1 for r in results if r["status"] == "deleted"),
+    }
 
 
 @router.get("/{video_id}/nav")
@@ -914,18 +1120,12 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
     response.processing_state = item.processing_state
     response.exclude_from_editor_scan = item.exclude_from_editor_scan
 
-    # Check if archived original exists
+    # Check if archived original exists (extension-agnostic)
     from app.config import get_settings as _get_settings
+    from app.routers.video_editor import find_archive_file
     _cfg = _get_settings()
     if item.file_path:
-        _lib_root = os.path.normpath(_cfg.library_dir)
-        _norm_fp = os.path.normpath(item.file_path)
-        if _norm_fp.startswith(_lib_root + os.sep):
-            _rel = os.path.relpath(_norm_fp, _lib_root)
-        else:
-            _rel = os.path.basename(item.file_path)
-        _archive_path = os.path.join(_cfg.archive_dir, _rel)
-        response.has_archive = os.path.isfile(_archive_path)
+        response.has_archive = find_archive_file(item.file_path, _cfg.library_dir, _cfg.archive_dir) is not None
 
     if item.track_entity:
         track = item.track_entity

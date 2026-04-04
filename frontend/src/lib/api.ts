@@ -26,6 +26,7 @@ import type {
   RegexPreviewRequest, RegexPreviewResponse,
   PlaylistOut, PlaylistSummary, PlaylistEntry,
   PartyModeParams, PartyModeResponse,
+  LogFileEntry, LogReadResponse,
 } from "@/types";
 
 const api = axios.create({ baseURL: "/api" });
@@ -110,6 +111,9 @@ export const libraryApi = {
 
   cleanStale: (videoIds: number[]) =>
     api.post<{ results: { id: number; status: string; reason?: string }[]; removed: number }>("/library/clean-stale", { video_ids: videoIds }).then(r => r.data),
+
+  cleanRedundant: (filePaths: string[]) =>
+    api.post<{ results: { file: string; status: string; reason?: string }[]; deleted: number }>("/library/clean-redundant", { file_paths: filePaths }).then(r => r.data),
 
   rename: (videoId: number) =>
     api.post<VideoItemDetail>(`/library/${videoId}/rename`).then(r => r.data),
@@ -200,6 +204,13 @@ export const jobsApi = {
 
   jobTelemetry: (id: number) =>
     api.get<JobTelemetry & { active: boolean }>(`/jobs/${id}/telemetry`).then(r => r.data),
+
+  // ── Log viewer ──
+  logFiles: () =>
+    api.get<LogFileEntry[]>("/jobs/logs/files").then(r => r.data),
+
+  readLog: (params: { file: string; tail?: number; offset?: number; limit?: number }) =>
+    api.get<LogReadResponse>("/jobs/logs/read", { params }).then(r => r.data),
 };
 
 // ─── Playback URLs ────────────────────────────────────────
@@ -268,6 +279,9 @@ export const settingsApi = {
 
   configureStartup: () =>
     api.post<{ status: string; startup_enabled: boolean; delay: number }>("/settings/startup").then(r => r.data),
+
+  defaults: () =>
+    api.get<{ library_dir: string; archive_dir: string }>("/settings/defaults").then(r => r.data),
 };
 
 // ─── Stats ────────────────────────────────────────────────

@@ -1425,8 +1425,8 @@ def _rescan_from_disk(job_id: int, video_id: int,
 
     _set_pipeline_step(job_id, "Applying XML data", "success")
     _set_pipeline_step(job_id, "Resolving entities", "success")
-    _update_job(job_id, status=JobStatus.complete, progress_percent=90,
-                current_step="Finalizing", completed_at=datetime.now(timezone.utc))
+    _update_job(job_id, status=JobStatus.complete, progress_percent=100,
+                current_step="Rescan complete", completed_at=datetime.now(timezone.utc))
     _append_job_log(job_id, "Rescan from disk complete — dispatching deferred tasks")
 
     # Deferred tasks (preview, entity artwork, etc.)
@@ -1438,11 +1438,11 @@ def _rescan_from_disk(job_id: int, video_id: int,
                           "entity_artwork", "orphan_cleanup"]
         ws = ImportWorkspace(job_id)
         ws.log("Rescan-from-disk deferred tasks starting")
-        dispatch_deferred(video_id, deferred_tasks, ws)
+        dispatch_deferred(video_id, deferred_tasks, ws,
+                          update_job_progress=False)
     except Exception as de:
         logger.error(f"Rescan-from-disk deferred dispatch failed: {de}")
         _append_job_log(job_id, f"Deferred dispatch failed: {de}")
-        _update_job(job_id, current_step="Import complete", progress_percent=100)
 
     # Queue normalize as follow-up if requested
     if normalize and file_path:
@@ -4328,6 +4328,8 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
     from app.services.nfo_parser import find_nfo_for_video, parse_nfo_file
     from app.services.playarr_xml import find_playarr_xml, parse_playarr_xml
     from app.models import MediaAsset
+    from app.pipeline.db_apply import _upsert_source
+    from app.metadata.models import ArtistEntity, AlbumEntity, TrackEntity
 
     _update_job(job_id, status=JobStatus.analyzing, started_at=datetime.now(timezone.utc),
                 celery_task_id=getattr(getattr(self, 'request', None), 'id', None))
@@ -4395,7 +4397,7 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
 
                 # 1b. Check for .playarr.xml sidecar — overrides NFO
                 xml_sidecar_data = None
-                xml_path = find_playarr_xml(entry["folder_path"])
+                xml_path = find_playarr_xml(entry["folder_path"], video_file=entry["file_path"])
                 if xml_path:
                     xml_sidecar_data = parse_playarr_xml(xml_path)
                     if xml_sidecar_data:
@@ -4492,7 +4494,7 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                     xml_q = xml_sidecar_data.get("quality", {})
                     if xml_q and video_item.quality_signature:
                         qs_obj = video_item.quality_signature
-                        for qf in ("loudness_lufs", "fps", "video_codec", "video_bitrate",
+                        for qf in ("width", "height", "loudness_lufs", "fps", "video_codec", "video_bitrate",
                                     "hdr", "audio_codec", "audio_bitrate",
                                     "audio_sample_rate", "audio_channels",
                                     "container", "duration_seconds"):
@@ -4534,8 +4536,121 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                                 last_validated_at=datetime.now(timezone.utc),
                             ))
 
-                # Commit each item individually to release the DB write lock
-                # between iterations â€” prevents blocking other operations.
+                    # Restore entity references (artist, album, canonical track)
+                    entity_refs = xml_sidecar_data.get("entity_refs", {})
+
+                    # Artist entity — look up by mb_artist_id first, then by name
+                    ar = entity_refs.get("artist")
+                    if ar:
+                        ae = None
+                        if ar.get("mb_artist_id"):
+                            ae = db.query(ArtistEntity).filter(
+                                ArtistEntity.mb_artist_id == ar["mb_artist_id"]
+                            ).first()
+                        if not ae and ar.get("name"):
+                            ae = db.query(ArtistEntity).filter(
+                                ArtistEntity.canonical_name == ar["name"]
+                            ).first()
+                        if not ae and ar.get("name"):
+                            ae = ArtistEntity(
+                                canonical_name=ar["name"],
+                                mb_artist_id=ar.get("mb_artist_id"),
+                            )
+                            db.add(ae)
+                            db.flush()
+                        if ae:
+                            video_item.artist_entity_id = ae.id
+
+                    # Album entity — look up by mb_release_id, then by title+artist
+                    al = entity_refs.get("album")
+                    if al:
+                        ale = None
+                        if al.get("mb_release_id"):
+                            ale = db.query(AlbumEntity).filter(
+                                AlbumEntity.mb_release_id == al["mb_release_id"]
+                            ).first()
+                        if not ale and al.get("title") and video_item.artist_entity_id:
+                            ale = db.query(AlbumEntity).filter(
+                                AlbumEntity.title == al["title"],
+                                AlbumEntity.artist_id == video_item.artist_entity_id,
+                            ).first()
+                        if not ale and al.get("title"):
+                            ale = AlbumEntity(
+                                title=al["title"],
+                                artist_id=video_item.artist_entity_id,
+                                mb_release_id=al.get("mb_release_id"),
+                                mb_release_group_id=al.get("mb_release_group_id"),
+                            )
+                            db.add(ale)
+                            db.flush()
+                        if ale:
+                            video_item.album_entity_id = ale.id
+
+                    # Canonical track — look up by mb_recording_id, then by title+artist
+                    tr = entity_refs.get("track")
+                    if tr:
+                        te = None
+                        if tr.get("mb_recording_id"):
+                            te = db.query(TrackEntity).filter(
+                                TrackEntity.mb_recording_id == tr["mb_recording_id"]
+                            ).first()
+                        if not te and tr.get("title") and video_item.artist_entity_id:
+                            te = db.query(TrackEntity).filter(
+                                TrackEntity.title == tr["title"],
+                                TrackEntity.artist_id == video_item.artist_entity_id,
+                            ).first()
+                        if not te and tr.get("title"):
+                            te = TrackEntity(
+                                title=tr["title"],
+                                artist_id=video_item.artist_entity_id,
+                                album_id=video_item.album_entity_id,
+                                mb_recording_id=tr.get("mb_recording_id"),
+                                is_cover=tr.get("is_cover", False),
+                                original_artist=tr.get("original_artist"),
+                                original_title=tr.get("original_title"),
+                            )
+                            db.add(te)
+                            db.flush()
+                        if te:
+                            video_item.track_id = te.id
+
+                # Poster fallback: if no poster asset was created (XML missing
+                # poster, wrong XML picked, or no XML at all), discover a poster
+                # image directly from the folder.
+                has_poster = db.query(MediaAsset).filter(
+                    MediaAsset.video_id == video_item.id,
+                    MediaAsset.asset_type == "poster",
+                ).first() is not None
+                if not has_poster:
+                    folder = entry["folder_path"]
+                    poster_path = None
+                    # Prefer  <stem>-poster.jpg  matching the video filename
+                    video_stem = os.path.splitext(os.path.basename(entry["file_path"]))[0]
+                    candidate = os.path.join(folder, f"{video_stem}-poster.jpg")
+                    if os.path.isfile(candidate):
+                        poster_path = candidate
+                    else:
+                        # Try generic poster.jpg
+                        candidate = os.path.join(folder, "poster.jpg")
+                        if os.path.isfile(candidate):
+                            poster_path = candidate
+                        else:
+                            # Try any file with -poster in the name
+                            for fn in os.listdir(folder):
+                                if fn.lower().endswith("-poster.jpg"):
+                                    poster_path = os.path.join(folder, fn)
+                                    break
+                    if poster_path:
+                        db.add(MediaAsset(
+                            video_id=video_item.id,
+                            asset_type="poster",
+                            file_path=poster_path,
+                            provenance="disk_discovery",
+                            status="valid",
+                            last_validated_at=datetime.now(timezone.utc),
+                        ))
+
+                # Commit each item individually to release the DB write lock.
                 db.commit()
 
                 # Set processing flags for scanned items — the file is already

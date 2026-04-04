@@ -81,6 +81,9 @@ export function SuggestionCard({ video, onAdd }: { video: SuggestedVideoItem; on
   const handleAdd = () => {
     if (onAdd) {
       onAdd(video.url);
+      // Auto-dismiss so the card disappears immediately
+      dismissMutation.mutate({ id: video.id, type: "permanent" });
+      setDismissed(true);
     }
   };
 

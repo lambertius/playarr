@@ -715,16 +715,119 @@ def read_historical_log(job_id: int, tail: Optional[int] = Query(None, descripti
 
 
 @router.get("/logs/app")
-def read_app_log(tail: int = Query(200, description="Return last N lines of the application log")):
-    """Read the persistent application log (playarr.log)."""
+def read_app_log(
+    tail: int = Query(200, description="Return last N lines of the application log"),
+    file: str = Query("playarr.log", description="Log filename (e.g. playarr.log, playarr.log.1)"),
+):
+    """Read the persistent application log (playarr.log) or a rotated backup."""
     import os
     from app.config import get_settings
-    log_path = os.path.join(get_settings().log_dir, "playarr.log")
+
+    # Sanitise filename — only allow known log filenames
+    safe_name = os.path.basename(file)
+    if not (safe_name == "playarr.log" or
+            (safe_name.startswith("playarr.log.") and safe_name.split(".")[-1].isdigit())):
+        raise HTTPException(status_code=400, detail="Invalid log filename")
+
+    log_path = os.path.join(get_settings().log_dir, safe_name)
     if not os.path.isfile(log_path):
         raise HTTPException(status_code=404, detail="Application log not found")
-    with open(log_path, "r", encoding="utf-8") as f:
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
-    return {"log_text": "".join(lines[-tail:]), "total_lines": len(lines)}
+    total = len(lines)
+    if tail and tail > 0:
+        lines = lines[-tail:]
+    return {"log_text": "".join(lines), "total_lines": total, "file": safe_name}
+
+
+@router.get("/logs/files")
+def list_log_files():
+    """List all available log files (app logs, rotated backups, and job logs)."""
+    import os
+    from app.config import get_settings
+    log_dir = get_settings().log_dir
+    jobs_dir = os.path.join(log_dir, "jobs")
+
+    result: list[dict] = []
+
+    # Application logs (playarr.log + rotated backups)
+    for fname in sorted(os.listdir(log_dir)):
+        fpath = os.path.join(log_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+        if fname.startswith("playarr.log"):
+            try:
+                stat = os.stat(fpath)
+                result.append({
+                    "filename": fname,
+                    "category": "app",
+                    "size_bytes": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    "label": "Current Log" if fname == "playarr.log"
+                             else f"Backup {fname.split('.')[-1]}",
+                })
+            except OSError:
+                pass
+
+    # Per-job logs
+    if os.path.isdir(jobs_dir):
+        for fname in sorted(os.listdir(jobs_dir), reverse=True):
+            if not fname.endswith(".log"):
+                continue
+            fpath = os.path.join(jobs_dir, fname)
+            try:
+                stat = os.stat(fpath)
+                job_id_str = fname.replace(".log", "")
+                result.append({
+                    "filename": f"jobs/{fname}",
+                    "category": "job",
+                    "size_bytes": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    "label": f"Job {job_id_str}",
+                    "job_id": job_id_str,
+                })
+            except OSError:
+                pass
+
+    return result
+
+
+@router.get("/logs/read")
+def read_log_file(
+    file: str = Query(..., description="Relative log filename (e.g. playarr.log, jobs/42.log)"),
+    tail: Optional[int] = Query(None, description="Return only last N lines"),
+    offset: int = Query(0, description="Skip first N lines"),
+    limit: int = Query(5000, description="Max lines to return"),
+):
+    """Read any log file by relative path within the log directory."""
+    import os
+    from app.config import get_settings
+    log_dir = get_settings().log_dir
+
+    # Sanitise: resolve and ensure the path stays inside log_dir
+    requested = os.path.normpath(os.path.join(log_dir, file))
+    if not requested.startswith(os.path.normpath(log_dir) + os.sep) and \
+       requested != os.path.normpath(log_dir):
+        raise HTTPException(status_code=400, detail="Invalid log path")
+    if not os.path.isfile(requested):
+        raise HTTPException(status_code=404, detail="Log file not found")
+
+    with open(requested, "r", encoding="utf-8", errors="replace") as f:
+        all_lines = f.readlines()
+
+    total = len(all_lines)
+    if tail and tail > 0:
+        lines = all_lines[-tail:]
+    else:
+        lines = all_lines[offset: offset + limit]
+
+    return {
+        "file": file,
+        "log_text": "".join(lines),
+        "total_lines": total,
+        "returned_lines": len(lines),
+        "offset": offset,
+    }
 
 
 @router.get("/{job_id}", response_model=JobOut)
