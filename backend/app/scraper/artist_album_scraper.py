@@ -492,7 +492,25 @@ def search_album_musicbrainz(album: str, artist: str) -> Dict[str, Any]:
 
         releases.sort(key=_rg_sort_key)
 
+        # Filter out Single-type releases: this function searches for ALBUM
+        # artwork.  When the album name matches the single name (self-titled
+        # singles like "Hero"), the single's CAA art would be mislabeled as
+        # album art.  EPs are kept because they can be legitimate albums.
+        _filtered = [
+            r for r in releases
+            if (r.get("release-group", {}).get("type") or r.get("release-group", {}).get("primary-type") or "").lower()
+            != "single"
+        ]
+        if _filtered:
+            releases = _filtered
+
         best = releases[0]
+        # Final guard: if the only remaining result is a Single, skip it
+        _best_rg_type = (best.get("release-group", {}).get("type") or best.get("release-group", {}).get("primary-type") or "").lower()
+        if _best_rg_type == "single":
+            time.sleep(1.1)
+            return result
+
         result["mb_release_id"] = best.get("id")
 
         # Prefer release-group CAA endpoint (curated canonical cover)

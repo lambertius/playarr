@@ -493,6 +493,7 @@ export interface JobsParams {
   status?: JobStatus;
   job_type?: string;
   limit?: number;
+  offset?: number;
 }
 
 // ─── Stats ────────────────────────────────────────────────

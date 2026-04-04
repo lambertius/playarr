@@ -95,7 +95,7 @@ POSTER_PRIORITY = ["musicbrainz_coverart", "wikipedia", "yt-dlp"]
 # For singles, Wikipedia infobox art is more reliably the single's own
 # cover; CAA for single releases often carries the parent album artwork.
 POSTER_PRIORITY_SINGLE = ["wikipedia", "musicbrainz_coverart", "yt-dlp"]
-ALBUM_PRIORITY = ["album_scraper", "album_scraper_wiki", "musicbrainz_coverart"]
+ALBUM_PRIORITY = ["album_scraper", "album_scraper_wiki", "wikipedia_album", "musicbrainz_coverart"]
 
 
 def _priority_key(source: str, priority_list: List[str]) -> int:

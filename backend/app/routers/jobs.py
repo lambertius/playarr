@@ -621,7 +621,8 @@ def clear_history(
 def list_jobs(
     status: Optional[str] = None,
     job_type: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(200, ge=1, le=10000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """List recent processing jobs."""
@@ -632,7 +633,7 @@ def list_jobs(
     if job_type:
         query = query.filter(ProcessingJob.job_type == job_type)
 
-    return query.limit(limit).all()
+    return query.offset(offset).limit(limit).all()
 
 
 # ---------------------------------------------------------------------------
