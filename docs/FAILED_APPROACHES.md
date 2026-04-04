@@ -1136,6 +1136,22 @@ When `_step_resolve_entities()` has a fallback for album resolution, it must cal
 - **Lesson:** All three pipelines must stay in sync. Poster fallback logic must always include the release-group endpoint as a fallback when the specific release has no CAA cover.
 - **Fix applied:** Added `_fetch_front_cover_by_release_group(item.mb_release_group_id)` fallback after `_fetch_front_cover(item.mb_release_id)` in all 3 deferred.py files' `_has_parent_album` branch.
 
+### FAILED: `search_album_musicbrainz` returns Single-type release art as album art (Chad Kroeger — Hero)
+- **What was tried:** `search_album_musicbrainz("Hero", "Chad Kroeger feat. Josey Scott")` searched MB for a release matching the album name. The function sorts by `_RG_TYPE_PRIORITY` (Album > Compilation > EP > Single) but still accepts the best match even if it's a Single. When the AI Final Review changed the album from "Spider-Man: Music from and Inspired by" to "Hero" (self-titled single), the only MB release matching "Hero" was the single itself. Its CAA art was returned labeled as `source="album_scraper"`, `art_type="album"`.
+- **Why it failed (two compounding bugs):**
+  1. **`search_album_musicbrainz` accepted Single-type releases.** The function is specifically for *album* artwork, but had no guard against returning single releases. When the album name matches the single name (self-titled singles), the single's CAA art is mislabeled as album art.
+  2. **`ALBUM_PRIORITY` didn't include `"wikipedia_album"`.** The pipeline's Wikipedia album art candidate (from `metadata["_artwork_candidates"]`) uses `source="wikipedia_album"`, but `ALBUM_PRIORITY = ["album_scraper", "album_scraper_wiki", "musicbrainz_coverart"]` doesn't list it. The valid Spider-Man soundtrack cover art had priority 999 (not in list), so it always lost to any listed source — even incorrect ones.
+- **Lesson:** A function named `search_album_musicbrainz` must only return Album/Compilation-type releases, never Singles or EPs. Additionally, all artwork sources that can produce album-type candidates must be represented in the priority list.
+- **Fix applied:**
+  - **`artist_album_scraper.py` (both `app/scraper/` and `app/services/` copies):** After sorting by `_RG_TYPE_PRIORITY`, filter out releases with release-group type "single". EPs are kept because they can be legitimate albums. If filtering removes all results, keep originals as fallback. After selecting `best`, guard: if `best`'s RG type is "single", return empty result immediately.
+  - **`artwork_selection.py`:** Added `"wikipedia_album"` to `ALBUM_PRIORITY` list (after `album_scraper_wiki`, before `musicbrainz_coverart`).
+
+### ANTI-PATTERN: Album artwork search accepting non-album release types
+A function designed to find album artwork must validate the release-group type of its results. When the search album name coincidentally matches a single name (self-titled singles, soundtrack singles), accepting the single's art as "album art" creates false positives. Always filter by release-group type in album-specific search functions.
+
+### ANTI-PATTERN: Priority list missing a valid artwork source
+When the artwork candidate pipeline can produce candidates with a `source` value not in the priority list, those candidates get priority 999 and always lose — even to incorrect candidates from listed sources. All possible `source` values for a given `art_type` must appear in the corresponding priority list.
+
 ### FAILED: Stale artist artwork preserved by overwrite=False validation
 - **What was tried:** `download_and_validate()` with `overwrite=False` checks if the file already exists on disk. If it does, it runs `validate_file()` which opens the image with PIL to verify it's a valid image file. If valid, the download is skipped and the existing file is returned.
 - **Why it failed:** For Groove Armada, the artist poster on disk was 324×307 pixels (15KB JPEG, ~1:1 aspect ratio) — a completely different image from the correct Wikipedia source (1280px wide, ~1.66:1 aspect ratio). Because `validate_file()` only checks PIL validity (can the file be opened as an image?), the stale/wrong image passed validation and the correct higher-resolution image was never downloaded.

@@ -126,7 +126,7 @@ function StatCard({ icon, label, value, active, selected, color, onClick }: {
 export function QueuePage() {
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
-  const { data: jobs, isLoading, isError, refetch } = useJobs({ limit: 200 });
+  const { data: jobs, isLoading, isError, refetch } = useJobs({ limit: 10000 });
   const retryMutation = useRetryJob();
   const cancelMutation = useCancelJob();
   const clearHistoryMutation = useClearHistory();
