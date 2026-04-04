@@ -456,12 +456,14 @@ def _find_parent_album(recording_id: str) -> Optional[Dict[str, Any]]:
     try:
         releases = musicbrainzngs.browse_releases(
             recording=recording_id, limit=25,
-            includes=["release-groups"],
+            includes=["release-groups", "artist-credits"],
         )
         time.sleep(1.1)
     except Exception as e:
         logger.warning(f"browse_releases for recording {recording_id} failed: {e}")
         return None
+
+    _VA_MBID = "89ad4ac3-39f7-470e-963a-56509c546377"
 
     def _extract_album(rel_list, exclude_types=_EXCLUDED_SECONDARY_TYPES,
                        primary_types=None):
@@ -475,6 +477,16 @@ def _find_parent_album(recording_id: str) -> Optional[Dict[str, Any]]:
             secondary = {s.lower() for s in rg.get("secondary-type-list", [])}
             if secondary & exclude_types:
                 continue
+            # Skip Various Artists releases not tagged as compilations
+            ac = rel.get("artist-credit", [])
+            if ac and isinstance(ac[0], dict):
+                artist_id = ac[0].get("artist", {}).get("id", "")
+                if artist_id == _VA_MBID:
+                    logger.info(
+                        f"Skipping Various Artists release: "
+                        f"'{rg.get('title')}' (rg={rg.get('id')})"
+                    )
+                    continue
             album_title = rg.get("title") or rel.get("title")
             album_release_id = rel.get("id")
             album_rg_id = rg.get("id")
