@@ -11,9 +11,11 @@ import {
   Scissors,
   Search,
   X,
+  ExternalLink,
 } from "lucide-react";
 import { useLogFiles, useLogContent } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
+import { settingsApi, jobsApi } from "@/lib/api";
 
 
 /* ── helpers ── */
@@ -270,6 +272,18 @@ export function LogViewer() {
             title={autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF"}
           >
             <ArrowDown size={14} />
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                const { path } = await jobsApi.logDirectory();
+                await settingsApi.openDirectory(path);
+              } catch { /* ignore */ }
+            }}
+            className="btn-ghost btn-sm"
+            title="Open log folder in file explorer"
+          >
+            <ExternalLink size={14} />
           </button>
         </div>
 

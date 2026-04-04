@@ -8,4 +8,4 @@ Bump this value when cutting a new release.  The version is:
   • used as the FastAPI app.version
 """
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"

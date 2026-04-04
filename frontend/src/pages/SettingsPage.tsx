@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, Check, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Search, Eye, EyeOff, Compass, Download, Power, ScrollText } from "lucide-react";
+import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, Check, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Search, Eye, EyeOff, Compass, Download, Power, ScrollText, ExternalLink } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport } from "@/hooks/queries";
 import { useGenreBlacklist, useUpdateGenreBlacklist, useCreateGenre } from "@/hooks/queries";
@@ -1126,6 +1126,14 @@ function DirectoryRow({
             <FolderOpen size={14} />
           </button>
         </Tooltip>
+        <Tooltip content="Open in file explorer">
+          <button
+            onClick={() => settingsApi.openDirectory(value).catch(() => {})}
+            className="btn-secondary btn-sm flex items-center gap-1"
+          >
+            <ExternalLink size={14} />
+          </button>
+        </Tooltip>
         {defaultValue && value !== defaultValue && (
           <Tooltip content={`Restore default: ${defaultValue}`}>
             <button
@@ -1231,6 +1239,14 @@ function SourceDirectoriesEditor({
               className="btn-secondary btn-sm flex items-center gap-1 p-1.5"
             >
               <FolderOpen size={14} />
+            </button>
+          </Tooltip>
+          <Tooltip content="Open in file explorer">
+            <button
+              onClick={() => settingsApi.openDirectory(d).catch(() => {})}
+              className="btn-secondary btn-sm flex items-center gap-1 p-1.5"
+            >
+              <ExternalLink size={14} />
             </button>
           </Tooltip>
           <Tooltip content="Remove this directory \u2014 videos inside will be cleaned from the library on save">

@@ -27,17 +27,63 @@ router = APIRouter(prefix="/api/video-editor", tags=["Video Editor"])
 
 # Video extensions for archive file matching
 _VIDEO_EXTS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".flv", ".wmv", ".m4v"}
+_MANIFEST_NAME = ".playarr-archive.json"
+
+
+def _file_checksum(path: str, algo: str = "md5") -> str:
+    """Compute a hex checksum of a file.  Uses 64 KB chunks for large files."""
+    import hashlib
+    h = hashlib.new(algo)
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(65_536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_archive_manifest(
+    archive_video_path: str,
+    original_library_path: str,
+    library_dir: str,
+    video_id: Optional[int] = None,
+    artist: str = "",
+    title: str = "",
+) -> None:
+    """Write a manifest alongside an archived video for later re-linking."""
+    import json
+    try:
+        manifest = {
+            "checksum_md5": _file_checksum(archive_video_path),
+            "original_relative_path": os.path.relpath(original_library_path, library_dir)
+                                      if original_library_path.startswith(os.path.normpath(library_dir))
+                                      else os.path.basename(original_library_path),
+            "video_id": video_id,
+            "artist": artist,
+            "title": title,
+            "file_size_bytes": os.path.getsize(archive_video_path),
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+        }
+        manifest_path = os.path.join(os.path.dirname(archive_video_path), _MANIFEST_NAME)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to write archive manifest: {e}")
 
 
 def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Optional[str]:
     """Locate the archived original for a library file.
 
-    Handles extension and name mismatches (e.g. resolution label changed
-    after crop, or .mkv→.mp4 after re-encode) by searching the archive
-    folder for any video file.
-    Returns the full path to the archive file, or None.
+    Search strategy (returns first hit):
+      1. Exact relative-path match in archive_dir
+      2. Any video file in the expected archive subfolder
+      3. Manifest-based scan: walk archive_dir looking for .playarr-archive.json
+         files whose original_relative_path matches the library file path
     """
-    if not file_path:
+    if not file_path or not archive_dir:
+        return None
+    if not os.path.isdir(archive_dir):
         return None
 
     library_root = os.path.normpath(library_dir)
@@ -58,6 +104,27 @@ def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Opt
         for fname in os.listdir(archive_folder):
             if os.path.splitext(fname)[1].lower() in _VIDEO_EXTS:
                 return os.path.join(archive_folder, fname)
+
+    # 3) Manifest-based fallback: scan archive_dir for matching manifests
+    import json
+    rel_norm = os.path.normpath(rel)
+    try:
+        for root, _dirs, fnames in os.walk(archive_dir):
+            if _MANIFEST_NAME not in fnames:
+                continue
+            manifest_path = os.path.join(root, _MANIFEST_NAME)
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                if os.path.normpath(manifest.get("original_relative_path", "")) == rel_norm:
+                    # Found a matching manifest — return the video file in this folder
+                    for fn in os.listdir(root):
+                        if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
+                            return os.path.join(root, fn)
+            except (json.JSONDecodeError, OSError):
+                continue
+    except OSError:
+        pass
 
     return None
 
@@ -429,6 +496,18 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
         archive_path = os.path.join(_settings.archive_dir, rel)
         os.makedirs(os.path.dirname(archive_path), exist_ok=True)
         shutil.move(input_path, archive_path)
+
+        # Write archive manifest for re-linking if archive_dir changes
+        v_pre = sdb.query(VideoItem).get(video_id)
+        write_archive_manifest(
+            archive_video_path=archive_path,
+            original_library_path=norm_input,
+            library_dir=_settings.library_dir,
+            video_id=video_id,
+            artist=v_pre.artist if v_pre else "",
+            title=v_pre.title if v_pre else "",
+        )
+
         shutil.move(temp_output, final_path)
 
         # If the extension changed (e.g. .mkv -> .mp4), update DB path
@@ -607,6 +686,21 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
     # Restore original from archive
     os.makedirs(os.path.dirname(restored_path), exist_ok=True)
     shutil.move(archive_file, restored_path)
+
+    # Clean up archive manifest if it exists
+    archive_manifest = os.path.join(os.path.dirname(archive_file), _MANIFEST_NAME)
+    if os.path.isfile(archive_manifest):
+        try:
+            os.remove(archive_manifest)
+        except OSError:
+            pass
+    # Remove empty archive subfolder
+    archive_subdir = os.path.dirname(archive_file)
+    if os.path.isdir(archive_subdir):
+        try:
+            os.rmdir(archive_subdir)  # only removes if empty
+        except OSError:
+            pass
 
     # Update DB file_path if extension changed
     if restored_path != video.file_path:
