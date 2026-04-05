@@ -2302,12 +2302,12 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
     _db_url = _gs().database_url
     _db_path = _db_url.replace("sqlite:///", "").replace("sqlite://", "")
 
-    max_wait = 3600
+    max_idle = 1800  # 30 min with no sub-job completing → timeout
     poll_interval = 5
-    elapsed = 0
     total = len(sub_job_ids)
     last_seen_status: dict[int, tuple[str, float]] = {}
     logged_complete: set[int] = set()
+    last_progress_time = time.monotonic()  # reset whenever a sub-job finishes
     pipeline_steps: list[dict] = [
         {"step": f"Watching {total} child jobs", "status": "success"},
     ]
@@ -2404,7 +2404,10 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
     _flog(f"Watching {total} child jobs")
     _db_write(0, f"0/{total} complete \u00b7 {total} queued")
 
-    while elapsed < max_wait:
+    while True:
+        idle_elapsed = time.monotonic() - last_progress_time
+        if idle_elapsed >= max_idle:
+            break
         # â”€â”€ PHASE 1: READ child statuses (separate connection, WAL = never blocks) â”€â”€
         child_data: dict[int, tuple[str, str]] = {}
         parent_cancelled = False
@@ -2469,6 +2472,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
 
         # â”€â”€ PHASE 2: Process results in memory â”€â”€
         now_mono = time.monotonic()
+        prev_done_count = len(logged_complete)
         done = 0
         failed = 0
         cancelled = 0
@@ -2551,6 +2555,8 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
                     )
 
         # Build progress text
+        if len(logged_complete) > prev_done_count:
+            last_progress_time = time.monotonic()
         parts = [f"{done}/{total} complete"]
         if in_progress:
             parts.append(f"{in_progress} importing")
@@ -2570,7 +2576,6 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
             break
 
         time.sleep(poll_interval)
-        elapsed += poll_interval
 
     # --- Final status ---
     # Use direct sqlite3 for the terminal write â€” the ORM-based _update_job
@@ -2600,10 +2605,11 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
         _final_error = None
         _final_step = final_msg + _deferred_note
         _final_pct = 100
-    elif elapsed >= max_wait:
-        _flog("Timed out waiting for sub-jobs")
+    elif (time.monotonic() - last_progress_time) >= max_idle:
+        _idle_min = int(max_idle // 60)
+        _flog(f"Timed out — no sub-job completed in {_idle_min} minutes")
         _final_status = "failed"
-        _final_error = "Timed out waiting for sub-jobs"
+        _final_error = f"Timed out — no sub-job completed in {_idle_min} minutes"
         _final_step = _final_error
         _final_pct = int((done / max(total, 1)) * 100)
     else:

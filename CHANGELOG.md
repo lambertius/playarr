@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.0] - 2026-04-05
+
+### Added
+- **Update Checker** — app now checks GitHub for new releases at startup and displays a dismissible banner when an update is available, with a direct link to the release page
+
+### Fixed
+- **Batch Job Timeout** — replaced fixed 1-hour wall-clock deadline with a 30-minute inactivity timeout; large batch imports (1000+ videos) no longer time out while sub-jobs are still completing successfully
+
 ## [1.5.0] - 2026-04-04
 
 ### Fixed

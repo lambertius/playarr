@@ -115,6 +115,16 @@ export function useStats() {
   return useQuery({ queryKey: qk.stats, queryFn: statsApi.get, refetchInterval: 15_000 });
 }
 
+export function useUpdateCheck() {
+  return useQuery({
+    queryKey: ["update-check"],
+    queryFn: statsApi.updateCheck,
+    staleTime: 1000 * 60 * 60,     // recheck at most once per hour
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
 // ─── Library Mutations ────────────────────────────────────
 export function useUpdateVideo(id: number) {
   const qc = useQueryClient();

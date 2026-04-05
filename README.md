@@ -3,7 +3,7 @@
 A self-hosted music video manager inspired by Sonarr, Radarr, and Lidarr. Download, organise, enrich, and browse your music video collection through a modern web interface.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.5.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.6.0-green.svg)
 
 > **Note:** Playarr is in its first public release. Contributions, issues, and feedback are welcome.
 
@@ -36,6 +36,7 @@ Playarr automates the process of building and maintaining a music video library:
 - **Video Discovery** — Suggested new videos based on your existing library
 - **Match & Review System** — Confidence scoring for metadata matches with manual review workflow
 - **System Tray** — Optional Windows system tray icon for background operation
+- **Update Checker** — Automatic GitHub release checking with in-app notification banner
 - **Docker Support** — Multi-container deployment with docker-compose
 
 ---
