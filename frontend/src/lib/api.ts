@@ -76,8 +76,10 @@ export const libraryApi = {
   snapshots: (videoId: number) =>
     api.get<MetadataSnapshot[]>(`/library/${videoId}/snapshots`).then(r => r.data),
 
-  nav: (videoId: number) =>
-    api.get<{ prev_id: number | null; next_id: number | null; random_id: number | null }>(`/library/${videoId}/nav`).then(r => r.data),
+  nav: (videoId: number, sort?: { sort_by?: string; sort_dir?: string }) =>
+    api.get<{ prev_id: number | null; next_id: number | null; random_id: number | null }>(
+      `/library/${videoId}/nav`, { params: sort }
+    ).then(r => r.data),
 
   undoRescan: (videoId: number) =>
     api.post<VideoItemDetail>(`/library/${videoId}/undo-rescan`).then(r => r.data),

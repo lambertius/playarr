@@ -4,14 +4,14 @@ import {
   Search, ChevronLeft, ChevronRight, CheckCircle2, XCircle,
   GitCompare, FolderInput, Link2, ClipboardList,
   Check, X, Tag, RefreshCw, ChevronDown, LayoutList, FileEdit,
-  Trash2, ScanSearch, FolderSearch,
+  Trash2, ScanSearch, FolderSearch, Download,
 } from "lucide-react";
 import type { ReviewParams, ReviewItem, DuplicateVideoSummary } from "@/types";
 import {
   useReviewQueue, useExportKodi, useApproveReview, useDismissReview,
   useSetReviewVersion, useBatchApproveReview, useBatchDismissReview,
   useScanRenames, useApplyRename, useBatchApplyRename,
-  useBatchDeleteReview, useBatchScrapeReview,
+  useBatchDeleteReview, useBatchScrapeReview, useRedownload,
 } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -288,6 +288,7 @@ export default function ReviewQueuePage() {
   const batchApplyRenameMutation = useBatchApplyRename();
   const batchDeleteMutation = useBatchDeleteReview();
   const batchScrapeMutation = useBatchScrapeReview();
+  const redownloadMutation = useRedownload();
   const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
 
   const items = useMemo(() => data?.items ?? [], [data?.items]);
@@ -414,6 +415,37 @@ export default function ReviewQueuePage() {
     toast({ type: "success", title: result.message });
     setSelectedIds(new Set());
   }, [selectedIds, batchScrapeMutation, toast]);
+
+  const handleRedownload = useCallback(async (videoId: number) => {
+    const ok = await confirm({
+      title: "Redownload video?",
+      description: "This will re-download the video from its original source URL. The accuracy of the source link depends on when it was last verified — if the original video has been removed or re-uploaded, the download may fail or fetch the wrong content.",
+    });
+    if (!ok) return;
+    redownloadMutation.mutate({ videoId }, {
+      onSuccess: () => toast({ type: "success", title: "Redownload started" }),
+      onError: () => toast({ type: "error", title: "Redownload failed — no source URL found" }),
+    });
+  }, [redownloadMutation, toast, confirm]);
+
+  const handleBatchRedownload = useCallback(async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const ok = await confirm({
+      title: `Redownload ${ids.length} item(s)?`,
+      description: "This will re-download all selected videos from their original source URLs. Source links may be outdated — if the original video has been removed or re-uploaded, downloads may fail or fetch the wrong content.",
+    });
+    if (!ok) return;
+    let started = 0;
+    for (const id of ids) {
+      try {
+        await redownloadMutation.mutateAsync({ videoId: id });
+        started++;
+      } catch { /* skip items without source URLs */ }
+    }
+    toast({ type: "success", title: `Queued ${started} redownload(s)` });
+    setSelectedIds(new Set());
+  }, [selectedIds, redownloadMutation, toast, confirm]);
 
   const handleExport = useCallback(async () => {
     try {
@@ -590,6 +622,12 @@ export default function ReviewQueuePage() {
               <ScanSearch size={14} /> Scrape All
             </button>
           </Tooltip>
+          <Tooltip content="Re-download all selected items from their original source URLs. Source links may be outdated.">
+            <button onClick={handleBatchRedownload} disabled={redownloadMutation.isPending}
+              className="btn-ghost btn-sm gap-1 text-orange-400 hover:text-orange-300">
+              <Download size={14} /> Redownload All
+            </button>
+          </Tooltip>
           <Tooltip content="Permanently delete all selected items and their files from disk">
             <button onClick={handleBatchDelete} disabled={batchDeleteMutation.isPending}
               className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300">
@@ -664,6 +702,7 @@ export default function ReviewQueuePage() {
                     onDelete={() => handleDelete(item.video_id)}
                     onSetVersion={(vt) => handleSetVersion(item.video_id, vt)}
                     onApplyRename={() => handleApplyRename(item.video_id)}
+                    onRedownload={() => handleRedownload(item.video_id)}
                     categoryFilter={categoryFilter}
                   />
                 ));
@@ -701,6 +740,7 @@ export default function ReviewQueuePage() {
                   onDelete={() => handleDelete(item.video_id)}
                   onSetVersion={(vt) => handleSetVersion(item.video_id, vt)}
                   onApplyRename={() => handleApplyRename(item.video_id)}
+                  onRedownload={() => handleRedownload(item.video_id)}
                   categoryFilter={categoryFilter}
                 />
               );
@@ -930,6 +970,7 @@ function ReviewCard({
   onDelete,
   onSetVersion,
   onApplyRename,
+  onRedownload,
   categoryFilter,
 }: {
   item: ReviewItem;
@@ -941,9 +982,11 @@ function ReviewCard({
   onDelete: () => void;
   onSetVersion: (vt: string) => void;
   onApplyRename: () => void;
+  onRedownload: () => void;
   categoryFilter: ReviewCategory;
 }) {
   const reasons = parseReviewReason(item.review_reason);
+  const hasNormFailure = (item.review_reason || "").toLowerCase().includes("audio normalization failed");
 
   return (
     <div
@@ -1033,6 +1076,14 @@ function ReviewCard({
             <Tooltip content="Approve — accept the current classification and remove from review">
               <button onClick={onApprove} className="btn-ghost btn-sm text-xs text-emerald-400 hover:text-emerald-300">
                 <Check size={14} />
+              </button>
+            </Tooltip>
+          )}
+
+          {hasNormFailure && (
+            <Tooltip content="Re-download from original source URL to fix audio normalization failure">
+              <button onClick={onRedownload} className="btn-ghost btn-sm text-xs text-orange-400 hover:text-orange-300">
+                <Download size={14} />
               </button>
             </Tooltip>
           )}

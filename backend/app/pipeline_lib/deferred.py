@@ -943,10 +943,18 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                 MediaAsset.asset_type == "poster",
             ).first()
             if not _poster_exists and item and item.folder_path:
+                # Try "thumb" first, then fall back to "video_thumb" (scene analysis)
                 _thumb_asset = db.query(MediaAsset).filter(
                     MediaAsset.video_id == video_id,
                     MediaAsset.asset_type == "thumb",
                 ).first()
+                _fallback_prov = "thumb_fallback"
+                if not (_thumb_asset and _thumb_asset.file_path and os.path.isfile(_thumb_asset.file_path)):
+                    _thumb_asset = db.query(MediaAsset).filter(
+                        MediaAsset.video_id == video_id,
+                        MediaAsset.asset_type == "video_thumb",
+                    ).first()
+                    _fallback_prov = "video_thumb_fallback"
                 if _thumb_asset and _thumb_asset.file_path and os.path.isfile(_thumb_asset.file_path):
                     import shutil
                     from app.pipeline_lib.services.artwork_service import validate_file
@@ -959,7 +967,7 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                         db.add(MediaAsset(
                             video_id=video_id, asset_type="poster",
                             file_path=_poster_dst, source_url=None,
-                            provenance="thumb_fallback",
+                            provenance=_fallback_prov,
                             status="valid" if (_vr and _vr.valid) else "invalid",
                             width=_vr.width if _vr and _vr.valid else None,
                             height=_vr.height if _vr and _vr.valid else None,
@@ -968,7 +976,7 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                             last_validated_at=datetime.now(timezone.utc),
                         ))
                         db.commit()
-                    ws.log("Poster fallback: created from video thumbnail")
+                    ws.log(f"Poster fallback: created from {_fallback_prov}")
         except Exception as e:
             db.rollback()
             ws.log(f"Poster fallback: {e}", level="warning")

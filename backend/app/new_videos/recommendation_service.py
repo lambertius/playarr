@@ -19,6 +19,7 @@ Display strategy:
 """
 import json
 import logging
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -39,7 +40,7 @@ from app.new_videos import feedback_service
 logger = logging.getLogger(__name__)
 
 # ── Category definitions ──────────────────────────────────────────────────────
-CATEGORIES = ["famous", "popular", "by_artist", "taste"]
+CATEGORIES = ["famous", "popular", "new", "rising", "by_artist", "taste"]
 
 # ── Famous music videos seed list ─────────────────────────────────────────────
 # Curated list of historically significant / iconic music videos.
@@ -328,19 +329,134 @@ def _get_library_titles(db: Session) -> set[tuple[str, str]]:
     }
 
 
+# ── yt-dlp dynamic search ────────────────────────────────────────────────────
+
+def _ytdlp_search(query: str, max_results: int = 10,
+                  category: str = "popular") -> list[RecommendationCandidate]:
+    """Run a yt-dlp search and return RecommendationCandidate objects.
+
+    Uses --flat-playlist for speed (metadata-only, no download).
+    Gracefully returns [] if yt-dlp is not available or the search fails.
+    """
+    import subprocess
+    import math
+    from app.subprocess_utils import HIDE_WINDOW
+
+    try:
+        from app.config import get_settings
+        settings = get_settings()
+        ytdlp = settings.resolved_ytdlp
+    except Exception:
+        return []
+
+    search_url = f"ytsearch{max_results}:{query}"
+    cmd = [ytdlp, "--dump-json", "--flat-playlist", "--no-download",
+           "--no-warnings", search_url]
+
+    try:
+        import os
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+            cwd=os.path.dirname(ytdlp) if os.path.dirname(ytdlp) else None,
+            **HIDE_WINDOW,
+        )
+    except Exception as e:
+        logger.debug(f"yt-dlp search failed for '{query}': {e}")
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    candidates = []
+    for line in result.stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            info = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        vid_id = info.get("id", "")
+        if not vid_id:
+            continue
+
+        title = info.get("title", "")
+        channel = info.get("channel", "") or info.get("uploader", "")
+        view_count = info.get("view_count")
+        duration = info.get("duration")
+
+        # Compute a popularity score from view count
+        pop = 0.5
+        if view_count and view_count > 0:
+            log_views = math.log10(max(view_count, 1))
+            pop = min(1.0, max(0.1, (log_views - 3) / 7))  # 1K→0.1, 10B→1.0
+
+        # Parse artist from title (common format: "Artist - Title")
+        artist_parsed = ""
+        if " - " in title:
+            artist_parsed = title.split(" - ", 1)[0].strip()
+
+        candidates.append(RecommendationCandidate(
+            provider="youtube",
+            provider_video_id=vid_id,
+            url=f"https://www.youtube.com/watch?v={vid_id}",
+            title=title,
+            artist=artist_parsed,
+            channel=channel,
+            thumbnail_url=f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg",
+            category=category,
+            duration_seconds=duration,
+            view_count=view_count,
+            popularity_score=pop,
+            freshness_score=0.5,
+            reasons=[f"Found via YouTube search: {query}"],
+        ))
+
+    return candidates
+
+
+def _search_artist_videos(artist: str, category: str,
+                          exclude_ids: set, exclude_titles: set,
+                          max_results: int = 5) -> list[RecommendationCandidate]:
+    """Search YouTube for official music videos by a specific artist.
+
+    Filters out videos already in the exclude sets (library/dismissed).
+    """
+    query = f"{artist} official music video"
+    raw = _ytdlp_search(query, max_results=max_results, category=category)
+
+    filtered = []
+    for c in raw:
+        if c.provider_video_id in exclude_ids:
+            continue
+        # Override parsed artist with the known artist name
+        c.artist = artist
+        # Title-based dedup
+        raw_title = c.title
+        if " - " in raw_title:
+            raw_title = raw_title.split(" - ", 1)[1]
+        raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
+        if (_normalize_title(artist), _normalize_title(raw_title)) in exclude_titles:
+            continue
+        filtered.append(c)
+
+    return filtered
+
+
 # ── Source strategies ─────────────────────────────────────────────────────────
 # Each returns a list of RecommendationCandidate objects.
 # These are the pluggable candidate generators.
 
 def _generate_famous_candidates(db: Session, limit: int = 20) -> list[RecommendationCandidate]:
-    """Generate candidates from the curated famous videos seed list."""
+    """Generate candidates from the curated famous videos seed list, then yt-dlp search."""
     library_ids = _get_library_video_ids(db)
     library_titles = _get_library_titles(db)
     dismissed_ids = _get_dismissed_provider_ids(db)
+    exclude_ids = library_ids | dismissed_ids
     candidates = []
 
     for artist, title, vid_id in FAMOUS_SEEDS:
-        if vid_id in library_ids or vid_id in dismissed_ids:
+        if vid_id in exclude_ids:
             continue
         if (_normalize_title(artist), _normalize_title(title)) in library_titles:
             continue
@@ -360,18 +476,47 @@ def _generate_famous_candidates(db: Session, limit: int = 20) -> list[Recommenda
         if len(candidates) >= limit:
             break
 
+    # If seeds didn't fill the limit, search for classic music videos
+    if len(candidates) < limit:
+        seen_ids = {c.provider_video_id for c in candidates}
+        search_queries = [
+            "greatest music videos of all time official",
+            "iconic music videos official",
+            "best music videos ever made official",
+            "classic music video official",
+        ]
+        random.shuffle(search_queries)
+        for query in search_queries[:2]:
+            if len(candidates) >= limit:
+                break
+            results = _ytdlp_search(query, max_results=10, category="famous")
+            for c in results:
+                if c.provider_video_id in exclude_ids or c.provider_video_id in seen_ids:
+                    continue
+                if c.artist and c.title:
+                    raw_title = c.title.split(" - ", 1)[1] if " - " in c.title else c.title
+                    raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
+                    if (_normalize_title(c.artist), _normalize_title(raw_title)) in library_titles:
+                        continue
+                seen_ids.add(c.provider_video_id)
+                c.reasons = ["Iconic/classic music video — discovered via search"]
+                candidates.append(c)
+                if len(candidates) >= limit:
+                    break
+
     return candidates
 
 
 def _generate_popular_candidates(db: Session, limit: int = 20) -> list[RecommendationCandidate]:
-    """Generate candidates from the popular videos seed list."""
+    """Generate candidates from the popular videos seed list, then yt-dlp search."""
     library_ids = _get_library_video_ids(db)
     library_titles = _get_library_titles(db)
     dismissed_ids = _get_dismissed_provider_ids(db)
+    exclude_ids = library_ids | dismissed_ids
     candidates = []
 
     for artist, title, vid_id in POPULAR_SEEDS:
-        if vid_id in library_ids or vid_id in dismissed_ids:
+        if vid_id in exclude_ids:
             continue
         if (_normalize_title(artist), _normalize_title(title)) in library_titles:
             continue
@@ -391,17 +536,41 @@ def _generate_popular_candidates(db: Session, limit: int = 20) -> list[Recommend
         if len(candidates) >= limit:
             break
 
+    # If seeds didn't fill the limit, search YouTube dynamically
+    if len(candidates) < limit:
+        seen_ids = {c.provider_video_id for c in candidates}
+        search_queries = [
+            "most popular music videos official",
+            "top music videos official video",
+            "best official music videos",
+            "hit music video official",
+        ]
+        random.shuffle(search_queries)
+        for query in search_queries[:2]:
+            if len(candidates) >= limit:
+                break
+            results = _ytdlp_search(query, max_results=10, category="popular")
+            for c in results:
+                if c.provider_video_id in exclude_ids or c.provider_video_id in seen_ids:
+                    continue
+                if c.artist and c.title:
+                    raw_title = c.title.split(" - ", 1)[1] if " - " in c.title else c.title
+                    raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
+                    if (_normalize_title(c.artist), _normalize_title(raw_title)) in library_titles:
+                        continue
+                seen_ids.add(c.provider_video_id)
+                candidates.append(c)
+                if len(candidates) >= limit:
+                    break
+
     return candidates
 
 
 def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[RecommendationCandidate]:
     """Suggest notable videos by artists already in the user's library.
 
-    Strategy: for each artist with >= min_videos, we surface a placeholder
-    recommendation. The actual YouTube search is deferred to a background
-    enrichment pass (or uses yt-dlp search if available).
-    For now, we generate candidates from the famous/popular seeds that match
-    library artists and aren't yet imported.
+    Strategy: first check seeds matching library artists, then use yt-dlp
+    search to dynamically discover videos by library artists.
     """
     min_owned = _get_setting(db, "nv_min_owned_for_artist_rec", "2", "int")
     max_per_artist = _get_setting(db, "nv_max_recs_per_artist", "5", "int")
@@ -409,6 +578,7 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
     library_ids = _get_library_video_ids(db)
     library_titles = _get_library_titles(db)
     dismissed_ids = _get_dismissed_provider_ids(db)
+    exclude_ids = library_ids | dismissed_ids
     candidates = []
 
     # Build artist→seeds lookup
@@ -417,6 +587,7 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
     for a, t, vid in all_seeds:
         artist_seeds.setdefault(a.lower(), []).append((a, t, vid))
 
+    # Phase 1: seed-based matches (fast, no network)
     for info in library_artists:
         if info["count"] < min_owned:
             continue
@@ -424,7 +595,7 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
         seeds = artist_seeds.get(artist_lower, [])
         added = 0
         for artist, title, vid_id in seeds:
-            if vid_id in library_ids or vid_id in dismissed_ids:
+            if vid_id in exclude_ids:
                 continue
             if (_normalize_title(artist), _normalize_title(title)) in library_titles:
                 continue
@@ -447,6 +618,35 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
         if len(candidates) >= limit:
             break
 
+    # Phase 2: yt-dlp search for library artists (dynamic discovery)
+    if len(candidates) < limit:
+        seen_ids = {c.provider_video_id for c in candidates}
+        # Eligible artists: have enough library videos, shuffle for variety
+        eligible_artists = [
+            info for info in library_artists
+            if info["count"] >= min_owned
+        ]
+        random.shuffle(eligible_artists)
+        # Limit searches to keep refresh fast (max 5 artist searches)
+        max_searches = min(5, len(eligible_artists))
+        for info in eligible_artists[:max_searches]:
+            if len(candidates) >= limit:
+                break
+            artist_name = info["artist"]
+            results = _search_artist_videos(
+                artist_name, "by_artist",
+                exclude_ids | seen_ids, library_titles,
+                max_results=max_per_artist,
+            )
+            for c in results:
+                if c.provider_video_id in seen_ids:
+                    continue
+                c.reasons = [f"You have {info['count']} {artist_name} videos — discovered via search"]
+                seen_ids.add(c.provider_video_id)
+                candidates.append(c)
+                if len(candidates) >= limit:
+                    break
+
     return candidates[:limit]
 
 
@@ -454,7 +654,7 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
     """Generate taste-based recommendations from 5-star rated artists.
 
     Strategy: Find artists the user has rated 5 stars and suggest famous/popular
-    videos by similar or same artists that aren't in their library.
+    videos by the same artists, then search YouTube dynamically.
     """
     from app.models import VideoItem
     use_ratings = _get_setting(db, "nv_use_ratings", "true", "bool")
@@ -467,20 +667,23 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
         VideoItem.song_rating_set == True,  # noqa: E712
         VideoItem.artist.isnot(None),
     ).distinct().all()
-    fav_artist_names = {r[0].lower() for r in fav_artists if r[0]}
+    fav_artist_names = {r[0] for r in fav_artists if r[0]}
+    fav_artist_lower = {n.lower() for n in fav_artist_names}
 
-    if not fav_artist_names:
+    if not fav_artist_lower:
         return []
 
     library_ids = _get_library_video_ids(db)
     library_titles = _get_library_titles(db)
     dismissed_ids = _get_dismissed_provider_ids(db)
+    exclude_ids = library_ids | dismissed_ids
     candidates = []
 
+    # Phase 1: seed-based matches
     all_seeds = FAMOUS_SEEDS + POPULAR_SEEDS
     for artist, title, vid_id in all_seeds:
-        if artist.lower() in fav_artist_names:
-            if vid_id in library_ids or vid_id in dismissed_ids:
+        if artist.lower() in fav_artist_lower:
+            if vid_id in exclude_ids:
                 continue
             if (_normalize_title(artist), _normalize_title(title)) in library_titles:
                 continue
@@ -500,26 +703,104 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
             if len(candidates) >= limit:
                 break
 
+    # Phase 2: yt-dlp search for favourite artists
+    if len(candidates) < limit:
+        seen_ids = {c.provider_video_id for c in candidates}
+        fav_list = list(fav_artist_names)
+        random.shuffle(fav_list)
+        for artist_name in fav_list[:3]:
+            if len(candidates) >= limit:
+                break
+            results = _search_artist_videos(
+                artist_name, "taste",
+                exclude_ids | seen_ids, library_titles,
+                max_results=5,
+            )
+            for c in results:
+                if c.provider_video_id in seen_ids:
+                    continue
+                c.reasons = [f"Based on your 5-star rated {artist_name} videos"]
+                seen_ids.add(c.provider_video_id)
+                candidates.append(c)
+                if len(candidates) >= limit:
+                    break
+
     return candidates
 
 
 def _generate_new_candidates(db: Session, limit: int = 10) -> list[RecommendationCandidate]:
-    """Placeholder for new/recent music video discovery.
+    """Discover recent/new official music video releases via yt-dlp search."""
+    library_ids = _get_library_video_ids(db)
+    library_titles = _get_library_titles(db)
+    dismissed_ids = _get_dismissed_provider_ids(db)
+    exclude_ids = library_ids | dismissed_ids
+    candidates = []
+    seen_ids: set[str] = set()
 
-    In production, this would query YouTube Data API or RSS feeds for recent
-    uploads from known VEVO/official channels. For now returns empty — the
-    refresh-via-yt-dlp enrichment can populate these.
-    """
-    return []
+    search_queries = [
+        "new official music video 2025",
+        "new music video premiere",
+        "latest official music video",
+        "official music video new release",
+    ]
+    random.shuffle(search_queries)
+
+    for query in search_queries[:2]:
+        if len(candidates) >= limit:
+            break
+        results = _ytdlp_search(query, max_results=10, category="new")
+        for c in results:
+            if c.provider_video_id in exclude_ids or c.provider_video_id in seen_ids:
+                continue
+            if c.artist and c.title:
+                raw_title = c.title.split(" - ", 1)[1] if " - " in c.title else c.title
+                raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
+                if (_normalize_title(c.artist), _normalize_title(raw_title)) in library_titles:
+                    continue
+            seen_ids.add(c.provider_video_id)
+            c.freshness_score = 0.80
+            candidates.append(c)
+            if len(candidates) >= limit:
+                break
+
+    return candidates
 
 
 def _generate_rising_candidates(db: Session, limit: int = 10) -> list[RecommendationCandidate]:
-    """Placeholder for rising/trending music videos.
+    """Discover trending/rising music videos via yt-dlp search."""
+    library_ids = _get_library_video_ids(db)
+    library_titles = _get_library_titles(db)
+    dismissed_ids = _get_dismissed_provider_ids(db)
+    exclude_ids = library_ids | dismissed_ids
+    candidates = []
+    seen_ids: set[str] = set()
 
-    Would use YouTube trending API or external trend data. Returns empty
-    until a provider API key is configured.
-    """
-    return []
+    search_queries = [
+        "trending official music video",
+        "viral music video official",
+        "music video trending now",
+    ]
+    random.shuffle(search_queries)
+
+    for query in search_queries[:2]:
+        if len(candidates) >= limit:
+            break
+        results = _ytdlp_search(query, max_results=10, category="rising")
+        for c in results:
+            if c.provider_video_id in exclude_ids or c.provider_video_id in seen_ids:
+                continue
+            if c.artist and c.title:
+                raw_title = c.title.split(" - ", 1)[1] if " - " in c.title else c.title
+                raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
+                if (_normalize_title(c.artist), _normalize_title(raw_title)) in library_titles:
+                    continue
+            seen_ids.add(c.provider_video_id)
+            c.trend_score = 0.80
+            candidates.append(c)
+            if len(candidates) >= limit:
+                break
+
+    return candidates
 
 
 # Category → generator mapping

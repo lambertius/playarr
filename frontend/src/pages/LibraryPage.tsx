@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   LayoutGrid, List, RefreshCw, ChevronLeft, ChevronRight,
@@ -34,6 +34,44 @@ const PAGE_SIZE_OPTIONS = [12, 24, 48, 96, 192];
 
 function loadStorage(key: string, fallback: string): string {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+}
+
+function Pagination({ page, totalPages, total, onPageChange }: {
+  page: number; totalPages: number; total: number;
+  onPageChange: (p: number) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const handleGo = () => {
+    const val = Number(inputRef.current?.value);
+    if (val >= 1 && val <= totalPages && val !== page) onPageChange(val);
+    if (inputRef.current) inputRef.current.value = "";
+  };
+  return (
+    <div className="flex items-center justify-center gap-4 my-4">
+      <button onClick={() => onPageChange(page - 1)} disabled={page <= 1} className="btn-ghost btn-sm">
+        <ChevronLeft size={16} /> Prev
+      </button>
+      <span className="text-sm text-text-secondary">
+        Page {page} of {totalPages}
+        <span className="ml-2 text-text-muted">({total} items)</span>
+      </span>
+      <button onClick={() => onPageChange(page + 1)} disabled={page >= totalPages} className="btn-ghost btn-sm">
+        Next <ChevronRight size={16} />
+      </button>
+      <span className="flex items-center gap-1 text-sm text-text-muted">
+        <input
+          ref={inputRef}
+          type="number"
+          min={1}
+          max={totalPages}
+          placeholder="#"
+          onKeyDown={(e) => e.key === "Enter" && handleGo()}
+          className="w-14 px-1.5 py-0.5 rounded bg-surface-lighter border border-surface-border text-text-primary text-center text-sm [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+        />
+        <button onClick={handleGo} className="btn-ghost btn-sm">Go</button>
+      </span>
+    </div>
+  );
 }
 
 export function LibraryPage() {
@@ -446,6 +484,16 @@ export function LibraryPage() {
         />
       ) : (
         <>
+          {/* Top pagination */}
+          {data.total_pages > 1 && (
+            <Pagination
+              page={data.page}
+              totalPages={data.total_pages}
+              total={data.total}
+              onPageChange={(p) => setParam("page", String(p))}
+            />
+          )}
+
           {view === "grid" ? (
             <div className="grid grid-cols-[repeat(auto-fill,200px)] gap-4">
               {data.items.map((v) => (
@@ -490,28 +538,14 @@ export function LibraryPage() {
             </div>
           )}
 
-          {/* Pagination */}
+          {/* Bottom pagination */}
           {data.total_pages > 1 && (
-            <div className="flex items-center justify-center gap-4 mt-6">
-              <button
-                onClick={() => setParam("page", String(data.page - 1))}
-                disabled={data.page <= 1}
-                className="btn-ghost btn-sm"
-              >
-                <ChevronLeft size={16} /> Prev
-              </button>
-              <span className="text-sm text-text-secondary">
-                Page {data.page} of {data.total_pages}
-                <span className="ml-2 text-text-muted">({data.total} items)</span>
-              </span>
-              <button
-                onClick={() => setParam("page", String(data.page + 1))}
-                disabled={data.page >= data.total_pages}
-                className="btn-ghost btn-sm"
-              >
-                Next <ChevronRight size={16} />
-              </button>
-            </div>
+            <Pagination
+              page={data.page}
+              totalPages={data.total_pages}
+              total={data.total}
+              onPageChange={(p) => setParam("page", String(p))}
+            />
           )}
         </>
       )}

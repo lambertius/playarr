@@ -3601,7 +3601,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                             )
                             _has_quality_poster = (
                                 _existing_poster is not None
-                                and _existing_poster.provenance not in ("thumb_fallback",)
+                                and _existing_poster.provenance not in ("thumb_fallback", "video_thumb_fallback")
                                 and _same_source
                             )
                             if _has_quality_poster:
@@ -4436,6 +4436,140 @@ def _restore_entity_cached_artwork(
                 )
 
 
+# ---------------------------------------------------------------------------
+# Sidecar processing-state verification (called during library scan)
+# ---------------------------------------------------------------------------
+
+def _verify_sidecar_processing_states(db, job_id: int) -> int:
+    """Walk every tracked VideoItem and reconcile processing_state flags
+    against the sidecar files that actually exist on disk.
+
+    Returns the number of flags that were repaired.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+    from app.services.nfo_parser import find_nfo_for_video
+    from app.services.playarr_xml import find_playarr_xml
+    from app.models import MediaAsset
+    from app.ai.models import AISceneAnalysis
+
+    videos = db.query(VideoItem).filter(
+        VideoItem.folder_path.isnot(None),
+    ).all()
+
+    total = len(videos)
+    repaired = 0
+    batch_size = 50
+
+    for idx, video in enumerate(videos):
+        if idx % 100 == 0:
+            _update_job(job_id, progress_percent=int((idx / max(total, 1)) * 100),
+                        step=f"Verifying sidecars ({idx}/{total})")
+
+        folder = video.folder_path
+        if not folder or not os.path.isdir(folder):
+            continue
+
+        state = dict(video.processing_state or {})
+        original_state = dict(state)
+        _is_done = lambda step: state.get(step, {}).get("completed", False)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        def _mark(step: str):
+            state[step] = {
+                "completed": True,
+                "timestamp": now_iso,
+                "method": "library_scan_verify",
+                "version": "1.0",
+            }
+
+        # ── xml_exported: .playarr.xml exists on disk ──
+        xml_path = find_playarr_xml(folder, video_file=video.file_path)
+        if xml_path and not _is_done("xml_exported"):
+            _mark("xml_exported")
+
+        # ── nfo_exported: Kodi .nfo exists on disk ──
+        if video.file_path:
+            nfo_path = find_nfo_for_video(video.file_path)
+            if nfo_path and not _is_done("nfo_exported"):
+                _mark("nfo_exported")
+            # Also check folder-name NFO pattern used by export_video()
+            if not nfo_path:
+                folder_name = os.path.basename(folder)
+                alt_nfo = os.path.join(folder, f"{folder_name}.nfo")
+                if os.path.isfile(alt_nfo) and not _is_done("nfo_exported"):
+                    _mark("nfo_exported")
+
+        # ── artwork_fetched: poster or thumb MediaAsset exists ──
+        if not _is_done("artwork_fetched"):
+            has_art = db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == video.id,
+                MediaAsset.asset_type.in_(("poster", "thumb")),
+                MediaAsset.status == "valid",
+            ).first()
+            if has_art:
+                _mark("artwork_fetched")
+            else:
+                # Check disk directly for poster/thumb files
+                video_stem = os.path.splitext(os.path.basename(video.file_path))[0] if video.file_path else None
+                art_found = False
+                for candidate in (
+                    os.path.join(folder, "poster.jpg"),
+                    os.path.join(folder, f"{video_stem}-poster.jpg") if video_stem else None,
+                ):
+                    if candidate and os.path.isfile(candidate):
+                        art_found = True
+                        break
+                if art_found:
+                    _mark("artwork_fetched")
+
+        # ── thumbnail_selected: video_thumb MediaAsset exists ──
+        if not _is_done("thumbnail_selected"):
+            has_thumb = db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == video.id,
+                MediaAsset.asset_type == "video_thumb",
+            ).first()
+            if has_thumb:
+                _mark("thumbnail_selected")
+
+        # ── scenes_analyzed: AISceneAnalysis record with status=complete ──
+        if not _is_done("scenes_analyzed"):
+            has_scene = db.query(AISceneAnalysis.id).filter(
+                AISceneAnalysis.video_id == video.id,
+                AISceneAnalysis.status == "complete",
+            ).first()
+            if has_scene:
+                _mark("scenes_analyzed")
+
+        # ── file_organized: file exists in library structure ──
+        if not _is_done("file_organized"):
+            if video.file_path and os.path.isfile(video.file_path):
+                _mark("file_organized")
+
+        # ── imported: video record exists (inherently true) ──
+        if not _is_done("imported"):
+            _mark("imported")
+
+        # ── Commit if anything changed ──
+        if state != original_state:
+            changed_flags = [k for k in state if state.get(k) != original_state.get(k)]
+            video.processing_state = state
+            flag_modified(video, "processing_state")
+            repaired += len(changed_flags)
+            _append_job_log(
+                job_id,
+                f"Repaired {', '.join(changed_flags)} for {video.artist} - {video.title}",
+            )
+
+        # Commit in batches to avoid holding the DB lock too long
+        if idx % batch_size == batch_size - 1:
+            db.commit()
+
+    # Final commit for remaining items
+    db.commit()
+    return repaired
+
+
 # Library scan task
 # ---------------------------------------------------------------------------
 
@@ -4899,12 +5033,23 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                 _set_processing_flag(db, video_item, "imported", method="library_scan")
                 if xml_sidecar_data:
                     _set_processing_flag(db, video_item, "xml_exported", method="library_scan")
+                if nfo_path:
                     _set_processing_flag(db, video_item, "nfo_exported", method="library_scan")
                 db.commit()
                 new_count += 1
                 _append_job_log(job_id, f"Imported: {artist} - {title}")
 
         _append_job_log(job_id, f"Scan complete. {new_count} new items imported.")
+
+        # ── Phase 2: Verify sidecar processing states for existing videos ──
+        _append_job_log(job_id, "Verifying sidecar processing states for existing videos...")
+        _update_job(job_id, step="Verifying sidecars")
+        repaired = _verify_sidecar_processing_states(db, job_id)
+        if repaired:
+            _append_job_log(job_id, f"Sidecar verification complete. {repaired} flags repaired.")
+        else:
+            _append_job_log(job_id, "Sidecar verification complete. All flags consistent.")
+
         _update_job(job_id, status=JobStatus.complete, progress_percent=100,
                     completed_at=datetime.now(timezone.utc))
 

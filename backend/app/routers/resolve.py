@@ -462,6 +462,8 @@ def _infer_review_category(vi: VideoItem) -> str:
     reason = (vi.review_reason or "").lower()
     if "naming convention" in reason or "rename" in reason:
         return "rename"
+    if "duplicate import skipped" in reason:
+        return "import_error"
     if "duplicate" in reason:
         return "duplicate"
     if "untracked file" in reason or "imported via scan" in reason:
@@ -647,6 +649,7 @@ def list_review_queue(
         (VideoItem.review_category.isnot(None), VideoItem.review_category),
         (VideoItem.review_reason.like("%naming convention%"), "rename"),
         (VideoItem.review_reason.like("%rename%"), "rename"),
+        (VideoItem.review_reason.like("%Duplicate import skipped%"), "import_error"),
         (VideoItem.review_reason.like("%duplicate%"), "duplicate"),
         (VideoItem.review_reason.like("%untracked file%"), "scanned"),
         (VideoItem.review_reason.like("%imported via scan%"), "scanned"),
