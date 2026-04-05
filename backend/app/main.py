@@ -1000,6 +1000,34 @@ def get_version():
         db.close()
 
 
+@app.get("/api/update-check")
+def check_for_update():
+    """Check GitHub for a newer release."""
+    import httpx
+
+    repo = "lambertius/playarr"
+    url = f"https://api.github.com/repos/{repo}/releases/latest"
+    try:
+        resp = httpx.get(url, timeout=10, headers={"Accept": "application/vnd.github+json"})
+        if resp.status_code != 200:
+            return {"update_available": False}
+        data = resp.json()
+        latest_tag = data.get("tag_name", "").lstrip("vV")
+        if not latest_tag:
+            return {"update_available": False}
+        current = _version_tuple(APP_VERSION)
+        latest = _version_tuple(latest_tag)
+        return {
+            "update_available": latest > current,
+            "current_version": APP_VERSION,
+            "latest_version": latest_tag,
+            "release_url": data.get("html_url", ""),
+            "release_name": data.get("name", ""),
+        }
+    except Exception:
+        return {"update_available": False}
+
+
 @app.get("/api/stats")
 def get_stats():
     """Quick library statistics."""

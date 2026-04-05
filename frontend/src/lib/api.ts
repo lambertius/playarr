@@ -298,6 +298,7 @@ export const statsApi = {
   get: () => api.get<AppStats>("/stats").then(r => r.data),
   health: () => api.get<{ status: string }>("/health").then(r => r.data),
   version: () => api.get<{ app_version: string; db_version: string; version_mismatch: boolean }>("/version").then(r => r.data),
+  updateCheck: () => api.get<{ update_available: boolean; current_version?: string; latest_version?: string; release_url?: string; release_name?: string }>("/update-check").then(r => r.data),
 };
 
 // ─── Resolve / Matching ──────────────────────────────────

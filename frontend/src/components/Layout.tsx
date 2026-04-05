@@ -1,8 +1,8 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
-  Library, Users, CalendarDays, Tags, Disc3, Star, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles,
+  Library, Users, CalendarDays, Tags, Disc3, Star, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles, ArrowUpCircle, X,
 } from "lucide-react";
-import { useStats, useReviewQueue } from "@/hooks/queries";
+import { useStats, useReviewQueue, useUpdateCheck } from "@/hooks/queries";
 import { useState } from "react";
 import { AddVideoModal } from "@/components/AddVideoModal";
 import { GlobalSearch } from "@/components/GlobalSearch";
@@ -61,6 +61,10 @@ export function Layout() {
   const queue = usePlaybackStore((s) => s.queue);
   const fullscreenMode = usePlaybackStore((s) => s.fullscreenMode);
   const navigate = useNavigate();
+
+  const { data: updateInfo, isLoading: updateLoading } = useUpdateCheck();
+  const [dismissedUpdate, setDismissedUpdate] = useState(false);
+  const showUpdateBanner = !dismissedUpdate && !updateLoading && updateInfo?.update_available;
 
   const isFullscreen = fullscreenMode !== "off";
 
@@ -153,6 +157,33 @@ export function Layout() {
             </button>
           </Tooltip>
         </header>
+        )}
+
+        {/* Update banner */}
+        {showUpdateBanner && (
+          <div className="flex items-center gap-2 bg-accent/15 border-b border-accent/30 px-4 py-2 text-sm text-accent">
+            <ArrowUpCircle size={16} className="flex-shrink-0" />
+            <span>
+              <strong>Playarr {updateInfo.latest_version}</strong> is available (you have {updateInfo.current_version}).
+            </span>
+            {updateInfo.release_url && (
+              <a
+                href={updateInfo.release_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline hover:text-accent/80 font-medium"
+              >
+                View release
+              </a>
+            )}
+            <button
+              onClick={() => setDismissedUpdate(true)}
+              className="ml-auto text-text-muted hover:text-text-primary"
+              aria-label="Dismiss"
+            >
+              <X size={14} />
+            </button>
+          </div>
         )}
 
         {/* Page content */}
