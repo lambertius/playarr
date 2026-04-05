@@ -83,10 +83,10 @@ export function useSnapshots(videoId: number) {
   });
 }
 
-export function useVideoNav(videoId: number) {
+export function useVideoNav(videoId: number, sort?: { sort_by?: string; sort_dir?: string }) {
   return useQuery({
-    queryKey: ["videoNav", videoId] as const,
-    queryFn: () => libraryApi.nav(videoId),
+    queryKey: ["videoNav", videoId, sort?.sort_by, sort?.sort_dir] as const,
+    queryFn: () => libraryApi.nav(videoId, sort),
     enabled: videoId > 0,
   });
 }

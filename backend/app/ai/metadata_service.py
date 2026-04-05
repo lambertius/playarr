@@ -657,6 +657,19 @@ def apply_ai_fields(
     locked = video.locked_fields or []
     all_locked = "_all" in locked
 
+    # Derive the source provenance from the AI result's model_name.
+    # model_name is set to e.g. "ai_auto_analyse", "musicbrainz_scrape",
+    # "wikipedia_scrape", or a model identifier like "gpt-4o".
+    _source_label_map = {
+        "ai_auto_analyse": "ai",
+        "musicbrainz_scrape": "musicbrainz",
+        "wikipedia_scrape": "wikipedia",
+    }
+    _source_label = _source_label_map.get(
+        ai_result.model_name, ai_result.model_name or "ai"
+    )
+    _manual_prov = f"manual+{_source_label}"
+
     applied_fields = []
     if "artist" in fields and ai_result.ai_artist and not all_locked and "artist" not in locked:
         video.artist = ai_result.ai_artist
@@ -669,8 +682,10 @@ def apply_ai_fields(
         applied_fields.append("album")
     if "year" in fields and ai_result.ai_year and not all_locked and "year" not in locked:
         video.year = ai_result.ai_year
+        applied_fields.append("year")
     if "plot" in fields and ai_result.ai_plot and not all_locked and "plot" not in locked:
         video.plot = ai_result.ai_plot
+        applied_fields.append("plot")
     if "genres" in fields and ai_result.ai_genres and not all_locked and "genres" not in locked:
         from app.services.metadata_resolver import capitalize_genre
         video.genres.clear()
@@ -682,6 +697,16 @@ def apply_ai_fields(
                 db.add(genre)
                 db.flush()
             video.genres.append(genre)
+        applied_fields.append("genres")
+
+    # Update field_provenance for all applied fields
+    if applied_fields:
+        from sqlalchemy.orm.attributes import flag_modified as _fp_flag
+        fp = dict(video.field_provenance or {})
+        for f in applied_fields:
+            fp[f] = _manual_prov
+        video.field_provenance = fp
+        _fp_flag(video, "field_provenance")
 
     # Re-run entity resolution when identity fields changed OR when entity
     # links are missing (e.g. entity_resolve failed during import).
@@ -793,6 +818,11 @@ def apply_ai_fields(
                     except OSError:
                         pass
             pending.status = "valid"
+            # Update provenance to reflect manual selection of a
+            # source-specific artwork (e.g. "manual+wikipedia_scrape")
+            _orig_art_prov = pending.provenance or _source_label
+            if not _orig_art_prov.startswith("manual+"):
+                pending.provenance = f"manual+{_orig_art_prov}"
 
     # ── Apply proposed source links ──
     source_field_prefix = "source:"

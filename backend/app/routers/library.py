@@ -1053,34 +1053,63 @@ def clean_redundant_files(body: CleanRedundantRequest, db: Session = Depends(get
 
 
 @router.get("/{video_id}/nav")
-def get_video_nav(video_id: int, db: Session = Depends(get_db)):
-    """Get prev/next/random navigation IDs for a video (sorted by artist, title)."""
-    from sqlalchemy import text
+def get_video_nav(
+    video_id: int,
+    sort_by: str = Query("artist", pattern="^(artist|title|year|created_at|updated_at)$"),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
+    db: Session = Depends(get_db),
+):
+    """Get prev/next/random navigation IDs for a video, respecting sort order."""
     import random as _random
 
-    current = db.query(VideoItem.id, VideoItem.artist, VideoItem.title).filter(
-        VideoItem.id == video_id
-    ).first()
+    current = db.query(VideoItem).filter(VideoItem.id == video_id).first()
     if not current:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    # Previous: last item where (artist, title) < current, or same artist with lower title
-    prev_item = db.query(VideoItem.id).filter(
-        or_(
-            VideoItem.artist < current.artist,
-            (VideoItem.artist == current.artist) & (VideoItem.title < current.title),
-            (VideoItem.artist == current.artist) & (VideoItem.title == current.title) & (VideoItem.id < current.id),
-        )
-    ).order_by(VideoItem.artist.desc(), VideoItem.title.desc(), VideoItem.id.desc()).first()
+    col = getattr(VideoItem, sort_by, VideoItem.artist)
+    cur_val = getattr(current, sort_by, None)
+    is_desc = sort_dir == "desc"
 
-    # Next: first item where (artist, title) > current
-    next_item = db.query(VideoItem.id).filter(
-        or_(
-            VideoItem.artist > current.artist,
-            (VideoItem.artist == current.artist) & (VideoItem.title > current.title),
-            (VideoItem.artist == current.artist) & (VideoItem.title == current.title) & (VideoItem.id > current.id),
+    # Build prev/next filters using (sort_col, id) as composite key.
+    # "prev" = the item that appears just before `current` in the sorted list.
+    # "next" = the item that appears just after `current`.
+    if is_desc:
+        # Descending: prev has a HIGHER sort value (or same value + higher id)
+        prev_filter = or_(
+            col > cur_val,
+            (col == cur_val) & (VideoItem.id > current.id),
         )
-    ).order_by(VideoItem.artist.asc(), VideoItem.title.asc(), VideoItem.id.asc()).first()
+        prev_order = [col.asc(), VideoItem.id.asc()]   # closest higher value = asc then pick first
+        next_filter = or_(
+            col < cur_val,
+            (col == cur_val) & (VideoItem.id < current.id),
+        )
+        next_order = [col.desc(), VideoItem.id.desc()]  # closest lower value = desc then pick first
+    else:
+        # Ascending: prev has a LOWER sort value (or same value + lower id)
+        prev_filter = or_(
+            col < cur_val,
+            (col == cur_val) & (VideoItem.id < current.id),
+        )
+        prev_order = [col.desc(), VideoItem.id.desc()]
+        next_filter = or_(
+            col > cur_val,
+            (col == cur_val) & (VideoItem.id > current.id),
+        )
+        next_order = [col.asc(), VideoItem.id.asc()]
+
+    prev_item = (
+        db.query(VideoItem.id)
+        .filter(prev_filter)
+        .order_by(*prev_order)
+        .first()
+    )
+    next_item = (
+        db.query(VideoItem.id)
+        .filter(next_filter)
+        .order_by(*next_order)
+        .first()
+    )
 
     # Random: pick any other video
     total = db.query(func.count(VideoItem.id)).scalar() or 0
@@ -1254,6 +1283,28 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
         for g in update.genres:
             item.genres.append(_get_or_create_genre(db, g))
         _metadata_changed = True
+
+    # Update field_provenance for any changed metadata fields
+    _manually_changed = []
+    if _artist_changed:
+        _manually_changed.append("artist")
+    if _title_changed:
+        _manually_changed.append("title")
+    if _album_changed:
+        _manually_changed.append("album")
+    if update.year is not None:
+        _manually_changed.append("year")
+    if update.plot is not None:
+        _manually_changed.append("plot")
+    if update.genres is not None:
+        _manually_changed.append("genres")
+    if _manually_changed:
+        from sqlalchemy.orm.attributes import flag_modified as _fp_flag
+        fp = dict(item.field_provenance or {})
+        for f in _manually_changed:
+            fp[f] = "manual"
+        item.field_provenance = fp
+        _fp_flag(item, "field_provenance")
 
     db.commit()
     db.refresh(item)

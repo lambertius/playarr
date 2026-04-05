@@ -75,6 +75,9 @@ def run_library_import_pipeline(job_id: int) -> None:
                 _xml_video = _xml_db.query(_XVI).get(video_id)
                 if _xml_video:
                     write_playarr_xml(_xml_video, _xml_db)
+                    from app.tasks import _set_processing_flag
+                    _set_processing_flag(_xml_db, _xml_video, "xml_exported", method="lib_import")
+                    _xml_db.commit()
                     ws.log("Playarr XML sidecar written")
             finally:
                 _xml_db.close()
@@ -1492,6 +1495,7 @@ def _flag_existing_for_duplicate_review(existing_video_id: int,
         item = db.query(VideoItem).get(existing_video_id)
         if item and item.review_status in (None, "none"):
             item.review_status = "needs_human_review"
+            item.review_category = "import_error"
             item.review_reason = (
                 f"Duplicate import skipped (job {job_id}): {reason}"
             )[:500]

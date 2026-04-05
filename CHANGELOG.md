@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.7.0] - 2026-04-06
+
+### Added
+- **Review Queue: Redownload Action** — individual and bulk "Redownload" buttons for review items with audio normalization failures, with confirmation warning about source link accuracy
+- **New Videos: Dynamic Discovery** — all category generators now use yt-dlp YouTube search as a fallback when hardcoded seed entries are exhausted, giving access to YouTube's full catalogue; implemented New and Rising categories for trending and recently-released music video discovery
+
+### Fixed
+- **Review Queue: False Duplicate Groups** — items flagged because a duplicate import was skipped (the incoming file was rejected) no longer appear as "Duplicate Group — 1 items"; they are correctly categorised as Library Import Alerts instead
+- **Scraper: Self-Titled Album Search** — `search_wikipedia_album` no longer penalises disambiguation pages when the album is self-titled (e.g. Weezer's *Weezer (Teal Album)*); similarity scoring now compares against disambiguation text for self-titled albums instead of the bare artist name
+- **Scraper: AI Album Fallback in Cross-Fallback** — when the Wikipedia album search returns the artist page instead of the album page (common for self-titled albums), the cross-fallback path now retries with the AI-provided album name before giving up
+- **Scraper: Two-Tier Cross-Link Validation** — cross-link artist validation now checks both the parsed artist name and the infobox artist field, reducing false rejections for compilations and featured-artist tracks
+- **Scraper: MB→Wikidata→Wikipedia Artist Fallback** — when direct Wikipedia search fails for an artist, the scraper now falls back to MusicBrainz → Wikidata → Wikipedia URL resolution
+- **Scraper: Tracklist Remixer Validation** — tracklist-based Wikipedia search now validates that remixer credits in parenthetical suffixes match the expected artist before accepting a track URL
+- **Scraper: Slash-Delimited Track Splitting** — tracklist parser now correctly handles slash-delimited track titles (e.g. "Track A / Track B") without splitting on the slash
+- **Scraper: EP-as-Album Type Discard** — Wikipedia album search no longer accepts EP-type releases when searching for a full album
+
 ## [1.6.0] - 2026-04-05
 
 ### Added

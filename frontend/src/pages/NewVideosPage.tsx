@@ -36,7 +36,7 @@ const CATEGORY_META: Record<NewVideoCategory, { label: string; icon: React.Eleme
   famous:    { label: "Famous",               icon: Trophy,      description: "Iconic music videos you might be missing" },
 };
 
-const CATEGORY_ORDER: NewVideoCategory[] = ["famous", "popular", "by_artist", "taste"];
+const CATEGORY_ORDER: NewVideoCategory[] = ["famous", "popular", "new", "rising", "by_artist", "taste"];
 
 export function NewVideosPage() {
   const { data: feed, isLoading, error } = useNewVideosFeed();

@@ -610,6 +610,19 @@ def _find_album_by_artist_browse(
                         _min_sim_base = 0.95 if len(_bq) <= 5 else 0.90
                         sim = max(sim, _min_sim_base)
                         _min_sim = _min_sim_base
+                # Handle slash-separated tracks (medleys, hidden tracks)
+                # e.g. "After All These Years / [untitled]", "Song A / Song B"
+                if sim < _min_sim and " / " in rec_title_lower:
+                    for _slash_part in rec_title_lower.split(" / "):
+                        _sp = _re_ab.sub(r"\s*[\[\(].*?[\]\)]\s*$", "", _slash_part).strip()
+                        if not _sp:
+                            continue
+                        _sp_sim = SequenceMatcher(None, title_lower, _sp).ratio()
+                        _sp_min = 0.95 if len(_sp) <= 5 else 0.90
+                        if _sp_sim >= _sp_min:
+                            sim = _sp_sim
+                            _min_sim = _sp_min
+                            break
                 if sim >= _min_sim:
                     album_title = rg.get("title") or rel.get("title")
                     album_release_id = rel.get("id")
@@ -672,6 +685,19 @@ def _find_album_by_artist_browse(
                     rec_title = rec.get("title", "")
                     sim = SequenceMatcher(None, title_lower, rec_title.lower()).ratio()
                     _min_sim = 0.95 if len(title_lower) <= 5 else 0.90
+                    # Handle slash-separated tracks on EPs
+                    if sim < _min_sim and " / " in rec_title.lower():
+                        import re as _re_ep
+                        for _sp_raw in rec_title.lower().split(" / "):
+                            _sp = _re_ep.sub(r"\s*[\[\(].*?[\]\)]\s*$", "", _sp_raw).strip()
+                            if not _sp:
+                                continue
+                            _sp_sim = SequenceMatcher(None, title_lower, _sp).ratio()
+                            _sp_min = 0.95 if len(_sp) <= 5 else 0.90
+                            if _sp_sim >= _sp_min:
+                                sim = _sp_sim
+                                _min_sim = _sp_min
+                                break
                     if sim >= _min_sim:
                         album_title = rg.get("title") or rel.get("title")
                         logger.info(
@@ -1172,6 +1198,21 @@ def _search_single_release_group(
     # Find the parent album that this single's recording appears on.
     # e.g. "Cosmic Love" single Ã¢â€ â€™ "Lungs" album
     parent_album = _find_parent_album(mb_recording_id)
+
+    # When _find_parent_album returns an EP whose name matches the track
+    # title (e.g. EP "Alright" for track "Alright"), the EP is effectively
+    # the single itself — not a parent album.  Discard and try the artist-
+    # browse fallback so the real album can be discovered (e.g. "I Should
+    # Coco").
+    if parent_album and rg_title:
+        _pa_name = (parent_album.get("album") or "").lower().strip()
+        _rg_lower = rg_title.lower().strip()
+        if _pa_name and _pa_name == _rg_lower:
+            logger.info(
+                f"Parent album '{parent_album['album']}' matches title "
+                f"'{rg_title}' — discarding EP-as-album, trying artist browse"
+            )
+            parent_album = None
 
     # Fallback: when _find_parent_album returns None (the single's recording
     # doesn't appear on an album release), browse the artist's album release
@@ -2033,6 +2074,64 @@ def search_wikipedia(title: str, artist: str) -> Optional[str]:
     return None
 
 
+def resolve_artist_wikipedia_via_mb(mb_artist_id: str) -> Optional[str]:
+    """Resolve an artist's Wikipedia URL via MusicBrainz URL relations → Wikidata.
+
+    When text-based Wikipedia search fails (common for artists with generic
+    names like "Trucks", "America", "Berlin"), this function uses the
+    authoritative MusicBrainz → Wikidata → Wikipedia sitelink chain.
+
+    Returns the full English Wikipedia URL or None.
+    """
+    if not mb_artist_id:
+        return None
+    try:
+        _init_musicbrainz()
+        artist_info = musicbrainzngs.get_artist_by_id(
+            mb_artist_id, includes=["url-rels"]
+        )
+        time.sleep(1.1)
+        wikidata_url = None
+        for rel in artist_info.get("artist", {}).get("url-relation-list", []):
+            if rel.get("type") == "wikidata":
+                wikidata_url = rel.get("target", "")
+                break
+        if not wikidata_url:
+            return None
+        qid = wikidata_url.rsplit("/", 1)[-1]
+        if not qid.startswith("Q"):
+            return None
+        headers = {"User-Agent": _WIKI_USER_AGENT, "Api-User-Agent": _WIKI_USER_AGENT}
+        resp = httpx.get(
+            "https://www.wikidata.org/w/api.php",
+            params={
+                "action": "wbgetentities",
+                "ids": qid,
+                "props": "sitelinks",
+                "sitefilter": "enwiki",
+                "format": "json",
+            },
+            headers=headers,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        title = (data.get("entities", {})
+                 .get(qid, {})
+                 .get("sitelinks", {})
+                 .get("enwiki", {})
+                 .get("title"))
+        if not title:
+            return None
+        url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+        logger.info(f"Wikipedia artist via MB→Wikidata: {url}")
+        return url
+    except Exception as e:
+        logger.debug(f"MB→Wikidata artist Wikipedia resolution failed: {e}")
+        return None
+
+
 def search_wikipedia_artist(artist: str) -> Optional[str]:
     """Search Wikipedia for an artist page. Returns URL or None."""
     if not artist:
@@ -2142,6 +2241,18 @@ def search_wikipedia_artist(artist: str) -> Optional[str]:
             ]
             if any(tag in pt_lower for tag in _non_music_tags):
                 score -= 5
+            # Penalise pages whose snippet identifies them as a
+            # song / single / album / EP — not an artist or band.
+            _work_phrases = [
+                "is a song", "is a single", "is an album", "is an ep",
+                "is the debut album", "is the debut single",
+                "is a studio album", "is a compilation album",
+                "is a live album", "is a greatest hits",
+                "is the second album", "is the third album",
+                "is the fourth album", "is the fifth album",
+            ]
+            if any(phrase in snippet_lower for phrase in _work_phrases):
+                score -= 5
 
             candidates.append({"title": title, "score": score})
 
@@ -2153,6 +2264,20 @@ def search_wikipedia_artist(artist: str) -> Optional[str]:
         logger.info(f"Wikipedia artist: best match '{best['title']}' scored {best['score']} "
                      f"(< 4), discarding for '{artist}'")
         return None
+
+    # Final guard: verify the Wikidata short description doesn't identify
+    # the page as a song, single, album, or EP.
+    _wd_desc = _get_wiki_short_description(best["title"])
+    if _wd_desc:
+        _wd_lower = _wd_desc.lower()
+        _work_kw = ["single by", "song by", "album by", "ep by",
+                     "compilation album", "soundtrack album",
+                     "live album", "greatest hits"]
+        if any(kw in _wd_lower for kw in _work_kw):
+            logger.info(f"Wikipedia artist: '{best['title']}' rejected — "
+                        f"Wikidata desc '{_wd_desc}' indicates a musical work")
+            return None
+
     logger.info(f"Wikipedia artist match: '{best['title']}' (score={best['score']})")
     return _build_wikipedia_url(best['title'])
 
@@ -2209,8 +2334,18 @@ def search_wikipedia_album(artist: str, album: str) -> Optional[str]:
                     "mini", "studio", "video", "reissue", "special",
                 }
                 _is_qualifier = _ad_text in _ALBUM_QUALIFIERS
+                # Self-titled album: base title matches artist name
+                _base_title = re.sub(r"\s*\([^)]*\)\s*$", "", title).strip()
+                _is_self_titled = artist and _base_title.lower() == artist.lower()
                 if artist and _ad_text and not _is_qualifier and artist.lower() in _ad_text:
                     score += 3  # Bonus: our artist in disambiguation
+                elif (
+                    _is_self_titled
+                    and _ad_text
+                    and not _is_qualifier
+                    and album_lower != artist.lower()
+                ):
+                    pass  # Self-titled album with different search term
                 elif _ad_text and not _is_qualifier:
                     # Disambiguation text exists before "album"/"ep" and
                     # is not a common qualifier — likely a different
@@ -2249,11 +2384,23 @@ def search_wikipedia_album(artist: str, album: str) -> Optional[str]:
     candidates.sort(key=lambda c: c["score"], reverse=True)
 
     from difflib import SequenceMatcher
+    _artist_lower = (artist or "").lower().strip()
     for cand in candidates:
         if cand["score"] < 4:
             break
         clean_title = re.sub(r"\s*\([^)]*\)\s*$", "", cand["title"]).strip()
         sim = SequenceMatcher(None, album.lower(), clean_title.lower()).ratio()
+        # Self-titled album fallback: when the stripped title matches the
+        # artist name, the real album name lives in the disambiguation
+        # text (e.g. "Weezer (Teal Album)" → compare against "Teal Album").
+        if sim < 0.7 and _artist_lower and clean_title.lower().strip() == _artist_lower:
+            _dm = re.search(r"\(([^)]+)\)$", cand["title"])
+            if _dm:
+                _dtext = _dm.group(1).strip()
+                if _dtext:
+                    sim = SequenceMatcher(
+                        None, album.lower(), _dtext.lower()
+                    ).ratio()
         if sim < 0.7:
             logger.info(f"Wikipedia album: '{cand['title']}' title similarity "
                          f"{sim:.2f} < 0.7 for '{album}', skipping")
@@ -2262,6 +2409,29 @@ def search_wikipedia_album(artist: str, album: str) -> Optional[str]:
         return _build_wikipedia_url(cand['title'])
 
     logger.info(f"Wikipedia album: no candidate passed both score and similarity gates for '{album}'")
+    return None
+
+
+def _get_wiki_short_description(title: str) -> Optional[str]:
+    """Fetch the Wikidata short description for a Wikipedia page title."""
+    try:
+        resp = httpx.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "titles": title,
+                "prop": "pageprops",
+                "ppprop": "wikibase-shortdesc",
+                "format": "json",
+            },
+            headers={"User-Agent": _WIKI_USER_AGENT, "Api-User-Agent": _WIKI_USER_AGENT},
+            timeout=10,
+        )
+        pages = resp.json().get("query", {}).get("pages", {})
+        for page in pages.values():
+            return page.get("pageprops", {}).get("wikibase-shortdesc")
+    except Exception:
+        pass
     return None
 
 
@@ -2865,13 +3035,20 @@ def extract_single_wiki_url_from_album(album_wiki_url: str, track_title: str) ->
                     or cell_lower.startswith(_track_lower + " "))
 
         def _extract_wiki_href(td) -> Optional[str]:
-            """Return full Wikipedia URL from a <td>'s first /wiki/ link."""
-            a = td.find("a", href=True)
-            if a:
+            """Return full Wikipedia URL from a <td>'s /wiki/ link matching track title."""
+            for a in td.find_all("a", href=True):
                 href = a.get("href", "")
-                if href.startswith("/wiki/") and ":" not in href[6:]:
+                if not href.startswith("/wiki/") or ":" in href[6:]:
+                    continue
+                # Validate link text matches track title — avoids
+                # returning remixer/producer links from variant rows
+                link_text = a.get_text(strip=True).strip('"\u201c\u201d\u2018\u2019')
+                link_norm = re.sub(r"[^a-z0-9 ]", "", link_text.lower())
+                if link_norm == _track_norm:
                     return f"https://en.wikipedia.org{href}"
             return None
+
+        _found_exact_no_link = False
 
         for table in soup.find_all("table", {"class": "tracklist"}):
             for row in table.find_all("tr"):
@@ -2908,6 +3085,16 @@ def extract_single_wiki_url_from_album(album_wiki_url: str, track_title: str) ->
                         f"Single wiki URL extracted from album tracklist: {url}"
                     )
                     return url
+                # Exact match without link → track listed but no wiki page
+                if cell_norm == _track_norm or cell_lower == _track_lower:
+                    _found_exact_no_link = True
+
+        if _found_exact_no_link:
+            logger.debug(
+                f"Track '{track_title}' found in tracklist (exact) "
+                f"but has no wiki link — skipping variant matches"
+            )
+            return None
 
         # Fallback: many Wikipedia album pages use <ol> ordered lists
         # instead of <table class="tracklist"> for track listings.

@@ -1190,6 +1190,40 @@ When the artwork candidate pipeline can produce candidates with a `source` value
 - **What was tried:** AI Source Resolution (gpt-5-mini) resolved "Ya Mama (Push The Tempo)" → "Ya Mama" (dropped parenthetical). Step B in `unified_metadata.py` used the AI title for MusicBrainz search: `search_musicbrainz("Fatboy Slim", "Ya Mama")`. Without the parenthetical, MB returned the wrong single `d3eb803e` ("Ya Mama" standalone, different release-group from the correct double A-side `677213e8`).
 - **Why it failed:** The AI normalised away subtitle info that MusicBrainz needs for disambiguation. Step B unconditionally preferred the AI title over the parsed title.
 - **Lesson:** When the AI title is a substring of the parsed title, the parsed title contains additional disambiguation information (parentheticals, subtitles) that MusicBrainz needs. The parsed title should be preferred in these cases.
+
+---
+
+## Track: Tessa Violet — Crush
+
+### FAILED: `extract_single_wiki_url_from_album` returned remixer link instead of song link (Attempt 1)
+- **What was tried:** Cross-fallback found the Wikipedia album page for "Bad Ideas" (`Bad_Ideas_(album)`). `extract_single_wiki_url_from_album` searched the tracklist for "Crush". The album tracklist has track 2: `"Crush"` (no hyperlink) and EP section track 4: `"Crush" (Le Youth Remix)` (hyperlink to `Le_Youth`). The prefix-matching in `_title_matches` matched "crush le youth remix".startswith("crush ") → True for the remix row. Then `_extract_wiki_href` returned the first `/wiki/` link in the `<td>`, which was `/wiki/Le_Youth` — a completely unrelated electronic musician.
+- **Why it failed:** Two compounding issues: (1) `_extract_wiki_href` blindly returned the FIRST `/wiki/` link in the `<td>` without checking if the link's anchor text matched the track title. In remix rows like `"Crush" (<a href="/wiki/Le_Youth">Le Youth</a> Remix)`, the link text is "Le Youth", not "Crush". (2) The function had no priority for exact title matches — when the exact-match row "Crush" had no link, it continued scanning and hit the prefix-matching remix row. (3) The consumer code's cover-song detection (infobox artist mismatch) should have caught this, but Le Youth's artist page has no song/single infobox `artist` field, so the check `_xref_infobox_artist and ...` short-circuited on the empty string.
+- **Cascading effects:** Le Youth's biography was scraped as the "plot" for the Crush music video → completely wrong metadata stored. The `source_url` pointed to Le Youth's Wikipedia page.
+- **Fix applied (two layers):**
+  1. **Link text validation in `_extract_wiki_href`**: Instead of returning the first `/wiki/` link blindly, iterate ALL `<a>` tags and only return a link whose normalized anchor text matches the track title exactly. This prevents returning "Le Youth" when searching for "Crush".
+  2. **Exact-match-stops-search guard**: After the tracklist table scan, if an exact title match was found but had no wiki link, return `None` immediately without falling through to prefix/variant matches or the `<ol>` fallback. This prevents remix/variant rows from being checked when the base track is listed but unlinked.
+- **Applied to:** `app/scraper/metadata_resolver.py`, `app/services/metadata_resolver.py` — both copies of `extract_single_wiki_url_from_album()`.
+- **Test results:** "Crush" from Bad Ideas → `None` (was returning Le Youth). "Creep" from Pablo Honey → correct URL. "Smells Like Teen Spirit" from Nevermind → correct URL. "Lurgee" (non-single) → `None`.
+
+### ANTI-PATTERN: Returning the first link in a tracklist cell without validating its anchor text
+Wikipedia tracklist cells for remix/variant tracks contain links to remixers, producers, or featured artists — not to the song itself. The cell text may match the track title via prefix matching (e.g., "Crush (Le Youth Remix)" starts with "Crush "), but the `<a>` link inside points to a different entity. Link extraction must validate that the anchor text matches the target track title, not just that a `/wiki/` link exists in the cell.
+
+---
+
+## Track: The Jacksons — Blame It on the Boogie
+
+### FAILED: Cover song false positive discards Wikipedia cross-links for band renames (Attempt 1)
+- **What was tried:** Wikipedia single page for "Blame It on the Boogie" has an infobox linking the artist as "The Jackson 5". The cross-link validation in `unified_metadata.py` compared `_link_page = "The Jackson 5"` against `_resolved_artist = "The Jacksons"` using substring containment: `_lp in _ra or _ra in _lp`. Neither "the jackson 5" is in "the jacksons" nor vice versa, so the check flagged it as a cover song and discarded ALL infobox cross-links (both artist and album).
+- **Why it failed:** "The Jackson 5" and "The Jacksons" are the same group — the band renamed in 1976. The simple substring containment check can't handle name changes where neither name contains the other. This caused: (1) no `wikipedia_artist` URL set → no artist art resolved, (2) no `wikipedia_album` cross-link from the single page → album page only found via separate search (which succeeded in this case, but wouldn't always).
+- **Fix applied (two tiers):**
+  1. **Alpha-only prefix check (Tier 1, no API call):** After stripping non-alphabetic characters, check if one name is a prefix of the other with ≥80% length ratio. `"thejackson"` (10 chars) is a prefix of `"thejacksons"` (11 chars), ratio 0.91 ≥ 0.8 → accept. Minimum 6 chars prevents short-name false positives.
+  2. **MusicBrainz alias lookup (Tier 2, authoritative):** When Tier 1 fails AND `mb_artist_id` is available, fetch the artist's aliases from MusicBrainz via `get_artist_by_id(id, includes=["aliases"])`. Check if the infobox name matches any known alias. For The Jacksons: aliases include "The Jackson 5", "Jackson 5", "Jackson Five", "The Jackson Five", etc. This catches complex renames that prefix matching can't handle (e.g., "Puff Daddy" / "Diddy").
+- **Applied to:** `app/scraper/unified_metadata.py` (cross-link Step 1), `app/pipeline_url/deferred.py` (cross-link validation).
+- **Test results:** "The Jackson 5" vs "The Jacksons" → accepted via Tier 1 prefix match. MusicBrainz aliases confirm all name variants. Cover song cases (completely different artists) still correctly rejected — neither prefix nor aliases match.
+
+### ANTI-PATTERN: Using only substring containment for artist name comparison in cover song detection
+Band renames, era-specific names, and localized variants mean the same artist can have names where neither is a substring of the other (e.g., "The Jackson 5" / "The Jacksons", "Puff Daddy" / "Diddy"). Substring containment alone produces false positives for cover song detection. When a simple string check fails, the comparison must escalate to normalized prefix matching (cheap) and ultimately to authoritative MusicBrainz aliases (definitive).
+
 - **Fix applied:** Added substring check in Step B: if `ai_title.lower() in parsed_title.lower()` and they differ, use `parsed_title` for the MB search. Applied to both `app/scraper/unified_metadata.py` and `app/pipeline_lib/services/unified_metadata.py`.
 
 ### FAILED: Step 3a unconditionally deleting scraper poster when parent album exists (Attempt 3)
@@ -1552,3 +1586,97 @@ Functions that extract different aspects of the same data (text vs URL from the 
 ### IMPROVEMENT: Wikipedia single cover image as poster fallback
 - **What was added:** When CoverArtArchive doesn't produce a poster (section 3 of deferred.py), a new section 3a now falls back to the Wikipedia single cover image (`metadata["image_url"]`) before the final video-thumbnail fallback (section 3b). This ensures videos whose singles aren't in CoverArtArchive still get proper artwork from Wikipedia.
 - **Applied to:** `pipeline/deferred.py`, `pipeline_lib/deferred.py`, `pipeline_url/deferred.py`.
+
+---
+
+## Track: Silverchair — After All These Years
+
+### FAILED: `_find_album_by_artist_browse` not matching slash-separated track titles (Attempt 1)
+- **What was tried:** `_find_album_by_artist_browse(mb_artist_id, title)` browses an artist's album release groups and checks each album's tracklist for a recording whose title matches the search title. The similarity threshold is 0.90 (or 0.95 for titles ≤ 5 chars). A parenthetical-stripping fallback handles `(subtitle)` mismatches.
+- **Why it failed:** On MusicBrainz, Diorama's track 11 is titled `"After All These Years / [untitled]"` — a combined entry where an untitled hidden track is appended after a ` / ` separator. `SequenceMatcher("after all these years", "after all these years / [untitled]").ratio()` = 0.76, well below the 0.90 threshold. The parenthetical-stripping regex `\(.*?\)` only handles `()` parentheses, not `[]` brackets. And even if it did, the ` / ` separator itself is not a parenthetical. This pattern also affects `_find_parent_album` indirectly: the single's recording ID (`0e9ca00b`) is a different MB recording than the album's (`f36f2bc7`), so `_find_parent_album` returned None (recording not on any album release). The `_find_album_by_artist_browse` fallback was then the only path to discover the parent album, and it also failed.
+- **Cascading effects:** No album → no `mb_album_release_group_id` → no Wikipedia album search → no album art → no album entity. The Wikipedia single page scrape also failed (no dedicated article exists for this song), so no plot or genres were available from Wikipedia. Only the AI Final Review generated a plot and reduced genres.
+- **Common MusicBrainz patterns affected:**
+  - `"Song A / [untitled]"` — hidden tracks (Silverchair, Nirvana, Tool)
+  - `"Song A / Song B"` — medleys/double A-sides on albums (Beatles, Queen)
+  - `"Song A / [hidden track]"`, `"Song A / [silence]"` — various bracket annotations
+- **Lesson:** MusicBrainz track titles commonly use ` / ` separators for combined entries (hidden tracks, medleys, segues). The title matching in `_find_album_by_artist_browse` must split on ` / ` and check each part individually against the search title, in addition to the existing parenthetical-stripping fallback.
+- **Fix applied:** Added a slash-separated track fallback in `_find_album_by_artist_browse()` in both `app/scraper/metadata_resolver.py` and `app/services/metadata_resolver.py`. When the initial similarity check and parenthetical-stripping both fail, and the recording title contains ` / `, each part is split, bracket/paren suffixes are stripped from each part, and each cleaned part is compared against the search title with the same similarity threshold. The first matching part triggers acceptance. Also applied to the EP fallback section in the scraper copy.
+
+### ANTI-PATTERN: Title matching that only handles parenthetical variations
+MusicBrainz uses multiple formatting conventions for combined tracks: `(subtitle)` parentheticals, ` / [hidden]` slash-bracket pairs, and ` / Song B` slash medleys. Title matching that only strips `(...)` patterns misses the ` / ` convention entirely. All common MB title-combination patterns must be handled.
+
+---
+
+## Track: Sunday Girl — Where Is My Mind?
+
+### FAILED: Wikipedia artist search returning a song/single page instead of the actual artist (Attempt 1)
+- **What was tried:** `search_wikipedia_artist("Sunday Girl")` searched Wikipedia for an artist page. The top result was `Sunday Girl` — a Wikipedia article about Blondie's 1979 single, not the music artist Sunday Girl (Jade Williams). The page title exactly matched the artist name (score +4), and the snippet contained "band" (referring to Blondie) adding +2, for a total score of 6 — above the threshold of 4.
+- **Why it failed:** The existing disambiguation penalty only checked for explicit suffixes like `(song)`, `(album)`, `(single)` in the page title via `re.search(r"\([^)]*\b(?:song|album|single|ep)\)$", ...)`. The Blondie single page is simply titled "Sunday Girl" with no parenthetical suffix, so it bypassed the filter. The correct artist page exists under "Jade Williams" but this didn't match the artist name variants.
+- **Cascading effects:** Wrong Wikipedia artist URL → wrong artist art (Blondie's "Sunday Girl" single cover `Blondie_sundaygirl.jpg` applied as artist artwork) → artist entity contaminated with Blondie imagery.
+- **Fix applied (two layers):**
+  1. **Snippet-based penalty:** Added detection for phrases like "is a song", "is a single", "is an album", "is an ep", "is a studio album" etc. in the search result snippet. These clearly identify a page about a musical work, not an artist. Applied as a −5 score penalty.
+  2. **Wikidata short description validation:** After selecting the best candidate, a lightweight API call fetches the page's `wikibase-shortdesc` property (e.g. "1979 single by Blondie", "Musical artist", "1982 studio album by Michael Jackson"). If the description contains "single by", "song by", "album by", "ep by", "compilation album", "soundtrack album", "live album", or "greatest hits", the candidate is rejected. This provides defense-in-depth when snippet phrasing is unusual.
+- **Applied to:** `app/scraper/metadata_resolver.py`, `app/services/metadata_resolver.py` — both copies of `search_wikipedia_artist()`. Helper function `_get_wiki_short_description()` added alongside `_wikipedia_search_api()`.
+- **Test results:** "Sunday Girl" → `None` (correctly rejected). "Parallel Lines" (Blondie album) → `None`. "Born to Run" (Springsteen album) → `None`. Real artists (Pixies, Blondie, Silverchair, Radiohead) all still resolve correctly.
+
+### ANTI-PATTERN: Relying only on page-title disambiguation suffixes to identify page type
+Wikipedia pages about songs, singles, and albums often use bare titles without `(song)` or `(album)` suffixes — especially when the song/album name is unique enough to not need disambiguation. Page-title-only checks miss these cases entirely. Both the search snippet text and the Wikidata short description must be consulted to reliably distinguish artist pages from musical work pages.
+
+---
+
+## Track: Supergrass — Alright
+
+### FAILED: EP returned by `_find_parent_album` blocks `_find_album_by_artist_browse` fallback (Attempt 1)
+- **What was tried:** `_find_parent_album(recording_id)` browses releases containing the recording and looks for an Album-type release group. When no Album is found, Pass 3 accepts EP-type release groups as a fallback. For recording `fcfd4053` ("Alright"), only the EP "Alright" (RG `56e95b6c`) was found. Since `_find_parent_album` returned a non-None result (the EP), `_find_album_by_artist_browse` was never called.
+- **Why it failed:** The EP "Alright" has the same name as the track title. When `unified_metadata.py` checked `_album_is_title_duplicate("Alright", "Alright")` → True, and the album RG ID == release RG ID (both `56e95b6c`, same EP), the album NAME was correctly discarded. However, `mb_album_release_id` and `mb_album_release_group_id` had already been stored (lines 672-675) BEFORE the title-match check (line 696). These stale IDs were never cleared.
+- **Cascading effects:** (1) Wikipedia later found "I Should Coco" from the single page's infobox cross-link and set `metadata["album"] = "I Should Coco"`. But `mb_album_release_group_id` still pointed to the EP RG `56e95b6c` — completely inconsistent. (2) The AI Final Review tried to correct the album to "Alright/Time" but was blocked by `if metadata.get("mb_album_release_group_id")` — the stale EP RG ID acted as false authority. (3) Source URLs in the output pointed to the EP, not to I Should Coco.
+- **MusicBrainz data:** Recording `fcfd4053` only appears on the EP "Alright" (`baed0ccf`). The I Should Coco album (`6e796029`) has "Alright" at track 4, but with a different recording ID (`a531ff88`). This is the same "separate recording entities" pattern as the Silverchair case.
+- **Fix applied (two layers):**
+  1. **EP-as-album discard in `_search_single_release_group()`**: When `_find_parent_album` returns a result whose album name matches the track title (case-insensitive), discard it and proceed to `_find_album_by_artist_browse`. This allows the artist-browse fallback to find the real parent album by scanning tracklists. Applied to both `app/scraper/metadata_resolver.py` and `app/services/metadata_resolver.py`.
+  2. **Clear stale album IDs on discard in `unified_metadata.py`**: When the album name is discarded (matches title and no distinct RG), also set `mb_album_release_id = None` and `mb_album_release_group_id = None`. This prevents stale IDs from blocking later Wikipedia or AI corrections. Applied to both `app/scraper/unified_metadata.py` and `app/services/unified_metadata.py`.
+- **Test results:** `_find_parent_album` returns EP "Alright" → discarded (matches title) → `_find_album_by_artist_browse` finds "I Should Coco" with correct RG ID `6e796029-272d-3fe2-8ad0-d8a10ef80a66`.
+
+### ANTI-PATTERN: Storing album release IDs before validating the album name
+The `_find_parent_album` EP fallback (Pass 3) can return an EP whose name matches the track title. The album release IDs were stored unconditionally at lines 672-675, before the album-matches-title check at line 696 discarded the name. This left stale IDs in the metadata dict that blocked subsequent corrections from Wikipedia cross-links and AI Final Review. Album IDs must only persist when the album name is also accepted, or must be cleared when the name is discarded.
+
+---
+
+## Track: Trucks — It's Just Porn Mum
+
+### FAILED: Wikipedia text search cannot find obscure artists with generic names (Attempt 1)
+- **What was tried:** `search_wikipedia_artist("Trucks")` uses the Wikipedia opensearch API to find the artist's page. For the obscure Australian pop-punk band Trucks, the search returns pages about trucks (vehicles), Derek Trucks, Tedeschi Trucks Band, etc. — never the correct band page `Trucks_(band)`.
+- **Why it failed:** "Trucks" is an extremely common English word. The Wikipedia article for the band is a stub with minimal content and low search ranking. The opensearch API returns results ranked by popularity/relevance, and an obscure band stub cannot compete with a primary dictionary word. No amount of search refinement ("Trucks band", "Trucks musician") would reliably surface this particular stub.
+- **Root cause:** Text-based Wikipedia search is fundamentally unreliable for artists whose name is a common word (Trucks, America, Berlin, Fun, Bush, Train, etc.). The search space is dominated by non-music results.
+- **Fix applied:** MB→Wikidata→Wikipedia sitelink fallback chain. When `search_wikipedia_artist` returns `None` and `mb_artist_id` is available, the new `resolve_artist_wikipedia_via_mb(mb_artist_id)` function:
+  1. Calls `musicbrainzngs.get_artist_by_id(id, includes=["url-rels"])` to find the Wikidata URL relation.
+  2. Extracts the QID (e.g. `Q625324`) from the Wikidata URL.
+  3. Calls the Wikidata API (`wbgetentities`) with `sitefilter=enwiki` to get the English Wikipedia sitelink title.
+  4. Constructs and returns the full Wikipedia URL.
+  Applied to: `app/scraper/metadata_resolver.py` and `app/services/metadata_resolver.py` (helper function), `app/scraper/unified_metadata.py` (Step 3b), `app/pipeline_url/deferred.py` (fallback after artist search).
+- **Test results:** `resolve_artist_wikipedia_via_mb('2c73f70e-b5af-4347-828e-6e9166908ea3')` → `https://en.wikipedia.org/wiki/Trucks_(band)`. Also verified with Metallica: `https://en.wikipedia.org/wiki/Metallica`. Edge cases (empty/None IDs) return `None` cleanly.
+
+### ANTI-PATTERN: Relying solely on text search for Wikipedia artist resolution
+Wikipedia's opensearch API ranks results by popularity and page size. Obscure artists with common-word names will always be drowned out by more popular pages for the same term. MusicBrainz maintains curated Wikidata relations for most artists, providing an authoritative entity-resolution chain (MB → Wikidata → Wikipedia sitelink) that bypasses text search entirely. This should be used as a fallback whenever text search fails and an MB artist ID is available.
+
+---
+
+## Track: Weezer — Africa (starring Weird Al Yankovic)
+
+### FAILED: AI-provided Wikipedia URL rejected for cover song (Attempt 1)
+- **What was tried:** AI Source Resolution correctly identified this as a cover of Toto's "Africa" and provided `https://en.wikipedia.org/wiki/Africa_(Weezer_song)` as the Wikipedia URL.
+- **Why it failed:** The URL `Africa_(Weezer_song)` doesn't exist — Wikipedia redirects it to the main `Africa_(song)` page, which is about the Toto original. The infobox has artist="Toto", so `detect_article_mismatch()` correctly rejected it as an artist mismatch. This is an AI hallucination — the AI fabricated a plausible but non-existent URL.
+- **Assessment:** The validation correctly caught the bad URL. No fix needed for this specific step.
+
+### FAILED: Self-titled album Wikipedia search returns artist page (Attempt 2)
+- **What was tried:** MB found album "Weezer" (the Teal Album's official title). The cross-fallback searched Wikipedia for album "Weezer" via `search_wikipedia_album("Weezer", "Weezer")`.
+- **Why it failed:** The Wikipedia search for "Weezer" returns the band's main page `https://en.wikipedia.org/wiki/Weezer`, not the album. The band page has no tracklist containing "Africa", so the single extraction failed. The actual album page is `Weezer_(Teal_Album)`, but searching for just "Weezer" can never find it — Weezer has 5+ self-titled albums, all disambiguated by color (Blue, Green, Red, White, Teal, Black).
+- **Root cause (two layers):**
+  1. **`search_wikipedia_album` scoring:** The disambiguation penalty wrongly applied -10 to self-titled album pages. For "Weezer (Teal Album)", the text "teal" before "album" was treated as a wrong artist name, giving score 3+3-10=-4. All self-titled disambiguated albums were below the threshold.
+  2. **Cross-fallback had no AI awareness:** When `search_wikipedia_album` returned the artist page (or a wrong album), there was no fallback to try the AI's album name "The Teal Album", which would successfully find the correct page.
+- **Fix applied (two layers):**
+  1. **`search_wikipedia_album` self-titled album handling:** When the page title base matches the artist name (self-titled) AND the search album differs from the artist name, don't apply the -10 "wrong artist" penalty. Also, in the similarity check, when the stripped title matches the artist, compare against the disambiguation text instead (e.g. sim("The Teal Album", "Teal Album") ≈ 0.83). Applied to both `app/scraper/metadata_resolver.py` and `app/services/metadata_resolver.py`.
+  2. **Cross-fallback AI album fallback:** After `search_wikipedia_album(artist, mb_album)` returns the artist page (detected by comparing against `wikipedia_artist` URL), try `search_wikipedia_album(artist, ai_album)` if the AI provided a different album name. Applied to `app/scraper/unified_metadata.py`.
+- **Test results:** `search_wikipedia_album("Weezer", "The Teal Album")` → `https://en.wikipedia.org/wiki/Weezer_(Teal_Album)`. Cross-fallback simulation: MB album "Weezer" → band page detected → AI album "The Teal Album" → Teal Album page → single extracted: `Africa_(song)#Weezer_version` (cover song fragment correctly detected by existing handler). Regression tests: Metallica self-titled, OK Computer, Parallel Lines all still resolve correctly.
+
+### ANTI-PATTERN: Self-titled album disambiguation scoring penalizes descriptors as artist names
+The `search_wikipedia_album` scoring treated ALL non-qualifier disambiguation text before "album"/"ep" as artist names (e.g. "teal" in "Teal Album", "black" in "Black Album"). For self-titled albums where the base title IS the artist, the disambiguation text is a descriptor (color, ordinal, etc.), not a competing artist. The penalty must be scoped: only apply -10 when the page title base does NOT match the search artist, or when the search album name matches the artist name (bare self-titled search where any self-titled album could be wrong).

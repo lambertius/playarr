@@ -28,7 +28,17 @@ export function VideoDetailPage() {
   const { data: video, isLoading, isError, refetch } = useVideo(id);
   const { data: snapshots } = useSnapshots(id);
   const { data: jobs } = useJobs({ limit: 20 });
-  const { data: nav } = useVideoNav(id);
+
+  // Read library sort from localStorage so nav respects the user's chosen order
+  const libSort = (() => {
+    try {
+      return {
+        sort_by: localStorage.getItem("playarr:library:sort") ?? "artist",
+        sort_dir: localStorage.getItem("playarr:library:dir") ?? "asc",
+      };
+    } catch { return { sort_by: "artist", sort_dir: "asc" }; }
+  })();
+  const { data: nav } = useVideoNav(id, libSort);
 
   const videoJobs = jobs?.filter((j) => j.video_id === id) ?? [];
   const hasUndoable = (snapshots?.length ?? 0) > 0;

@@ -1010,10 +1010,18 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                 MediaAsset.asset_type == "poster",
             ).first()
             if not _poster_exists and item and item.folder_path:
+                # Try "thumb" first, then fall back to "video_thumb" (scene analysis)
                 _thumb_asset = db.query(MediaAsset).filter(
                     MediaAsset.video_id == video_id,
                     MediaAsset.asset_type == "thumb",
                 ).first()
+                _fallback_prov = "thumb_fallback"
+                if not (_thumb_asset and _thumb_asset.file_path and os.path.isfile(_thumb_asset.file_path)):
+                    _thumb_asset = db.query(MediaAsset).filter(
+                        MediaAsset.video_id == video_id,
+                        MediaAsset.asset_type == "video_thumb",
+                    ).first()
+                    _fallback_prov = "video_thumb_fallback"
                 if _thumb_asset and _thumb_asset.file_path and os.path.isfile(_thumb_asset.file_path):
                     import shutil
                     from app.pipeline_url.services.artwork_service import validate_file
@@ -1026,7 +1034,7 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                         db.add(MediaAsset(
                             video_id=video_id, asset_type="poster",
                             file_path=_poster_dst, source_url=None,
-                            provenance="thumb_fallback",
+                            provenance=_fallback_prov,
                             status="valid" if (_vr and _vr.valid) else "invalid",
                             width=_vr.width if _vr and _vr.valid else None,
                             height=_vr.height if _vr and _vr.valid else None,
@@ -1036,7 +1044,7 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                         ))
                         db.commit()
                     db_write(_write_thumb_fallback)
-                    ws.log("Poster fallback: created from video thumbnail")
+                    ws.log(f"Poster fallback: created from {_fallback_prov}")
         except Exception as e:
             db.rollback()
             ws.log(f"Poster fallback: {e}", level="warning")
@@ -1104,6 +1112,16 @@ def _re_resolve_sources(db, video_id: int, artist: str, title: str,
     except Exception as e:
         ws.log(f"Source re-resolve: artist wiki: {e}", level="warning")
 
+    # MB→Wikidata→Wikipedia fallback for artist page
+    if not _wiki_artist_url and getattr(item, 'mb_artist_id', None):
+        try:
+            from app.scraper.metadata_resolver import resolve_artist_wikipedia_via_mb
+            _wiki_artist_url = resolve_artist_wikipedia_via_mb(item.mb_artist_id)
+            if _wiki_artist_url:
+                ws.log(f"Source re-resolve: artist wiki via MB→Wikidata: {_wiki_artist_url}")
+        except Exception as e:
+            ws.log(f"Source re-resolve: artist wiki MB→Wikidata: {e}", level="warning")
+
     try:
         from app.scraper.metadata_resolver import search_wikipedia
         _wiki_single_url = search_wikipedia(title, primary_artist)
@@ -1144,12 +1162,51 @@ def _re_resolve_sources(db, video_id: int, artist: str, title: str,
                 _lp = _link_page.lower()
                 _ra = primary_artist.lower().strip()
                 if not (_lp == _ra or _lp in _ra or _ra in _lp):
-                    _xlink_ok = False
-                    ws.log(
-                        f"Wikipedia cross-link: infobox artist "
-                        f"'{_link_page}' doesn't match resolved "
-                        f"'{primary_artist}' (cover song?) "
-                        f"-- discarding infobox cross-links")
+                    # Tier 1: alpha-only prefix check for band renames
+                    # e.g. "The Jackson 5" / "The Jacksons" → "thejackson" / "thejacksons"
+                    import re as _re_mod
+                    _lp_alpha = _re_mod.sub(r'[^a-z]', '', _lp)
+                    _ra_alpha = _re_mod.sub(r'[^a-z]', '', _ra)
+                    _shorter = min(len(_lp_alpha), len(_ra_alpha))
+                    _longer = max(len(_lp_alpha), len(_ra_alpha))
+                    if (_shorter >= 6
+                            and _longer > 0
+                            and _shorter / _longer >= 0.8
+                            and (_lp_alpha.startswith(_ra_alpha)
+                                 or _ra_alpha.startswith(_lp_alpha))):
+                        ws.log(
+                            f"Wikipedia cross-link: name prefix match "
+                            f"accepted ('{_link_page}' ≈ '{primary_artist}')")
+                    else:
+                        # Tier 2: check MusicBrainz aliases (authoritative)
+                        _mb_aid = getattr(item, 'mb_artist_id', None)
+                        _alias_matched = False
+                        if _mb_aid:
+                            try:
+                                import musicbrainzngs
+                                _ai = musicbrainzngs.get_artist_by_id(
+                                    _mb_aid, includes=["aliases"]
+                                )
+                                import time as _time_mod
+                                _time_mod.sleep(1.1)
+                                _known = {_ai["artist"]["name"].lower().strip()}
+                                for _al in _ai["artist"].get("alias-list", []):
+                                    if _al.get("alias"):
+                                        _known.add(_al["alias"].lower().strip())
+                                if _lp in _known:
+                                    _alias_matched = True
+                                    ws.log(
+                                        f"Wikipedia cross-link: '{_link_page}' "
+                                        f"verified as MB alias of '{primary_artist}'")
+                            except Exception:
+                                pass
+                        if not _alias_matched:
+                            _xlink_ok = False
+                            ws.log(
+                                f"Wikipedia cross-link: infobox artist "
+                                f"'{_link_page}' doesn't match resolved "
+                                f"'{primary_artist}' (cover song?) "
+                                f"-- discarding infobox cross-links")
 
             # Album: confirm or fallback
             if _linked_album and _xlink_ok:

@@ -694,6 +694,10 @@ def _scrape_with_ai_links(
                             )
                             if _is_dup and not _has_distinct_rg:
                                 logs.append(f"MusicBrainz: album '{_mb_album}' matches title \u2014 discarded")
+                                # Clear stale album IDs so they don't block
+                                # later Wikipedia or AI album resolution.
+                                metadata["mb_album_release_id"] = None
+                                metadata["mb_album_release_group_id"] = None
                             else:
                                 if _is_dup and _has_distinct_rg:
                                     logs.append(
@@ -949,6 +953,29 @@ def _scrape_with_ai_links(
                     search_wikipedia_album, extract_single_wiki_url_from_album,
                 )
                 _xref_album_url = search_wikipedia_album(_resolved_artist, _resolved_album)
+
+                # AI album fallback: when the album search returned the
+                # artist page (common for self-titled albums), try the AI's
+                # album name instead.
+                _artist_wiki_url = metadata.get("_source_urls", {}).get("wikipedia_artist")
+                if (
+                    has_ai
+                    and ai_result.identity.album
+                    and (
+                        not _xref_album_url
+                        or (_artist_wiki_url and _xref_album_url == _artist_wiki_url)
+                    )
+                ):
+                    _ai_album = ai_result.identity.album
+                    if _ai_album.lower().strip() != _resolved_album.lower().strip():
+                        logs.append(
+                            f"Cross-fallback: AI album '{_ai_album}' differs from "
+                            f"MB album '{_resolved_album}' — trying AI album"
+                        )
+                        _ai_album_url = search_wikipedia_album(_resolved_artist, _ai_album)
+                        if _ai_album_url and _ai_album_url != _artist_wiki_url:
+                            _xref_album_url = _ai_album_url
+
                 if _xref_album_url:
                     metadata["_source_urls"]["wikipedia_album"] = _xref_album_url
                     logs.append(f"Cross-fallback: found album page Ã¢â€ â€™ {_xref_album_url}")
@@ -1130,13 +1157,51 @@ def _scrape_with_ai_links(
                     _lp = _link_page.lower()
                     _ra = _resolved_artist.lower().strip()
                     if not (_lp == _ra or _lp in _ra or _ra in _lp):
-                        _xlink_ok = False
-                        logs.append(
-                            f"Wikipedia cross-link: infobox artist "
-                            f"'{ _link_page}' doesn't match resolved "
-                            f"'{ _resolved_artist}' (cover song?) "
-                            f"\u2014 discarding infobox cross-links"
-                        )
+                        # Tier 1: alpha-only prefix check for band renames
+                        # e.g. "The Jackson 5" / "The Jacksons" → "thejackson" / "thejacksons"
+                        _lp_alpha = re.sub(r'[^a-z]', '', _lp)
+                        _ra_alpha = re.sub(r'[^a-z]', '', _ra)
+                        _shorter = min(len(_lp_alpha), len(_ra_alpha))
+                        _longer = max(len(_lp_alpha), len(_ra_alpha))
+                        if (_shorter >= 6
+                                and _longer > 0
+                                and _shorter / _longer >= 0.8
+                                and (_lp_alpha.startswith(_ra_alpha)
+                                     or _ra_alpha.startswith(_lp_alpha))):
+                            logs.append(
+                                f"Wikipedia cross-link: name prefix match "
+                                f"accepted ('{_link_page}' ≈ '{_resolved_artist}')")
+                        else:
+                            # Tier 2: check MusicBrainz aliases (authoritative)
+                            _mb_aid = metadata.get("mb_artist_id")
+                            _alias_matched = False
+                            if _mb_aid:
+                                try:
+                                    import musicbrainzngs
+                                    import time as _time_xlink
+                                    _ai = musicbrainzngs.get_artist_by_id(
+                                        _mb_aid, includes=["aliases"]
+                                    )
+                                    _time_xlink.sleep(1.1)
+                                    _known = {_ai["artist"]["name"].lower().strip()}
+                                    for _al in _ai["artist"].get("alias-list", []):
+                                        if _al.get("alias"):
+                                            _known.add(_al["alias"].lower().strip())
+                                    if _lp in _known:
+                                        _alias_matched = True
+                                        logs.append(
+                                            f"Wikipedia cross-link: '{_link_page}' "
+                                            f"verified as MB alias of '{_resolved_artist}'")
+                                except Exception:
+                                    pass
+                            if not _alias_matched:
+                                _xlink_ok = False
+                                logs.append(
+                                    f"Wikipedia cross-link: infobox artist "
+                                    f"'{ _link_page}' doesn't match resolved "
+                                    f"'{ _resolved_artist}' (cover song?) "
+                                    f"\u2014 discarding infobox cross-links"
+                                )
 
                 if _xlink_ok:
                     if _xlinks.get("album_url"):
@@ -1181,6 +1246,17 @@ def _scrape_with_ai_links(
                     logs.append(f"Wikipedia artist search: {_artist_url}")
             except Exception as e:
                 logs.append(f"Wikipedia artist search failed: {e}")
+
+        # Step 3b: MB→Wikidata→Wikipedia fallback for artist page
+        if "wikipedia_artist" not in metadata.get("_source_urls", {}) and metadata.get("mb_artist_id"):
+            try:
+                from app.scraper.metadata_resolver import resolve_artist_wikipedia_via_mb
+                _artist_url = resolve_artist_wikipedia_via_mb(metadata["mb_artist_id"])
+                if _artist_url:
+                    metadata["_source_urls"]["wikipedia_artist"] = _artist_url
+                    logs.append(f"Wikipedia artist via MB→Wikidata: {_artist_url}")
+            except Exception as e:
+                logs.append(f"Wikipedia artist MB→Wikidata fallback failed: {e}")
 
         # Step 4: Scrape album page for cover artwork
         _wiki_album_url = metadata.get("_source_urls", {}).get("wikipedia_album")
