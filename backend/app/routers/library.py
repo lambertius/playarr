@@ -2861,3 +2861,179 @@ def export_all_playarr_xml(db: Session = Depends(get_db)):
             errors += 1
             logger.warning(f"Playarr XML export failed for video {video.id}: {e}")
     return {"written": written, "errors": errors, "total": len(videos)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Canonical Track Operations
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get("/{video_id}/canonical-scan")
+def scan_canonical_matches(video_id: int, db: Session = Depends(get_db)):
+    """Scan library for canonical track candidates for a video."""
+    from app.services.canonical_track import scan_library_for_canonical_matches
+
+    item = db.query(VideoItem).get(video_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    candidates = scan_library_for_canonical_matches(db, item)
+    return {
+        "video_id": video_id,
+        "current_track_id": item.track_id,
+        "candidates": candidates,
+    }
+
+
+@router.post("/{video_id}/canonical-link")
+def link_to_canonical(video_id: int, track_id: int, db: Session = Depends(get_db)):
+    """Link a video to an existing canonical track."""
+    from app.services.canonical_track import link_video_to_canonical_track
+
+    item = db.query(VideoItem).get(video_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    track = db.query(TrackEntity).get(track_id)
+    if not track:
+        raise HTTPException(status_code=404, detail="Canonical track not found")
+
+    link_video_to_canonical_track(db, item, track)
+    item.canonical_provenance = "user"
+    item.canonical_confidence = 1.0
+
+    # Clear any canonical review flags
+    if item.review_category in ("canonical_missing", "canonical_conflict", "canonical_low_confidence"):
+        item.review_status = "reviewed"
+        item.review_reason = None
+        item.review_category = None
+
+    db.commit()
+    return get_video(video_id, db)
+
+
+@router.post("/{video_id}/canonical-unlink")
+def unlink_canonical(video_id: int, db: Session = Depends(get_db)):
+    """Remove a video's canonical track link."""
+    item = db.query(VideoItem).get(video_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    item.track_id = None
+    item.canonical_confidence = None
+    item.canonical_provenance = None
+    db.commit()
+    return get_video(video_id, db)
+
+
+@router.post("/{video_id}/canonical-create")
+def create_canonical_for_video(
+    video_id: int,
+    body: "CanonicalTrackCreate",
+    db: Session = Depends(get_db),
+):
+    """Create a new canonical track and link the video to it."""
+    from app.services.canonical_track import (
+        create_canonical_track_manual, link_video_to_canonical_track,
+    )
+    from app.schemas import CanonicalTrackCreate  # noqa: F811
+
+    item = db.query(VideoItem).get(video_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    track = create_canonical_track_manual(
+        db,
+        title=body.title,
+        artist_name=body.artist_name,
+        album_name=body.album_name,
+        year=body.year,
+        is_cover=body.is_cover,
+        original_artist=body.original_artist,
+        original_title=body.original_title,
+        genres=body.genres,
+    )
+    link_video_to_canonical_track(db, item, track)
+    item.canonical_provenance = "user"
+    item.canonical_confidence = 1.0
+
+    # Clear any canonical review flags
+    if item.review_category in ("canonical_missing", "canonical_conflict", "canonical_low_confidence"):
+        item.review_status = "reviewed"
+        item.review_reason = None
+        item.review_category = None
+
+    db.commit()
+    return get_video(video_id, db)
+
+
+@router.put("/{video_id}/canonical-track")
+def edit_canonical_track(
+    video_id: int,
+    body: "CanonicalTrackUpdate",
+    db: Session = Depends(get_db),
+):
+    """Edit the canonical track linked to a video."""
+    from app.services.canonical_track import update_canonical_track
+    from app.schemas import CanonicalTrackUpdate  # noqa: F811
+
+    item = db.query(VideoItem).get(video_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if not item.track_id:
+        raise HTTPException(status_code=400, detail="Video has no canonical track to edit")
+
+    track = db.query(TrackEntity).get(item.track_id)
+    if not track:
+        raise HTTPException(status_code=404, detail="Canonical track not found")
+
+    update_canonical_track(
+        db, track,
+        title=body.title,
+        artist_name=body.artist_name,
+        album_name=body.album_name,
+        year=body.year,
+        is_cover=body.is_cover,
+        original_artist=body.original_artist,
+        original_title=body.original_title,
+        genres=body.genres,
+    )
+
+    # Update provenance on the video
+    item.canonical_provenance = "user"
+    item.canonical_confidence = 1.0
+
+    db.commit()
+    return get_video(video_id, db)
+
+
+@router.post("/{video_id}/parent-video")
+def set_parent(
+    video_id: int,
+    body: "SetParentVideoRequest",
+    db: Session = Depends(get_db),
+):
+    """Set or clear a video's parent video (hierarchical version chain)."""
+    from app.services.canonical_track import set_parent_video
+    from app.schemas import SetParentVideoRequest  # noqa: F811
+
+    item = db.query(VideoItem).get(video_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    try:
+        set_parent_video(db, item, body.parent_video_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    db.commit()
+    return get_video(video_id, db)
+
+
+@router.post("/scan-canonical-issues")
+def scan_canonical_issues(db: Session = Depends(get_db)):
+    """Scan the library for canonical track issues and flag for review."""
+    from app.services.canonical_track import scan_library_canonical_issues
+
+    counts = scan_library_canonical_issues(db)
+    total = sum(counts.values())
+    return {"status": "ok", "flagged": total, "breakdown": counts}

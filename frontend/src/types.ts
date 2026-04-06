@@ -102,6 +102,9 @@ export interface VideoItemDetail {
   original_artist?: string | null;
   original_title?: string | null;
   related_versions?: { id: number; version_type: string; label?: string }[] | null;
+  parent_video_id?: number | null;
+  canonical_confidence?: number | null;
+  canonical_provenance?: string | null;
   review_status?: string;
   review_reason?: string | null;
   processing_state?: ProcessingState | null;

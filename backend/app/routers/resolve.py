@@ -470,6 +470,13 @@ def _infer_review_category(vi: VideoItem) -> str:
         return "duplicate"
     if "untracked file" in reason or "imported via scan" in reason:
         return "scanned"
+    # Canonical track issues
+    if "canonical" in reason and "missing" in reason:
+        return "canonical_missing"
+    if "canonical" in reason and "conflict" in reason:
+        return "canonical_conflict"
+    if "canonical" in reason and ("low confidence" in reason or "uncertain" in reason):
+        return "canonical_low_confidence"
     if any(kw in reason for kw in ("cover", "live", "alternate", "version", "classification", "ambiguous")):
         return "version_detection"
     method = vi.import_method or ""

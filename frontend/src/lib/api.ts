@@ -152,6 +152,28 @@ export const libraryApi = {
 
   partyMode: (params: PartyModeParams) =>
     api.get<PartyModeResponse>("/library/party-mode", { params }).then(r => r.data),
+
+  // ── Canonical Track ──
+  canonicalScan: (videoId: number) =>
+    api.get<{ candidates: { track_id: number; title: string; artist_name: string | null; album_name: string | null; year: number | null; mb_recording_id: string | null; match_method: string; video_count: number }[]; current_track_id: number | null }>(`/library/${videoId}/canonical-scan`).then(r => r.data),
+
+  canonicalLink: (videoId: number, trackId: number) =>
+    api.post<VideoItemDetail>(`/library/${videoId}/canonical-link`, null, { params: { track_id: trackId } }).then(r => r.data),
+
+  canonicalUnlink: (videoId: number) =>
+    api.post<VideoItemDetail>(`/library/${videoId}/canonical-unlink`).then(r => r.data),
+
+  canonicalCreate: (videoId: number, data: { title: string; artist_name?: string; album_name?: string; year?: number; is_cover?: boolean; original_artist?: string; original_title?: string; genres?: string[] }) =>
+    api.post<VideoItemDetail>(`/library/${videoId}/canonical-create`, data).then(r => r.data),
+
+  canonicalEdit: (videoId: number, data: { title?: string; artist_name?: string; album_name?: string; year?: number; is_cover?: boolean; original_artist?: string; original_title?: string; genres?: string[] }) =>
+    api.put<VideoItemDetail>(`/library/${videoId}/canonical-track`, data).then(r => r.data),
+
+  setParentVideo: (videoId: number, parentVideoId: number | null) =>
+    api.post<VideoItemDetail>(`/library/${videoId}/parent-video`, { parent_video_id: parentVideoId }).then(r => r.data),
+
+  scanCanonicalIssues: () =>
+    api.post<{ status: string; flagged: number; breakdown: Record<string, number> }>("/library/scan-canonical-issues").then(r => r.data),
 };
 
 // ─── Jobs ─────────────────────────────────────────────────

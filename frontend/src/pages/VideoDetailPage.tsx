@@ -249,13 +249,14 @@ export function VideoDetailPage() {
 
         {/* Right: Canonical Track — stretches to match description height */}
         <div className="lg:col-span-1 flex flex-col">
-          {video.canonical_track ? (
-            <CanonicalTrackPanel track={video.canonical_track} className="flex-1" />
-          ) : (
-            <div className="card flex-1 flex items-center justify-center text-text-muted text-sm italic">
-              No canonical track linked
-            </div>
-          )}
+          <CanonicalTrackPanel
+            track={video.canonical_track ?? null}
+            videoId={video.id}
+            parentVideoId={video.parent_video_id}
+            canonicalConfidence={video.canonical_confidence}
+            canonicalProvenance={video.canonical_provenance}
+            className="flex-1"
+          />
         </div>
       </div>
 

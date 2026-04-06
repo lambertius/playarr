@@ -1,5 +1,5 @@
 """
-Version Detection Engine — Classify videos as normal / cover / live / alternate.
+Version Detection Engine — Classify videos as normal / cover / live / alternate / remix / acoustic.
 
 Runs heuristic analysis on all available signals (filename, platform title,
 uploader, description, fingerprint, scraped metadata) to produce a provisional
@@ -11,6 +11,8 @@ Classification states
 * ``cover``     — another artist performing a song originally by someone else
 * ``live``      — live performance / concert / TV appearance
 * ``alternate`` — alternate official version (uncensored, director's cut, etc.)
+* ``remix``     — remix by another artist/producer
+* ``acoustic``  — acoustic / stripped-back rendition by the original artist
 
 If the detection is uncertain, escalation is recommended:
 * AI review  (if AI is enabled)
@@ -80,8 +82,21 @@ _ALTERNATE_KEYWORDS = re.compile(
     r"|alternate\s+cut|alternate\s+edit|official\s+alternate"
     r"|alternate\s+(?:music\s+)?video|original\s+version|extended\s+version"
     r"|short\s+version|radio\s+edit|album\s+version|single\s+version"
-    r"|remix|(?:re)?mix|official\s+video\s+(?:#|no?\.?\s*)[2-9]"
+    r"|official\s+video\s+(?:#|no?\.?\s*)[2-9]"
     r"|video\s+(?:version|edit)\s+[2-9ab]|version\s+[ab])\b",
+    re.IGNORECASE,
+)
+
+# Remix indicators — distinct from alternate
+_REMIX_KEYWORDS = re.compile(
+    r"\b(?:remix|remixed\s+by|(?:re)?mix(?:ed)?)\b",
+    re.IGNORECASE,
+)
+
+# Acoustic indicators — stripped-back rendition by the original artist
+_ACOUSTIC_KEYWORDS = re.compile(
+    r"\b(?:acoustic(?:\s+version)?|acoustic\s+session|stripped(?:\s+back)?|unplugged"
+    r"|acoustic\s+performance|acoustic\s+rendition)\b",
     re.IGNORECASE,
 )
 
@@ -98,7 +113,6 @@ _ALT_LABEL_PATTERNS = [
     (re.compile(r"\b(radio\s+edit)\b", re.I), "Radio Edit"),
     (re.compile(r"\bversion\s+([2-9ab])\b", re.I), "Version {0}"),
     (re.compile(r"\bv([2-9])\b", re.I), "Version {0}"),
-    (re.compile(r"\bremix\b", re.I), "Remix"),
 ]
 
 # Confidence thresholds
@@ -263,6 +277,18 @@ def _check_title_keywords(signals: List[VersionSignal], source_title: str, filen
                 f"Live keyword found in {label}: {text}",
             ))
 
+        if _REMIX_KEYWORDS.search(text):
+            signals.append(VersionSignal(
+                f"{label}_keywords", "remix", 0.80,
+                f"Remix keyword found in {label}: {text}",
+            ))
+
+        if _ACOUSTIC_KEYWORDS.search(text):
+            signals.append(VersionSignal(
+                f"{label}_keywords", "acoustic", 0.75,
+                f"Acoustic keyword found in {label}: {text}",
+            ))
+
         if _ALTERNATE_KEYWORDS.search(text):
             # Try to extract a label
             label_str = _extract_alt_label(text)
@@ -292,6 +318,18 @@ def _check_description_keywords(signals: List[VersionSignal], description: str):
         signals.append(VersionSignal(
             "description_keywords", "live", 0.50,
             "Live keyword found in description",
+        ))
+
+    if _REMIX_KEYWORDS.search(desc):
+        signals.append(VersionSignal(
+            "description_keywords", "remix", 0.55,
+            "Remix keyword found in description",
+        ))
+
+    if _ACOUSTIC_KEYWORDS.search(desc):
+        signals.append(VersionSignal(
+            "description_keywords", "acoustic", 0.50,
+            "Acoustic keyword found in description",
         ))
 
     if _ALTERNATE_KEYWORDS.search(desc):
@@ -453,7 +491,10 @@ def _aggregate_signals(
         return VersionClassification(version_type="normal", confidence=1.0)
 
     # Accumulate weighted scores per type
-    type_scores: Dict[str, float] = {"cover": 0.0, "live": 0.0, "alternate": 0.0, "normal": 0.0}
+    type_scores: Dict[str, float] = {
+        "cover": 0.0, "live": 0.0, "alternate": 0.0,
+        "remix": 0.0, "acoustic": 0.0, "normal": 0.0,
+    }
     for sig in signals:
         # Diminishing returns: each additional signal adds less
         current = type_scores.get(sig.classification, 0.0)
@@ -463,7 +504,7 @@ def _aggregate_signals(
     # Find best non-normal classification
     best_type = "normal"
     best_score = 0.0
-    for vt in ("cover", "live", "alternate"):
+    for vt in ("cover", "live", "alternate", "remix", "acoustic"):
         if type_scores[vt] > best_score:
             best_type = vt
             best_score = type_scores[vt]

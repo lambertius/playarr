@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.9.0] - 2026-04-06
+
+### Added
+- **Canonical Track Linking System** — comprehensive hierarchical version relationship system: videos can be linked to canonical tracks (shared identity across versions), with parent-child version chains, confidence scoring, and provenance tracking (auto/user)
+- **Canonical Track Panel Overhaul** — the canonical track card on the video detail page now supports inline editing of track metadata, scanning for matching canonical tracks, creating new canonical tracks, linking/unlinking, and displays parent video relationships and provenance badges
+- **Canonical Track API** — new endpoints for scanning library for canonical matches (MBID → fingerprint → fuzzy fallback), linking/unlinking canonical tracks, creating/editing canonical tracks manually, setting parent video relationships, and library-wide canonical issue scanning
+- **Review Queue: Canonical Categories** — three new review categories: "No Canonical Track" for unlinked videos, "Canonical Conflict" for metadata mismatches, and "Low Canonical Confidence" for uncertain auto-links
+- **Version Types: Remix & Acoustic** — `remix` and `acoustic` are now first-class version types across the entire stack: version detector classifies them independently (previously grouped under "alternate"), badges render with distinct colours (cyan/amber), all dropdowns and filters include them, and they are preserved in XML export/import
+- **Version Type Consistency** — all VERSION_TYPE_OPTIONS across the frontend (MetadataEditorForm, ReviewQueuePage, SettingsPage, Badges, ImportLibraryPage) are now consistent, including `uncensored` and `18+` in all applicable locations
+
 ## [1.8.1] - 2026-04-06
 
 ### Fixed

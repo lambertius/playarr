@@ -83,6 +83,12 @@ def _apply_schema_upgrades(eng):
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN exclude_from_editor_scan BOOLEAN DEFAULT 0 NOT NULL"))
             if "rename_dismissed" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN rename_dismissed BOOLEAN DEFAULT 0 NOT NULL"))
+            if "parent_video_id" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN parent_video_id INTEGER REFERENCES video_items(id)"))
+            if "canonical_confidence" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN canonical_confidence FLOAT"))
+            if "canonical_provenance" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN canonical_provenance VARCHAR(50)"))
 
     # Matching subsystem tables — created by Base.metadata.create_all but
     # we need to ensure they exist for older DBs upgraded in-place.

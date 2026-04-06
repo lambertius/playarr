@@ -88,6 +88,10 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
         _opt(ver, "label", video.alternate_version_label)
         _opt(ver, "original_artist", video.original_artist)
         _opt(ver, "original_title", video.original_title)
+        if getattr(video, "parent_video_id", None):
+            _txt(ver, "parent_video_id", str(video.parent_video_id))
+        if getattr(video, "canonical_provenance", None):
+            _txt(ver, "canonical_provenance", video.canonical_provenance)
 
     # ── genres ──
     if video.genres:
@@ -468,6 +472,10 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
             result["alternate_version_label"] = _text(ver.find("label")) or None
             result["original_artist"] = _text(ver.find("original_artist")) or None
             result["original_title"] = _text(ver.find("original_title")) or None
+            parent_vid = _text(ver.find("parent_video_id"))
+            if parent_vid:
+                result["parent_video_id"] = int(parent_vid)
+            result["canonical_provenance"] = _text(ver.find("canonical_provenance")) or None
         else:
             result["version_type"] = "normal"
 
