@@ -79,6 +79,10 @@ def _apply_schema_upgrades(eng):
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN dismissed_duplicate_ids JSON"))
             if "processing_state" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN processing_state JSON"))
+            if "exclude_from_editor_scan" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN exclude_from_editor_scan BOOLEAN DEFAULT 0 NOT NULL"))
+            if "rename_dismissed" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN rename_dismissed BOOLEAN DEFAULT 0 NOT NULL"))
 
     # Matching subsystem tables — created by Base.metadata.create_all but
     # we need to ensure they exist for older DBs upgraded in-place.

@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.8.1] - 2026-04-06
+
+### Fixed
+- **Library View: Database Schema Upgrade** — library view and track-level views failed to load because two new columns (`rename_dismissed`, `exclude_from_editor_scan`) were added to the VideoItem model but not registered in the startup schema upgrade function; existing databases now have these columns added automatically on startup
+
 ## [1.8.0] - 2026-04-06
 
 ### Added
