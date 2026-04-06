@@ -394,3 +394,149 @@ def _get_acoustid_key() -> Optional[str]:
             db.close()
     except Exception:
         return DEFAULT_ACOUSTID_KEY or None
+
+
+# ---------------------------------------------------------------------------
+# Chromaprint fingerprint decoding & comparison
+# ---------------------------------------------------------------------------
+
+class _BitReader:
+    """Read individual bits from a byte buffer (LSB-first)."""
+    __slots__ = ("_data", "_pos", "_total")
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self._pos = 0
+        self._total = len(data) * 8
+
+    def read(self, n: int = 1) -> int:
+        val = 0
+        for i in range(n):
+            if self._pos >= self._total:
+                return val
+            byte_idx = self._pos >> 3
+            bit_idx = self._pos & 7
+            val |= ((self._data[byte_idx] >> bit_idx) & 1) << i
+            self._pos += 1
+        return val
+
+    def has_bits(self, n: int = 1) -> bool:
+        return (self._total - self._pos) >= n
+
+
+def decode_chromaprint(encoded: str) -> List[int]:
+    """Decode a base64-encoded compressed Chromaprint fingerprint to a list
+    of 32-bit integers.
+
+    Uses the Chromaprint packed format:
+      Header (4 bytes): algorithm (1 byte) + num_values (3 bytes big-endian)
+      Body: 16 groups of 2 bits each, delta-encoded in gray code
+
+    Returns an empty list if decoding fails.
+    """
+    import base64
+
+    try:
+        # Chromaprint uses URL-safe base64
+        raw = base64.b64decode(encoded + "=" * (-len(encoded) % 4))
+    except Exception:
+        return []
+
+    if len(raw) < 4:
+        return []
+
+    # Header: algorithm byte + 3-byte big-endian count
+    num_values = (raw[1] << 16) | (raw[2] << 8) | raw[3]
+
+    if num_values <= 0 or num_values > 200000:
+        return []
+
+    reader = _BitReader(raw[4:])
+    values = [0] * num_values
+
+    # Decode 16 groups (each controls 2 bits of the 32-bit fingerprint)
+    for group in range(16):
+        # Phase 1: read "changed" bits (which positions have non-zero delta)
+        changed = [False] * num_values
+        for i in range(num_values):
+            if not reader.has_bits():
+                break
+            changed[i] = reader.read() == 1
+
+        # Phase 2: read delta values for changed positions
+        prev_value = 0
+        for i in range(num_values):
+            if not changed[i]:
+                # Value unchanged, carry forward
+                values[i] |= (prev_value & 3) << (group * 2)
+                continue
+            if not reader.has_bits():
+                values[i] |= (prev_value & 3) << (group * 2)
+                continue
+
+            exceptional = reader.read()
+            if exceptional:
+                # Read unary-coded value (count of 1-bits before 0 terminator)
+                v = 0
+                while reader.has_bits() and reader.read() == 1:
+                    v += 1
+                delta = v + 2
+            else:
+                delta = 1
+
+            # Zigzag decode: odd -> negative, even -> positive
+            if delta & 1:
+                prev_value -= (delta + 1) >> 1
+            else:
+                prev_value += delta >> 1
+
+            values[i] |= (prev_value & 3) << (group * 2)
+
+    # Convert from gray code to binary
+    result = []
+    for v in values:
+        # Unsigned 32-bit mask
+        v &= 0xFFFFFFFF
+        v ^= (v >> 1)
+        result.append(v)
+
+    return result
+
+
+def fingerprint_similarity(fp1_encoded: str, fp2_encoded: str) -> float:
+    """Compute similarity between two Chromaprint fingerprint strings.
+
+    Decodes the compressed fingerprints, then computes bit-level similarity
+    using Hamming distance on the overlapping portion of the integer arrays.
+    Applies a length penalty when arrays differ significantly in size (which
+    accounts for different video durations).
+
+    Returns a float from 0.0 (completely different) to 1.0 (identical).
+    A threshold of ~0.7 is appropriate for detecting duplicates with some
+    tolerance for quality differences and length variations.
+    """
+    fp1 = decode_chromaprint(fp1_encoded)
+    fp2 = decode_chromaprint(fp2_encoded)
+
+    if not fp1 or not fp2:
+        return 0.0
+
+    # Compare the overlapping portion
+    compare_len = min(len(fp1), len(fp2))
+    if compare_len == 0:
+        return 0.0
+
+    # Length ratio penalty -- very different lengths unlikely to be same song
+    length_ratio = compare_len / max(len(fp1), len(fp2))
+    if length_ratio < 0.4:
+        return 0.0
+
+    matching_bits = 0
+    total_bits = compare_len * 32
+
+    for i in range(compare_len):
+        xor = fp1[i] ^ fp2[i]
+        matching_bits += 32 - bin(xor & 0xFFFFFFFF).count("1")
+
+    raw_similarity = matching_bits / total_bits if total_bits > 0 else 0.0
+    return raw_similarity * length_ratio

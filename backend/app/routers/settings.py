@@ -673,6 +673,128 @@ def get_startup_status():
         return {"registered": False, "command": None}
 
 
+# ---------------------------------------------------------------------------
+# Archive Management
+# ---------------------------------------------------------------------------
+
+class ArchiveItemOut(BaseModel):
+    path: str
+    folder: str
+    reason: str = "edit"
+    artist: str = ""
+    title: str = ""
+    video_id: Optional[int] = None
+    archived_at: str = ""
+    file_size_bytes: int = 0
+
+
+@router.get("/archive-items", response_model=List[ArchiveItemOut])
+def list_archive_items():
+    """List all items in the archive directory with manifest metadata."""
+    from app.config import get_settings as _get_settings
+    from app.routers.video_editor import _MANIFEST_NAME, _VIDEO_EXTS
+    _settings = _get_settings()
+
+    results: list[dict] = []
+    for lib_root in _settings.get_all_library_dirs():
+        archive_dir = os.path.join(lib_root, "_archive")
+        if not os.path.isdir(archive_dir):
+            continue
+        for root, _dirs, fnames in os.walk(archive_dir):
+            video_file = None
+            for fn in fnames:
+                if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
+                    video_file = os.path.join(root, fn)
+                    break
+            if not video_file:
+                continue
+            # Read manifest if present
+            manifest_path = os.path.join(root, _MANIFEST_NAME)
+            meta: dict = {}
+            if os.path.isfile(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    pass
+            results.append({
+                "path": video_file,
+                "folder": root,
+                "reason": meta.get("archive_reason", "edit"),
+                "artist": meta.get("artist", ""),
+                "title": meta.get("title", ""),
+                "video_id": meta.get("video_id"),
+                "archived_at": meta.get("archived_at", ""),
+                "file_size_bytes": meta.get("file_size_bytes", 0)
+                                   or (os.path.getsize(video_file) if os.path.isfile(video_file) else 0),
+            })
+    results.sort(key=lambda r: r.get("archived_at", ""), reverse=True)
+    return results
+
+
+class DeleteArchiveRequest(BaseModel):
+    folders: List[str]
+
+
+@router.post("/archive-delete")
+def delete_archive_items(body: DeleteArchiveRequest):
+    """Delete specific archive folders."""
+    deleted = 0
+    errors: list[str] = []
+    from app.config import get_settings as _get_settings
+    _settings = _get_settings()
+    # Build set of allowed archive roots for path traversal protection
+    allowed_roots = set()
+    for lib_root in _settings.get_all_library_dirs():
+        allowed_roots.add(os.path.normcase(os.path.normpath(os.path.join(lib_root, "_archive"))))
+
+    for folder in body.folders:
+        norm_folder = os.path.normcase(os.path.normpath(folder))
+        # Validate the folder is inside an archive directory
+        if not any(norm_folder.startswith(ar + os.sep) or norm_folder == ar for ar in allowed_roots):
+            errors.append(f"Not inside archive: {folder}")
+            continue
+        if os.path.isdir(folder):
+            try:
+                import shutil as _shutil
+                _shutil.rmtree(folder)
+                deleted += 1
+            except OSError as e:
+                errors.append(f"{folder}: {e}")
+        else:
+            errors.append(f"Not found: {folder}")
+    return {"deleted": deleted, "errors": errors}
+
+
+@router.post("/archive-clear")
+def clear_archive():
+    """Delete ALL items in the archive directory."""
+    from app.config import get_settings as _get_settings
+    _settings = _get_settings()
+    deleted = 0
+    errors: list[str] = []
+    for lib_root in _settings.get_all_library_dirs():
+        archive_dir = os.path.join(lib_root, "_archive")
+        if not os.path.isdir(archive_dir):
+            continue
+        for entry in os.listdir(archive_dir):
+            entry_path = os.path.join(archive_dir, entry)
+            if os.path.isdir(entry_path):
+                try:
+                    import shutil as _shutil
+                    _shutil.rmtree(entry_path)
+                    deleted += 1
+                except OSError as e:
+                    errors.append(f"{entry_path}: {e}")
+            elif os.path.isfile(entry_path):
+                try:
+                    os.remove(entry_path)
+                    deleted += 1
+                except OSError as e:
+                    errors.append(f"{entry_path}: {e}")
+    return {"deleted": deleted, "errors": errors}
+
+
 @router.post("/startup")
 def configure_startup(db: Session = Depends(get_db)):
     """Add or remove Playarr from Windows startup based on current settings."""

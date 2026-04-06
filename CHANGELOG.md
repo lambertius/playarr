@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.8.0] - 2026-04-06
+
+### Added
+- **Review Queue: Rename Dismiss & Scan Modes** — rename review items can now be dismissed so they don't re-flag on future scans; a "New / All" toggle on the Scan Renames button lets you choose between scanning only new mismatches (default) or re-scanning all files including previously dismissed items
+- **Startup Rename Scan** — optional setting to automatically scan for naming convention mismatches when the server starts, populating the Review Queue; previously dismissed items are skipped
+- **Settings: Rename Scan on Startup Toggle** — new toggle in Server settings to enable/disable automatic rename scanning at launch, with tooltip explaining behaviour
+
+### Fixed
+- **Queue: False "Stuck" Status on Completed Jobs** — completed jobs (redownloads, normalizations, metadata scrapes, exports) were incorrectly showing a red "Stuck" badge due to case-sensitive terminal step matching and overly broad finalizing detection; the "Stuck" status has been removed entirely and replaced with clear "Complete" / "Finalising" states scoped only to import/rescan pipelines that have genuine deferred post-processing tasks
+
+### Removed
+- **Settings: Bulk Rename Section** — removed the duplicate bulk rename UI from the Settings page; this functionality is better placed in the Review Queue where it already exists with single and batch actions
+
 ## [1.7.0] - 2026-04-06
 
 ### Added

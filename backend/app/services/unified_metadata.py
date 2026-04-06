@@ -916,6 +916,9 @@ def resolve_metadata_unified(
 
             # Apply corrections from final review (only high-confidence changes)
             MIN_FIELD_CONFIDENCE = 0.7
+            # Lower threshold for AI-generated plot when no existing plot —
+            # any generated plot is better than nothing.
+            MIN_PLOT_GENERATE_CONFIDENCE = 0.4
             changes_applied = []
 
             for field_name in ("artist", "title", "album", "year", "genres", "plot"):
@@ -923,7 +926,13 @@ def resolve_metadata_unified(
                 if proposed is None:
                     continue
                 field_conf = ai_review_result.field_scores.get(field_name, 0.0)
-                if field_conf < MIN_FIELD_CONFIDENCE:
+
+                # Use lower confidence threshold for AI-generated plots
+                # when no existing plot exists.
+                _effective_min_conf = MIN_FIELD_CONFIDENCE
+                if field_name == "plot" and not metadata.get("plot"):
+                    _effective_min_conf = MIN_PLOT_GENERATE_CONFIDENCE
+                if field_conf < _effective_min_conf:
                     continue
 
                 # MusicBrainz parent-album resolution is authoritative;
@@ -1003,6 +1012,38 @@ def resolve_metadata_unified(
                 for c in changes_applied:
                     _log(f"  {c}")
                     pipeline_log.append(f"ai_review_change:{c}")
+
+            # ── Process proposed removals ──
+            # The AI can recommend removing specific fields when the scraped
+            # value is incorrect and no correct replacement was found.
+            # This handles the case where a previous scrape found a wrong
+            # value that should be cleared rather than kept.
+            _REMOVABLE_FIELDS = {"album", "year", "genres", "plot"}
+            for _rm_field, _rm_reason in (ai_review_result.proposed_removals or {}).items():
+                if _rm_field not in _REMOVABLE_FIELDS:
+                    _log(f"AI Final Review: ignoring removal of non-removable "
+                         f"field '{_rm_field}'")
+                    continue
+                _rm_current = metadata.get(_rm_field)
+                if not _rm_current:
+                    continue  # Already empty, nothing to remove
+
+                # MB release-group is authoritative for album — don't remove
+                if _rm_field == "album" and metadata.get("mb_album_release_group_id"):
+                    _log(f"AI Final Review: skipping removal of album "
+                         f"(MB release-group is authoritative): "
+                         f"keeping '{_rm_current}'")
+                    continue
+
+                metadata[_rm_field] = None
+                _log(f"AI Final Review: removed {_rm_field} "
+                     f"(was '{_rm_current}'): {_rm_reason}")
+                pipeline_log.append(
+                    f"ai_review_removal:{_rm_field}:{_rm_reason}"
+                )
+                changes_applied.append(
+                    f"{_rm_field}: '{_rm_current}' → removed ({_rm_reason})"
+                )
 
             # Handle artwork rejection — only clear image_url when the AI
             # actually reviewed artwork and rejected it.  When the rejection
@@ -1159,6 +1200,7 @@ def resolve_metadata_unified(
     metadata["ai_final_review"] = {
         "corrections": ai_review_result.changes if ai_review_result else [],
         "overrides": ai_review_result.scraper_overrides if ai_review_result else [],
+        "proposed_removals": ai_review_result.proposed_removals if ai_review_result else {},
         "artwork_approved": ai_review_result.artwork_approved if ai_review_result else True,
         "confidence": ai_review_result.overall_confidence if ai_review_result else None,
         "error": (ai_review_result.error or None) if ai_review_result else None,

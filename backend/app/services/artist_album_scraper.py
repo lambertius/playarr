@@ -260,17 +260,55 @@ def search_album_wikipedia(album: str, artist: str) -> Optional[str]:
             # De-score song/single pages
             if "(song)" in pt_lower or "(single)" in pt_lower:
                 score -= 3
+            # De-score film / movie / TV pages
+            if any(tag in pt_lower for tag in [
+                "(film)", "(movie)", "(tv series)", "(television)",
+                "(tv show)", "(miniseries)",
+            ]):
+                score -= 10
+            if any(fkw in snippet_lower for fkw in [
+                "is a film", "is a movie", "directed by",
+                "is a television", "is a tv",
+            ]):
+                score -= 5
             candidates.append({"title": title, "score": score})
 
     if not candidates:
         return None
     candidates.sort(key=lambda c: c["score"], reverse=True)
-    best = candidates[0]
-    if best["score"] < 1:
-        return None
-    logger.info(f"Album Wikipedia match: '{best['title']}' (score={best['score']})")
-    from app.services.metadata_resolver import _build_wikipedia_url
-    return _build_wikipedia_url(best['title'])
+
+    # Similarity gate: iterate candidates and require the cleaned title
+    # to be a close match for the album name.  Without this, substring
+    # matches like "The Modern Lovers (album)" pass for album "Lovers".
+    from difflib import SequenceMatcher as _SM
+    from app.services.metadata_resolver import _build_wikipedia_url, _get_wiki_short_description
+    for cand in candidates:
+        if cand["score"] < 1:
+            break
+        clean_title = re.sub(r"\s*\([^)]*\)\s*$", "", cand["title"]).strip()
+        sim = _SM(None, album_lower, clean_title.lower()).ratio()
+        if sim < 0.7:
+            logger.info(
+                f"Album Wikipedia: '{cand['title']}' title similarity "
+                f"{sim:.2f} < 0.7 for '{album}', skipping"
+            )
+            continue
+        # Wikidata guard: reject pages that are films, TV shows, etc.
+        wd_desc = _get_wiki_short_description(cand["title"])
+        if wd_desc:
+            wd_lower = wd_desc.lower()
+            if any(fk in wd_lower for fk in [
+                "film", "movie", "television series", "tv series",
+                "miniseries", "telenovela",
+            ]):
+                logger.info(
+                    f"Album Wikipedia: '{cand['title']}' rejected — "
+                    f"Wikidata desc '{wd_desc}' indicates film/TV"
+                )
+                continue
+        logger.info(f"Album Wikipedia match: '{cand['title']}' (score={cand['score']}, sim={sim:.2f})")
+        return _build_wikipedia_url(cand['title'])
+    return None
 
 
 def scrape_album_artwork(album: str, artist: str, *, wiki_url: Optional[str] = None) -> Dict[str, Any]:

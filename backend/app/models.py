@@ -145,6 +145,10 @@ class VideoItem(Base):
     # JSON list: [93, 142]  Checked by duplicate_scan_task to skip known non-duplicates.
     dismissed_duplicate_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
+    # Rename dismissed — user has reviewed and accepted the current filename.
+    # Prevents re-flagging on automatic rename scans.
+    rename_dismissed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+
     # File system
     folder_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     file_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)

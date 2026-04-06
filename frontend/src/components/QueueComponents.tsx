@@ -19,14 +19,18 @@ import { StatusBadge } from "@/components/Badges";
 
 // ─── Helpers ──────────────────────────────────────────────
 
-/** True only when deferred tasks are actively running (updated within last 60s). */
+/** Job types whose pipelines dispatch deferred post-processing tasks. */
+const DEFERRED_JOB_TYPES = new Set(["import_url", "rescan", "library_import_video", "playlist_import"]);
+
+/** True only when deferred tasks are actively running (updated within last 2 min). */
 function isJobFinalizing(job: JobSummary): boolean {
-  if (job.job_type.startsWith("video_editor_")) return false;
+  if (!DEFERRED_JOB_TYPES.has(job.job_type)) return false;
   if (job.status !== "complete" || !job.current_step) return false;
-  if (job.current_step === "Import complete" || job.current_step.startsWith("All ") || job.current_step.startsWith("Pending review")) return false;
+  const stepLower = job.current_step.toLowerCase();
+  if (stepLower.endsWith("complete") || job.current_step.startsWith("All ") || job.current_step.startsWith("Pending review")) return false;
   if (!job.updated_at) return false;
   const updMs = new Date(job.updated_at.endsWith("Z") ? job.updated_at : job.updated_at + "Z").getTime();
-  return (Date.now() - updMs) < 60_000;
+  return (Date.now() - updMs) < 120_000;
 }
 
 function formatSpeed(bytesPerSec: number): string {
@@ -668,23 +672,17 @@ export function JobCard({
   const active = isActiveJob(job.status);
   const isInterrupted = job.status === "failed" && !!job.error_message && job.error_message.includes("Server restarted");
   const isFinalizing = isJobFinalizing(job);
-  const isStuck = isFinalizing && !!job.completed_at && (() => {
-    const toMs = (ts: string) => new Date(ts.endsWith("Z") ? ts : ts + "Z").getTime();
-    const latestMs = Math.max(toMs(job.completed_at!), job.updated_at ? toMs(job.updated_at) : 0);
-    return (Date.now() - latestMs) / 60_000 > 1;
-  })();
-  const canRetry = job.status === "failed";
-  const canCancel = active || isStuck;
+  const canRetry = job.status === "failed" || job.status === "cancelled";
+  const canCancel = active || isFinalizing;
 
   return (
     <div
       className={cn(
         "card transition-all duration-200",
         active && "border-accent/30",
-        isStuck && "border-red-500/30",
         isInterrupted && "border-amber-500/30",
         job.status === "failed" && !isInterrupted && "border-red-500/30",
-        job.status === "complete" && !isStuck && "border-surface-border",
+        job.status === "complete" && "border-surface-border",
       )}
     >
       {/* Header row */}
@@ -735,25 +733,17 @@ export function JobCard({
               {job.retry_count > 0 && (
                 <RetryCountdown retryCount={job.retry_count} />
               )}
-              {job.current_step && (active || (job.status === "complete" && !job.current_step.endsWith("complete"))) && (
+              {job.current_step && (active || (job.status === "complete" && !job.current_step.toLowerCase().endsWith("complete"))) && (
                 <JobStageBadge step={job.current_step} />
               )}
               <JobElapsed job={job} />
-              <StatusBadge status={job.status} currentStep={job.current_step} errorMessage={job.error_message} completedAt={job.completed_at} updatedAt={job.updated_at} />
+              <StatusBadge status={job.status} jobType={job.job_type} currentStep={job.current_step} errorMessage={job.error_message} completedAt={job.completed_at} updatedAt={job.updated_at} />
             </div>
           </div>
 
           {/* Progress bars */}
           {(active || job.status === "complete") && (
             <JobProgressBars job={job} telemetry={telemetry} />
-          )}
-
-          {/* Stuck finalizing warning */}
-          {isStuck && (
-            <div className="flex items-center gap-1.5 text-[11px] text-red-400">
-              <AlertTriangle size={12} />
-              <span>Background tasks appear stuck — the server will auto-recover this shortly.</span>
-            </div>
           )}
 
           {/* Skip/fail reason — visible without expanding */}

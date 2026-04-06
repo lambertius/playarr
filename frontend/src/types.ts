@@ -339,6 +339,23 @@ export interface NormalizationRecord {
   created_at: string;
 }
 
+export interface ArchiveItem {
+  path: string;
+  folder: string;
+  reason: string;
+  artist: string;
+  title: string;
+  video_id: number | null;
+  archived_at: string;
+  file_size_bytes: number;
+}
+
+export interface QualityBucket {
+  quality: string;
+  count: number;
+  video_ids: number[];
+}
+
 // ─── Facet Buckets ────────────────────────────────────────
 export interface FacetBucket {
   [key: string]: string | number | null;
@@ -386,6 +403,7 @@ export interface FacetFilterParams {
   song_rating?: number;
   video_rating?: number;
   genre?: string;
+  quality?: string;
 }
 
 export interface PartyModeExclusions {
@@ -448,6 +466,7 @@ export interface LibraryParams {
   import_method?: string;
   song_rating?: number;
   video_rating?: number;
+  quality?: string;
   sort_by?: string;
   sort_dir?: "asc" | "desc";
 }

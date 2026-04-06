@@ -12,6 +12,15 @@ const VERSION_TYPES = [
 
 const RATING_OPTIONS = [1, 2, 3, 4, 5] as const;
 
+const QUALITY_OPTIONS = [
+  { value: "360p", label: "360p" },
+  { value: "480p", label: "480p" },
+  { value: "720p", label: "720p" },
+  { value: "1080p", label: "1080p" },
+  { value: "2K", label: "2K" },
+  { value: "4K", label: "4K" },
+] as const;
+
 interface FilterBarProps {
   filters: FacetFilterParams;
   onChange: (filters: FacetFilterParams) => void;
@@ -23,11 +32,13 @@ interface FilterBarProps {
   hideRatings?: boolean;
   /** Hide genre filter (on genres page) */
   hideGenre?: boolean;
+  /** Hide quality filter (on quality page) */
+  hideQuality?: boolean;
 }
 
 function hasActiveFilters(f: FacetFilterParams): boolean {
   return !!(f.version_type || f.artist || f.year_from || f.year_to ||
-            f.song_rating || f.video_rating || f.genre);
+            f.song_rating || f.video_rating || f.genre || f.quality);
 }
 
 function activeFilterCount(f: FacetFilterParams): number {
@@ -38,11 +49,12 @@ function activeFilterCount(f: FacetFilterParams): number {
   if (f.song_rating) n++;
   if (f.video_rating) n++;
   if (f.genre) n++;
+  if (f.quality) n++;
   return n;
 }
 
 export function FilterBar({
-  filters, onChange, hideArtist, hideYearRange, hideRatings, hideGenre,
+  filters, onChange, hideArtist, hideYearRange, hideRatings, hideGenre, hideQuality,
 }: FilterBarProps) {
   const [open, setOpen] = useState(false);
   const active = hasActiveFilters(filters);
@@ -183,6 +195,25 @@ export function FilterBar({
                 <option value="">Any</option>
                 {RATING_OPTIONS.map((r) => (
                   <option key={r} value={r}>{"★".repeat(r)}</option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          {/* Quality */}
+          {!hideQuality && (
+            <label className="flex flex-col gap-1 text-xs text-text-muted">
+              Quality
+              <select
+                value={filters.quality ?? ""}
+                onChange={(e) =>
+                  set({ quality: e.target.value || undefined })
+                }
+                className="input-field w-auto py-1 text-xs"
+              >
+                <option value="">Any</option>
+                {QUALITY_OPTIONS.map((q) => (
+                  <option key={q.value} value={q.value}>{q.label}</option>
                 ))}
               </select>
             </label>

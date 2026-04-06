@@ -30,6 +30,38 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/library", tags=["Library"])
 
+# Quality bucket boundaries (upper limits, inclusive) — resolutions in-between
+# round UP to the next bucket.  e.g. 944p → 1080p bucket.
+QUALITY_BUCKETS = [
+    (360, "360p"),
+    (480, "480p"),
+    (720, "720p"),
+    (1080, "1080p"),
+    (1440, "2K"),
+    (999999, "4K"),
+]
+QUALITY_LABELS = [label for _, label in QUALITY_BUCKETS]
+
+
+def _height_to_quality_bucket(height: int | None) -> str | None:
+    """Map a pixel height to the simplified quality bucket label."""
+    if height is None or height <= 0:
+        return None
+    for upper, label in QUALITY_BUCKETS:
+        if height <= upper:
+            return label
+    return "4K"
+
+
+def _quality_bucket_range(bucket: str) -> tuple[int, int] | None:
+    """Return the (min_height, max_height] range for a quality bucket label."""
+    prev_upper = 0
+    for upper, label in QUALITY_BUCKETS:
+        if label == bucket:
+            return (prev_upper + 1, upper)
+        prev_upper = upper
+    return None
+
 
 def _weighted_shuffle(tracks: list[dict]) -> list[dict]:
     """Weighted shuffle: items with higher playCount are pushed toward the end.
@@ -67,6 +99,7 @@ def list_videos(
     import_method: Optional[str] = Query(None, description="Filter by import method: url, import, scanned"),
     song_rating: Optional[int] = Query(None, description="Filter by song rating value"),
     video_rating: Optional[int] = Query(None, description="Filter by video rating value"),
+    quality: Optional[str] = Query(None, description="Filter by quality bucket: 360p, 480p, 720p, 1080p, 2K, 4K"),
     sort_by: str = Query("artist", pattern="^(artist|title|year|created_at|updated_at)$"),
     sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
@@ -144,6 +177,14 @@ def list_videos(
     if video_rating is not None:
         query = query.filter(VideoItem.video_rating == video_rating)
 
+    if quality:
+        qr = _quality_bucket_range(quality)
+        if qr:
+            query = (
+                query.join(QualitySignature, QualitySignature.video_id == VideoItem.id)
+                .filter(QualitySignature.height >= qr[0], QualitySignature.height <= qr[1])
+            )
+
     # Total count
     total = query.count()
     total_pages = math.ceil(total / page_size) if total > 0 else 1
@@ -210,7 +251,7 @@ def _is_genre_blacklisted(db: Session, genre_name: str) -> bool:
 def _apply_facet_filters(query, *, version_type=None, artist=None,
                          year_from=None, year_to=None,
                          song_rating=None, video_rating=None,
-                         genre=None):
+                         genre=None, quality=None):
     """Apply common browse-page filters to a VideoItem query."""
     if version_type:
         query = query.filter(VideoItem.version_type == version_type)
@@ -226,6 +267,13 @@ def _apply_facet_filters(query, *, version_type=None, artist=None,
         query = query.filter(VideoItem.video_rating == video_rating)
     if genre:
         query = query.join(VideoItem.genres).filter(Genre.name.ilike(f"%{genre}%"))
+    if quality:
+        qr = _quality_bucket_range(quality)
+        if qr:
+            query = (
+                query.join(QualitySignature, QualitySignature.video_id == VideoItem.id)
+                .filter(QualitySignature.height >= qr[0], QualitySignature.height <= qr[1])
+            )
     return query
 
 
@@ -361,6 +409,7 @@ def list_artists(
     song_rating: Optional[int] = None,
     video_rating: Optional[int] = None,
     genre: Optional[str] = None,
+    quality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """List all unique artists with video count and video IDs."""
@@ -374,7 +423,7 @@ def list_artists(
     query = _apply_facet_filters(query, version_type=version_type,
                                  year_from=year_from, year_to=year_to,
                                  song_rating=song_rating, video_rating=video_rating,
-                                 genre=genre)
+                                 genre=genre, quality=quality)
     results = query.group_by(VideoItem.artist).order_by(VideoItem.artist).all()
     return [
         {"artist": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
@@ -389,6 +438,7 @@ def list_years(
     song_rating: Optional[int] = None,
     video_rating: Optional[int] = None,
     genre: Optional[str] = None,
+    quality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """List all unique years with video count and video IDs."""
@@ -403,7 +453,7 @@ def list_years(
     query = _apply_facet_filters(query, version_type=version_type,
                                  artist=artist,
                                  song_rating=song_rating, video_rating=video_rating,
-                                 genre=genre)
+                                 genre=genre, quality=quality)
     results = query.group_by(VideoItem.year).order_by(VideoItem.year.desc()).all()
     return [
         {"year": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
@@ -420,6 +470,7 @@ def list_genres(
     song_rating: Optional[int] = None,
     video_rating: Optional[int] = None,
     include_blacklisted: bool = False,
+    quality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """List all genres with video count and video IDs."""
@@ -427,7 +478,8 @@ def list_genres(
     base = _apply_facet_filters(base, version_type=version_type,
                                 artist=artist,
                                 year_from=year_from, year_to=year_to,
-                                song_rating=song_rating, video_rating=video_rating)
+                                song_rating=song_rating, video_rating=video_rating,
+                                quality=quality)
     filtered_ids = base.subquery()
     query = (
         db.query(
@@ -461,6 +513,7 @@ def list_albums(
     song_rating: Optional[int] = None,
     video_rating: Optional[int] = None,
     genre: Optional[str] = None,
+    quality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """List all unique albums with video count and video IDs.
@@ -485,7 +538,7 @@ def list_albums(
     eq = _apply_facet_filters(eq, version_type=version_type, artist=artist,
                               year_from=year_from, year_to=year_to,
                               song_rating=song_rating, video_rating=video_rating,
-                              genre=genre)
+                              genre=genre, quality=quality)
     entity_rows = eq.group_by(VideoItem.album_entity_id).order_by(VideoItem.album).all()
 
     results = []
@@ -514,7 +567,7 @@ def list_albums(
     fq = _apply_facet_filters(fq, version_type=version_type, artist=artist,
                               year_from=year_from, year_to=year_to,
                               song_rating=song_rating, video_rating=video_rating,
-                              genre=genre)
+                              genre=genre, quality=quality)
     fallback_rows = fq.group_by(VideoItem.album).order_by(VideoItem.album).all()
 
     for r in fallback_rows:
@@ -537,6 +590,7 @@ def list_song_ratings(
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
     genre: Optional[str] = None,
+    quality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """List all song ratings with video count and video IDs."""
@@ -551,7 +605,7 @@ def list_song_ratings(
     query = _apply_facet_filters(query, version_type=version_type,
                                  artist=artist,
                                  year_from=year_from, year_to=year_to,
-                                 genre=genre)
+                                 genre=genre, quality=quality)
     results = query.group_by(VideoItem.song_rating).order_by(VideoItem.song_rating.desc()).all()
     return [
         {"rating": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
@@ -566,6 +620,7 @@ def list_video_ratings(
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
     genre: Optional[str] = None,
+    quality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """List all video ratings with video count and video IDs."""
@@ -580,12 +635,62 @@ def list_video_ratings(
     query = _apply_facet_filters(query, version_type=version_type,
                                  artist=artist,
                                  year_from=year_from, year_to=year_to,
-                                 genre=genre)
+                                 genre=genre, quality=quality)
     results = query.group_by(VideoItem.video_rating).order_by(VideoItem.video_rating.desc()).all()
     return [
         {"rating": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
         for r in results
     ]
+
+
+@router.get("/quality-buckets", response_model=List[dict])
+def list_quality_buckets(
+    version_type: Optional[str] = None,
+    artist: Optional[str] = None,
+    year_from: Optional[int] = None,
+    year_to: Optional[int] = None,
+    song_rating: Optional[int] = None,
+    video_rating: Optional[int] = None,
+    genre: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List quality buckets (360p..4K) with video count and IDs."""
+    from sqlalchemy import case, literal
+
+    # Build a CASE expression that maps QualitySignature.height -> bucket label
+    bucket_expr = case(
+        *[(QualitySignature.height <= upper, literal(label)) for upper, label in QUALITY_BUCKETS],
+        else_=literal("4K"),
+    ).label("bucket")
+
+    query = (
+        db.query(
+            bucket_expr,
+            func.count(VideoItem.id),
+            func.group_concat(VideoItem.id),
+        )
+        .join(QualitySignature, QualitySignature.video_id == VideoItem.id)
+        .filter(QualitySignature.height.isnot(None), QualitySignature.height > 0)
+    )
+    query = _apply_facet_filters(query, version_type=version_type,
+                                 artist=artist,
+                                 year_from=year_from, year_to=year_to,
+                                 song_rating=song_rating, video_rating=video_rating,
+                                 genre=genre)
+    results = query.group_by("bucket").all()
+
+    # Sort by the defined bucket order
+    order = {label: idx for idx, (_, label) in enumerate(QUALITY_BUCKETS)}
+    rows = [
+        {
+            "quality": r[0],
+            "count": r[1],
+            "video_ids": [int(x) for x in r[2].split(",")] if r[2] else [],
+        }
+        for r in results
+    ]
+    rows.sort(key=lambda b: order.get(b["quality"], 999))
+    return rows
 
 
 # ─── Orphan folder detection & cleanup ────────────────────

@@ -460,6 +460,8 @@ def apply_match(video_id: int, body: ApplyRequest, db: Session = Depends(_get_db
 def _infer_review_category(vi: VideoItem) -> str:
     """Infer a review category from review_reason if review_category is not set."""
     reason = (vi.review_reason or "").lower()
+    if "normalization failed" in reason or "audio normalization" in reason:
+        return "normalization"
     if "naming convention" in reason or "rename" in reason:
         return "rename"
     if "duplicate import skipped" in reason:
@@ -647,6 +649,8 @@ def list_review_queue(
     # Use a case expression to infer category for items that haven't been back-filled
     cat_expr = case(
         (VideoItem.review_category.isnot(None), VideoItem.review_category),
+        (VideoItem.review_reason.like("%normalization failed%"), "normalization"),
+        (VideoItem.review_reason.like("%Audio normalization%"), "normalization"),
         (VideoItem.review_reason.like("%naming convention%"), "rename"),
         (VideoItem.review_reason.like("%rename%"), "rename"),
         (VideoItem.review_reason.like("%Duplicate import skipped%"), "import_error"),
@@ -734,6 +738,9 @@ def batch_dismiss(
         # For duplicates: persist dismissed_duplicate_ids so pairs aren't re-flagged
         if vi.review_category == "duplicate" and vi.review_reason:
             _persist_duplicate_dismissal(vi, db)
+        # For renames: persist rename_dismissed so the item isn't re-flagged
+        if vi.review_category == "rename":
+            vi.rename_dismissed = True
         _record_review_history(vi, "dismissed")
         vi.review_status = "none"
         vi.review_reason = None
@@ -860,7 +867,10 @@ def batch_scrape_from_review(
 
 
 @review_router.post("/scan-renames")
-def scan_renames(db: Session = Depends(_get_db)):
+def scan_renames(
+    rescan_all: bool = Query(False, description="Re-scan ALL files including previously dismissed items"),
+    db: Session = Depends(_get_db),
+):
     """Scan library for videos whose file/folder names don't match
     the current naming convention and flag them for review."""
     import os
@@ -868,11 +878,23 @@ def scan_renames(db: Session = Depends(_get_db)):
     from app.config import get_settings
 
     settings = get_settings()
-    videos = db.query(VideoItem).filter(
+
+    # If rescan_all, clear all rename_dismissed flags first
+    if rescan_all:
+        cleared = db.query(VideoItem).filter(VideoItem.rename_dismissed == True).update(
+            {VideoItem.rename_dismissed: False}, synchronize_session="fetch"
+        )
+        if cleared:
+            db.commit()
+
+    query = db.query(VideoItem).filter(
         VideoItem.folder_path.isnot(None),
         VideoItem.file_path.isnot(None),
         VideoItem.review_status.in_(["none", "reviewed"]),
-    ).all()
+    )
+    if not rescan_all:
+        query = query.filter(VideoItem.rename_dismissed == False)
+    videos = query.all()
 
     flagged = 0
     for v in videos:
@@ -953,6 +975,10 @@ def dismiss_review_item(
     # For duplicates: persist dismissed_duplicate_ids so the pair isn't re-flagged
     if vi.review_category == "duplicate" and vi.review_reason:
         _persist_duplicate_dismissal(vi, db)
+
+    # For renames: persist rename_dismissed so the item isn't re-flagged
+    if vi.review_category == "rename":
+        vi.rename_dismissed = True
 
     _record_review_history(vi, "dismissed")
     vi.review_status = "none"
