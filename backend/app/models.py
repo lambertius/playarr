@@ -120,7 +120,7 @@ class VideoItem(Base):
         ForeignKey("tracks.id", ondelete="SET NULL"), nullable=True, index=True,
     )
 
-    # Version detection — cover / live / alternate / normal
+    # Version detection — cover / live / alternate / remix / acoustic / normal
     version_type: Mapped[str] = mapped_column(
         String(20), default="normal", server_default="normal", nullable=False, index=True,
     )
@@ -128,6 +128,16 @@ class VideoItem(Base):
     original_artist: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     original_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     related_versions: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # [{video_id, label}]
+
+    # Hierarchical version relationship — link to parent video
+    # e.g. a remix of a cover links to the cover, which links to the original
+    parent_video_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("video_items.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+
+    # Canonical track linking provenance + confidence
+    canonical_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 0.0–1.0
+    canonical_provenance: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # musicbrainz/fingerprint/import/ai/user
 
     # Review routing
     review_status: Mapped[str] = mapped_column(
@@ -230,6 +240,12 @@ class VideoItem(Base):
     artist_entity = relationship("ArtistEntity", foreign_keys=[artist_entity_id])
     album_entity = relationship("AlbumEntity", foreign_keys=[album_entity_id])
     track_entity = relationship("TrackEntity", back_populates="videos", foreign_keys=[track_id])
+
+    # Hierarchical parent/child version relationships
+    parent_video = relationship(
+        "VideoItem", remote_side="VideoItem.id",
+        foreign_keys=[parent_video_id],
+    )
 
     def __repr__(self):
         return f"<VideoItem {self.id}: {self.artist} - {self.title}>"

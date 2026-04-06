@@ -5,6 +5,7 @@ import {
   GitCompare, FolderInput, Link2, ClipboardList,
   Check, X, Tag, RefreshCw, ChevronDown, LayoutList, FileEdit,
   Trash2, ScanSearch, FolderSearch, Download, Volume2, Copy,
+  Unlink2, AlertTriangle, HelpCircle,
 } from "lucide-react";
 import type { ReviewParams, ReviewItem, DuplicateVideoSummary } from "@/types";
 import {
@@ -23,7 +24,7 @@ import { ScrapeOptionsModal, type ScrapeOptions } from "@/components/ScrapeOptio
 import { ScanOptionsModal } from "@/components/ScanOptionsModal";
 
 // ── Types ───────────────────────────────────────────────
-type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned" | "normalization";
+type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned" | "normalization" | "canonical_missing" | "canonical_conflict" | "canonical_low_confidence";
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
@@ -88,6 +89,24 @@ const CATEGORY_CONFIG: Record<ReviewCategory, {
     color: "bg-pink-500/10 text-pink-400",
     tooltip: "Videos where audio normalization (LUFS adjustment) failed due to codec incompatibility. Redownload to get a compatible format, or dismiss if acceptable.",
   },
+  canonical_missing: {
+    label: "No Canonical Track",
+    icon: <Unlink2 size={16} />,
+    color: "bg-yellow-500/10 text-yellow-400",
+    tooltip: "Videos not linked to a canonical track. Link to an existing track or create a new one to establish version relationships.",
+  },
+  canonical_conflict: {
+    label: "Canonical Conflict",
+    icon: <AlertTriangle size={16} />,
+    color: "bg-red-500/10 text-red-400",
+    tooltip: "Videos linked to a canonical track with mismatched metadata. Review and correct the canonical link or track details.",
+  },
+  canonical_low_confidence: {
+    label: "Low Canonical Confidence",
+    icon: <HelpCircle size={16} />,
+    color: "bg-orange-500/10 text-orange-400",
+    tooltip: "Videos with an auto-linked canonical track but low match confidence. Verify the link is correct or reassign.",
+  },
 };
 
 // ── Version type options ────────────────────────────────
@@ -96,6 +115,10 @@ const VERSION_TYPE_OPTIONS = [
   { value: "cover", label: "Cover" },
   { value: "live", label: "Live" },
   { value: "alternate", label: "Alternate" },
+  { value: "remix", label: "Remix" },
+  { value: "acoustic", label: "Acoustic" },
+  { value: "uncensored", label: "Uncensored" },
+  { value: "18+", label: "18+" },
 ];
 
 // ── Status badge ────────────────────────────────────────
@@ -617,6 +640,36 @@ export default function ReviewQueuePage() {
           tooltip={CATEGORY_CONFIG.normalization.tooltip}
           onClick={() => handleCategoryChange("normalization")}
           selected={categoryFilter === "normalization"}
+        />
+        <StatCard
+          icon={<Unlink2 size={16} />}
+          label="No Track"
+          value={categoryCounts.canonical_missing ?? 0}
+          active={(categoryCounts.canonical_missing ?? 0) > 0}
+          color="bg-yellow-500/10 text-yellow-400"
+          tooltip={CATEGORY_CONFIG.canonical_missing.tooltip}
+          onClick={() => handleCategoryChange("canonical_missing")}
+          selected={categoryFilter === "canonical_missing"}
+        />
+        <StatCard
+          icon={<AlertTriangle size={16} />}
+          label="Track Conflict"
+          value={categoryCounts.canonical_conflict ?? 0}
+          active={(categoryCounts.canonical_conflict ?? 0) > 0}
+          color="bg-red-500/10 text-red-400"
+          tooltip={CATEGORY_CONFIG.canonical_conflict.tooltip}
+          onClick={() => handleCategoryChange("canonical_conflict")}
+          selected={categoryFilter === "canonical_conflict"}
+        />
+        <StatCard
+          icon={<HelpCircle size={16} />}
+          label="Low Confidence"
+          value={categoryCounts.canonical_low_confidence ?? 0}
+          active={(categoryCounts.canonical_low_confidence ?? 0) > 0}
+          color="bg-orange-500/10 text-orange-400"
+          tooltip={CATEGORY_CONFIG.canonical_low_confidence.tooltip}
+          onClick={() => handleCategoryChange("canonical_low_confidence")}
+          selected={categoryFilter === "canonical_low_confidence"}
         />
       </div>
 

@@ -161,6 +161,9 @@ class VideoItemOut(BaseModel):
     original_artist: Optional[str] = None
     original_title: Optional[str] = None
     related_versions: Optional[list] = None
+    parent_video_id: Optional[int] = None
+    canonical_confidence: Optional[float] = None
+    canonical_provenance: Optional[str] = None
     review_status: str = "none"
     review_reason: Optional[str] = None
     processing_state: Optional[dict] = None
@@ -427,3 +430,62 @@ class ProcessingStateOut(BaseModel):
     description_generated: Optional[dict] = None
     filename_checked: Optional[dict] = None
     canonical_linked: Optional[dict] = None
+
+
+# ---------------------------------------------------------------------------
+# Canonical Track Operations
+# ---------------------------------------------------------------------------
+
+class CanonicalTrackUpdate(BaseModel):
+    """Manual canonical track edit (user override)."""
+    title: Optional[str] = None
+    artist_name: Optional[str] = None
+    album_name: Optional[str] = None
+    year: Optional[int] = None
+    is_cover: Optional[bool] = None
+    original_artist: Optional[str] = None
+    original_title: Optional[str] = None
+    genres: Optional[List[str]] = None
+
+
+class CanonicalTrackCreate(BaseModel):
+    """Create a new canonical track manually."""
+    title: str
+    artist_name: str
+    album_name: Optional[str] = None
+    year: Optional[int] = None
+    is_cover: bool = False
+    original_artist: Optional[str] = None
+    original_title: Optional[str] = None
+    genres: Optional[List[str]] = None
+
+
+class SetParentVideoRequest(BaseModel):
+    """Assign a parent video for hierarchical version chains."""
+    parent_video_id: Optional[int] = None  # None to unlink
+
+
+class LinkCanonicalRequest(BaseModel):
+    """Link a video to an existing canonical track."""
+    track_id: int
+
+
+class CanonicalMatchCandidate(BaseModel):
+    """A candidate match found by library scan."""
+    track_id: int
+    title: str
+    artist_name: Optional[str] = None
+    year: Optional[int] = None
+    match_source: str  # musicbrainz / fingerprint / fuzzy
+    confidence: float  # 0.0–1.0
+    video_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class CanonicalScanResult(BaseModel):
+    """Result of scanning library for canonical matches."""
+    video_id: int
+    current_track_id: Optional[int] = None
+    candidates: List[CanonicalMatchCandidate] = []

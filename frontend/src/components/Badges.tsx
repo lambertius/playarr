@@ -6,7 +6,10 @@ const versionConfig: Record<string, { label: string; className: string }> = {
   cover:       { label: "Cover",             className: "bg-orange-500/15 text-orange-400" },
   live:        { label: "Live",              className: "bg-purple-500/15 text-purple-400" },
   alternate:   { label: "Alternate Version", className: "bg-blue-500/15 text-blue-400" },
+  remix:       { label: "Remix",             className: "bg-cyan-500/15 text-cyan-400" },
+  acoustic:    { label: "Acoustic",          className: "bg-amber-500/15 text-amber-400" },
   uncensored:  { label: "Uncensored",        className: "bg-rose-500/15 text-rose-400" },
+  "18+":       { label: "18+",               className: "bg-red-500/15 text-red-400" },
 };
 
 interface VersionBadgeProps {

@@ -191,6 +191,83 @@ export function useDeleteSource(videoId: number) {
   });
 }
 
+// ── Canonical Track hooks ──
+
+export function useCanonicalScan(videoId: number) {
+  return useQuery({
+    queryKey: [...qk.video(videoId), "canonical-scan"],
+    queryFn: () => libraryApi.canonicalScan(videoId),
+    enabled: false, // Manual trigger only
+  });
+}
+
+export function useCanonicalLink(videoId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (trackId: number) => libraryApi.canonicalLink(videoId, trackId),
+    onSuccess: (updated) => {
+      qc.setQueryData(qk.video(videoId), updated);
+      qc.invalidateQueries({ queryKey: ["library"], exact: false, refetchType: "none" });
+    },
+  });
+}
+
+export function useCanonicalUnlink(videoId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => libraryApi.canonicalUnlink(videoId),
+    onSuccess: (updated) => {
+      qc.setQueryData(qk.video(videoId), updated);
+      qc.invalidateQueries({ queryKey: ["library"], exact: false, refetchType: "none" });
+    },
+  });
+}
+
+export function useCanonicalCreate(videoId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { title: string; artist_name?: string; album_name?: string; year?: number; is_cover?: boolean; original_artist?: string; original_title?: string; genres?: string[] }) =>
+      libraryApi.canonicalCreate(videoId, data),
+    onSuccess: (updated) => {
+      qc.setQueryData(qk.video(videoId), updated);
+      qc.invalidateQueries({ queryKey: ["library"], exact: false, refetchType: "none" });
+    },
+  });
+}
+
+export function useCanonicalEdit(videoId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { title?: string; artist_name?: string; album_name?: string; year?: number; is_cover?: boolean; original_artist?: string; original_title?: string; genres?: string[] }) =>
+      libraryApi.canonicalEdit(videoId, data),
+    onSuccess: (updated) => {
+      qc.setQueryData(qk.video(videoId), updated);
+      qc.invalidateQueries({ queryKey: ["library"], exact: false, refetchType: "none" });
+    },
+  });
+}
+
+export function useSetParentVideo(videoId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (parentVideoId: number | null) => libraryApi.setParentVideo(videoId, parentVideoId),
+    onSuccess: (updated) => {
+      qc.setQueryData(qk.video(videoId), updated);
+      qc.invalidateQueries({ queryKey: ["library"], exact: false, refetchType: "none" });
+    },
+  });
+}
+
+export function useScanCanonicalIssues() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => libraryApi.scanCanonicalIssues(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["review"] });
+    },
+  });
+}
+
 export function useUndoRescan(videoId: number) {
   const qc = useQueryClient();
   return useMutation({

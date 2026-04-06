@@ -13,6 +13,8 @@ const VERSION_TYPE_OPTIONS = [
   { value: "cover", label: "Cover" },
   { value: "live", label: "Live" },
   { value: "alternate", label: "Alternate" },
+  { value: "remix", label: "Remix" },
+  { value: "acoustic", label: "Acoustic" },
   { value: "uncensored", label: "Uncensored" },
   { value: "18+", label: "18+" },
 ];
