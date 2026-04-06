@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.9.2] - 2026-04-06
+
+### Fixed
+- **Review Queue: Tab Layout Overflow** — category stat cards could overflow their cells on narrower viewports; grid now scales to 12 columns at xl breakpoints and labels truncate cleanly instead of overflowing
+- **Duplicate Review: Orphaned Partner After Deletion** — deleting one video from a duplicate pair correctly cleared the deleted item but left the surviving partner flagged as a duplicate; the survivor now has its review flags cleared automatically when no undismissed partners remain
+
+### Added
+- **Sidebar: GitHub Sponsors Link** — unobtrusive "Support the project" link added to the sidebar footer
+
 ## [1.9.1] - 2026-04-06
 
 ### Fixed

@@ -188,10 +188,10 @@ function StatCard({ icon, label, value, active, color, tooltip, onClick, selecte
               : "bg-surface/50 border-surface-border text-text-muted hover:border-text-muted/40 hover:bg-surface-hover/60 hover:shadow-md hover:scale-[1.02]",
         )}
       >
-        <span className="opacity-70">{icon}</span>
-        <div className="min-w-0">
+        <span className="shrink-0 opacity-70">{icon}</span>
+        <div className="min-w-0 overflow-hidden">
           <div className="text-lg font-bold tabular-nums leading-tight">{value}</div>
-          <div className="text-[10px] uppercase tracking-wider opacity-70 whitespace-nowrap">{label}</div>
+          <div className="text-[10px] uppercase tracking-wider opacity-70 truncate">{label}</div>
         </div>
       </button>
     </Tooltip>
@@ -550,7 +550,7 @@ export default function ReviewQueuePage() {
       </div>
 
       {/* Category stat cards */}
-      <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2.5 mb-5">
+      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-9 xl:grid-cols-12 gap-2 mb-5">
         <StatCard
           icon={<LayoutList size={16} />}
           label="All"

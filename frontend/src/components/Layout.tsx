@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
-  Library, Users, CalendarDays, Tags, Disc3, Star, MonitorPlay, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles, ArrowUpCircle, X,
+  Library, Users, CalendarDays, Tags, Disc3, Star, MonitorPlay, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles, ArrowUpCircle, X, Heart,
 } from "lucide-react";
 import { useStats, useReviewQueue, useUpdateCheck } from "@/hooks/queries";
 import { useState } from "react";
@@ -135,6 +135,15 @@ export function Layout() {
             <span>Genres</span>
             <span className="text-text-secondary">{stats?.total_genres ?? "—"}</span>
           </div>
+          <a
+            href="https://github.com/sponsors/lambertius"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 pt-2 text-text-muted/60 hover:text-pink-400 transition-colors"
+          >
+            <Heart className="w-3 h-3" />
+            <span>Support the project</span>
+          </a>
         </div>
       </aside>
       )}
