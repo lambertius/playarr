@@ -20,6 +20,7 @@ import { VersionBadge } from "@/components/Badges";
 import { Tooltip } from "@/components/Tooltip";
 import { cn, formatBytes, timeAgo } from "@/lib/utils";
 import { ScrapeOptionsModal, type ScrapeOptions } from "@/components/ScrapeOptionsModal";
+import { ScanOptionsModal } from "@/components/ScanOptionsModal";
 
 // ── Types ───────────────────────────────────────────────
 type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned" | "normalization";
@@ -298,8 +299,8 @@ export default function ReviewQueuePage() {
   const redownloadMutation = useRedownload();
   const dupeScanMutation = useLibraryDuplicateScan();
   const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
-  const [dupeScanAll, setDupeScanAll] = useState(false);
-  const [renameScanAll, setRenameScanAll] = useState(false);
+  const [renameScanModalOpen, setRenameScanModalOpen] = useState(false);
+  const [dupeScanModalOpen, setDupeScanModalOpen] = useState(false);
 
   const items = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
@@ -381,10 +382,18 @@ export default function ReviewQueuePage() {
     setSelectedIds(new Set());
   }, [selectedIds, batchDismissMutation, toast, confirm]);
 
-  const handleScanRenames = useCallback(async () => {
-    const result = await scanRenamesMutation.mutateAsync(renameScanAll);
+  const handleScanRenames = useCallback(async (rescanAll: boolean) => {
+    setRenameScanModalOpen(false);
+    const result = await scanRenamesMutation.mutateAsync(rescanAll);
     toast({ type: "success", title: result.flagged > 0 ? `Found ${result.flagged} item(s) to rename` : "All files match naming convention" });
-  }, [scanRenamesMutation, renameScanAll, toast]);
+  }, [scanRenamesMutation, toast]);
+
+  const handleScanDuplicates = useCallback((rescanAll: boolean) => {
+    setDupeScanModalOpen(false);
+    dupeScanMutation.mutate(rescanAll, {
+      onSuccess: () => toast({ type: "success", title: rescanAll ? "Full duplicate re-scan started" : "Duplicate scan started" }),
+    });
+  }, [dupeScanMutation, toast]);
 
   const handleApplyRename = useCallback(async (videoId: number) => {
     await applyRenameMutation.mutateAsync(videoId);
@@ -503,48 +512,12 @@ export default function ReviewQueuePage() {
           <button onClick={() => refetch()} className="btn-ghost btn-sm gap-1.5">
             <RefreshCw size={14} /> Refresh
           </button>
-          <Tooltip content={renameScanAll ? "Re-scan ALL files for naming convention mismatches, including previously dismissed items" : "Scan for new naming convention mismatches, skipping previously dismissed items"}>
-            <div className="flex items-center">
-              <button onClick={handleScanRenames} disabled={scanRenamesMutation.isPending} className="btn-ghost btn-sm gap-1.5">
-                <FileEdit size={14} /> {scanRenamesMutation.isPending ? "Scanning…" : "Scan Renames"}
-              </button>
-              <Tooltip content={renameScanAll ? "Currently scanning ALL files including previously dismissed. Click to only scan new mismatches." : "Currently ignoring previously dismissed items. Click to scan ALL files including previously dismissed."}>
-                <button
-                  onClick={() => setRenameScanAll((v) => !v)}
-                  className={cn(
-                    "btn-ghost btn-sm text-[10px] px-1.5 ml-0.5 rounded",
-                    renameScanAll ? "text-orange-400 bg-orange-500/10" : "text-text-muted",
-                  )}
-                >
-                  {renameScanAll ? "All" : "New"}
-                </button>
-              </Tooltip>
-            </div>
-          </Tooltip>
-          <Tooltip content={dupeScanAll ? "Re-scan ALL videos for duplicates, including previously resolved pairs" : "Scan for new duplicates, skipping previously resolved pairs"}>
-            <div className="flex items-center">
-              <button
-                onClick={() => dupeScanMutation.mutate(dupeScanAll, {
-                  onSuccess: () => toast({ type: "success", title: dupeScanAll ? "Full duplicate re-scan started" : "Duplicate scan started" }),
-                })}
-                disabled={dupeScanMutation.isPending}
-                className="btn-ghost btn-sm gap-1.5"
-              >
-                <Copy size={14} /> {dupeScanMutation.isPending ? "Scanning…" : "Scan Duplicates"}
-              </button>
-              <Tooltip content={dupeScanAll ? "Currently scanning ALL duplicates including previously resolved. Click to only scan new duplicates." : "Currently ignoring previously resolved duplicates. Click to scan ALL duplicates including previously resolved."}>
-                <button
-                  onClick={() => setDupeScanAll((v) => !v)}
-                  className={cn(
-                    "btn-ghost btn-sm text-[10px] px-1.5 ml-0.5 rounded",
-                    dupeScanAll ? "text-orange-400 bg-orange-500/10" : "text-text-muted",
-                  )}
-                >
-                  {dupeScanAll ? "All" : "New"}
-                </button>
-              </Tooltip>
-            </div>
-          </Tooltip>
+          <button onClick={() => setRenameScanModalOpen(true)} disabled={scanRenamesMutation.isPending} className="btn-ghost btn-sm gap-1.5">
+            <FileEdit size={14} /> {scanRenamesMutation.isPending ? "Scanning…" : "Scan Renames"}
+          </button>
+          <button onClick={() => setDupeScanModalOpen(true)} disabled={dupeScanMutation.isPending} className="btn-ghost btn-sm gap-1.5">
+            <Copy size={14} /> {dupeScanMutation.isPending ? "Scanning…" : "Scan Duplicates"}
+          </button>
           <Tooltip content="Export all library items to Kodi-compatible NFO files">
             <button onClick={handleExport} className="btn-ghost btn-sm" disabled={exportMutation.isPending}>
               Export to Kodi
@@ -841,6 +814,22 @@ export default function ReviewQueuePage() {
         onScrape={handleScrapeConfirm}
         itemCount={selectedIds.size}
         isPending={batchScrapeMutation.isPending}
+      />
+
+      <ScanOptionsModal
+        kind="renames"
+        open={renameScanModalOpen}
+        onClose={() => setRenameScanModalOpen(false)}
+        onScan={handleScanRenames}
+        isPending={scanRenamesMutation.isPending}
+      />
+
+      <ScanOptionsModal
+        kind="duplicates"
+        open={dupeScanModalOpen}
+        onClose={() => setDupeScanModalOpen(false)}
+        onScan={handleScanDuplicates}
+        isPending={dupeScanMutation.isPending}
       />
     </div>
   );
