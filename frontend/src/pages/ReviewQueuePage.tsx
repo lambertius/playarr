@@ -170,8 +170,8 @@ function formatBitrate(bps: number | null | undefined): string {
   return `${Math.round(bps / 1000)} kbps`;
 }
 
-// ── Stat card ───────────────────────────────────────────
-function StatCard({ icon, label, value, active, color, tooltip, onClick, selected }: {
+// ── Filter pill ─────────────────────────────────────────
+function FilterPill({ icon, label, value, active, color, tooltip, onClick, selected }: {
   icon: React.ReactNode; label: string; value: number; active?: boolean; color: string;
   tooltip: string; onClick?: () => void; selected?: boolean;
 }) {
@@ -180,19 +180,24 @@ function StatCard({ icon, label, value, active, color, tooltip, onClick, selecte
       <button
         onClick={onClick}
         className={cn(
-          "flex items-center gap-2.5 px-3 py-2 rounded-lg border transition-all duration-150 text-left w-full cursor-pointer",
+          "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border text-xs font-medium transition-all duration-150 cursor-pointer whitespace-nowrap",
           selected
             ? `${color} border-current/30 ring-1 ring-current/20 shadow-md`
             : active
-              ? `${color} border-current/20 hover:border-current/40 hover:shadow-md hover:brightness-125 hover:scale-[1.02]`
-              : "bg-surface/50 border-surface-border text-text-muted hover:border-text-muted/40 hover:bg-surface-hover/60 hover:shadow-md hover:scale-[1.02]",
+              ? `${color} border-current/15 hover:border-current/40 hover:shadow-sm hover:brightness-125`
+              : "bg-surface/40 border-surface-border text-text-muted/50 hover:border-text-muted/30 hover:bg-surface-hover/40",
         )}
       >
-        <span className="shrink-0 opacity-70">{icon}</span>
-        <div className="min-w-0 overflow-hidden">
-          <div className="text-lg font-bold tabular-nums leading-tight">{value}</div>
-          <div className="text-[10px] uppercase tracking-wider opacity-70 truncate">{label}</div>
-        </div>
+        <span className="opacity-70">{icon}</span>
+        <span>{label}</span>
+        <span className={cn(
+          "min-w-[1.25rem] px-1 py-0.5 rounded-full text-[10px] font-bold tabular-nums leading-none text-center",
+          selected
+            ? "bg-current/20"
+            : active ? "bg-current/10" : "bg-surface-border/50",
+        )}>
+          {value}
+        </span>
       </button>
     </Tooltip>
   );
@@ -549,10 +554,10 @@ export default function ReviewQueuePage() {
         </div>
       </div>
 
-      {/* Category stat cards */}
-      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-9 xl:grid-cols-12 gap-2 mb-5">
-        <StatCard
-          icon={<LayoutList size={16} />}
+      {/* Category filter pills */}
+      <div className="flex flex-wrap gap-1.5 mb-5">
+        <FilterPill
+          icon={<LayoutList size={14} />}
           label="All"
           value={allCount}
           active={allCount > 0}
@@ -561,8 +566,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("all")}
           selected={categoryFilter === "all"}
         />
-        <StatCard
-          icon={<Tag size={16} />}
+        <FilterPill
+          icon={<Tag size={14} />}
           label="Version"
           value={categoryCounts.version_detection ?? 0}
           active={(categoryCounts.version_detection ?? 0) > 0}
@@ -571,8 +576,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("version_detection")}
           selected={categoryFilter === "version_detection"}
         />
-        <StatCard
-          icon={<GitCompare size={16} />}
+        <FilterPill
+          icon={<GitCompare size={14} />}
           label="Duplicates"
           value={categoryCounts.duplicate ?? 0}
           active={(categoryCounts.duplicate ?? 0) > 0}
@@ -581,8 +586,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("duplicate")}
           selected={categoryFilter === "duplicate"}
         />
-        <StatCard
-          icon={<Link2 size={16} />}
+        <FilterPill
+          icon={<Link2 size={14} />}
           label="URL Import"
           value={categoryCounts.url_import_error ?? 0}
           active={(categoryCounts.url_import_error ?? 0) > 0}
@@ -591,8 +596,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("url_import_error")}
           selected={categoryFilter === "url_import_error"}
         />
-        <StatCard
-          icon={<FolderInput size={16} />}
+        <FilterPill
+          icon={<FolderInput size={14} />}
           label="Lib Import"
           value={categoryCounts.import_error ?? 0}
           active={(categoryCounts.import_error ?? 0) > 0}
@@ -601,8 +606,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("import_error")}
           selected={categoryFilter === "import_error"}
         />
-        <StatCard
-          icon={<ClipboardList size={16} />}
+        <FilterPill
+          icon={<ClipboardList size={14} />}
           label="Manual"
           value={categoryCounts.manual_review ?? 0}
           active={(categoryCounts.manual_review ?? 0) > 0}
@@ -611,8 +616,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("manual_review")}
           selected={categoryFilter === "manual_review"}
         />
-        <StatCard
-          icon={<FileEdit size={16} />}
+        <FilterPill
+          icon={<FileEdit size={14} />}
           label="Rename"
           value={categoryCounts.rename ?? 0}
           active={(categoryCounts.rename ?? 0) > 0}
@@ -621,8 +626,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("rename")}
           selected={categoryFilter === "rename"}
         />
-        <StatCard
-          icon={<FolderSearch size={16} />}
+        <FilterPill
+          icon={<FolderSearch size={14} />}
           label="Scanned"
           value={categoryCounts.scanned ?? 0}
           active={(categoryCounts.scanned ?? 0) > 0}
@@ -631,8 +636,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("scanned")}
           selected={categoryFilter === "scanned"}
         />
-        <StatCard
-          icon={<Volume2 size={16} />}
+        <FilterPill
+          icon={<Volume2 size={14} />}
           label="Volume"
           value={categoryCounts.normalization ?? 0}
           active={(categoryCounts.normalization ?? 0) > 0}
@@ -641,8 +646,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("normalization")}
           selected={categoryFilter === "normalization"}
         />
-        <StatCard
-          icon={<Unlink2 size={16} />}
+        <FilterPill
+          icon={<Unlink2 size={14} />}
           label="No Track"
           value={categoryCounts.canonical_missing ?? 0}
           active={(categoryCounts.canonical_missing ?? 0) > 0}
@@ -651,9 +656,9 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("canonical_missing")}
           selected={categoryFilter === "canonical_missing"}
         />
-        <StatCard
-          icon={<AlertTriangle size={16} />}
-          label="Track Conflict"
+        <FilterPill
+          icon={<AlertTriangle size={14} />}
+          label="Conflict"
           value={categoryCounts.canonical_conflict ?? 0}
           active={(categoryCounts.canonical_conflict ?? 0) > 0}
           color="bg-red-500/10 text-red-400"
@@ -661,8 +666,8 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("canonical_conflict")}
           selected={categoryFilter === "canonical_conflict"}
         />
-        <StatCard
-          icon={<HelpCircle size={16} />}
+        <FilterPill
+          icon={<HelpCircle size={14} />}
           label="Low Confidence"
           value={categoryCounts.canonical_low_confidence ?? 0}
           active={(categoryCounts.canonical_low_confidence ?? 0) > 0}
