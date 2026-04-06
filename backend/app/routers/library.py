@@ -1727,6 +1727,53 @@ def _delete_video_cached_assets(db: Session, video_ids: List[int]):
         logger.warning(f"Failed to delete cached assets for videos {video_ids}: {e}")
 
 
+def _clear_orphaned_duplicate_partners(db: Session, deleted_ids: List[int]):
+    """After deleting videos, clear duplicate review flags on surviving partners.
+
+    If a surviving partner has no remaining undismissed duplicates,
+    its review flags are cleared entirely.  Otherwise the deleted IDs
+    are simply removed from its review_reason text.
+    """
+    import re
+    deleted_set = set(deleted_ids)
+    # Find all videos still flagged as duplicates that reference any deleted ID
+    candidates = (
+        db.query(VideoItem)
+        .filter(
+            VideoItem.review_category == "duplicate",
+            VideoItem.review_status == "needs_human_review",
+        )
+        .all()
+    )
+    for vi in candidates:
+        id_match = re.search(r'ID\(s\):\s*([\d,\s]+)', vi.review_reason or "")
+        if not id_match:
+            continue
+        partner_ids = {
+            int(x.strip())
+            for x in id_match.group(1).split(",")
+            if x.strip().isdigit()
+        }
+        if not partner_ids & deleted_set:
+            continue  # this item doesn't reference any deleted video
+        remaining = partner_ids - deleted_set
+        # Filter to only IDs that still exist in DB
+        if remaining:
+            existing = {
+                row[0]
+                for row in db.query(VideoItem.id).filter(VideoItem.id.in_(remaining)).all()
+            }
+            remaining = existing
+        if remaining:
+            # Still has other duplicate partners — update the reason text
+            vi.review_reason = f"Potential duplicate of video ID(s): {', '.join(str(i) for i in sorted(remaining))}"
+        else:
+            # No remaining partners — clear review flags
+            vi.review_status = "none"
+            vi.review_category = None
+            vi.review_reason = None
+
+
 def _cleanup_orphaned_child_rows(db: Session, video_ids: List[int]):
     """
     Delete orphaned rows from tables that reference video_items but lack
@@ -2015,7 +2062,9 @@ def batch_delete_videos(req: BatchDeleteRequest, db: Session = Depends(get_db)):
             db.rollback()  # Reset session state so subsequent deletes can proceed
             errors.append(vid)
 
+    # Clear duplicate review flags on surviving partner videos
     if deleted_ids:
+        _clear_orphaned_duplicate_partners(db, deleted_ids)
         db.commit()
 
     # Remove video folders, thumbnails, and preview files from disk
