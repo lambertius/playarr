@@ -19,6 +19,7 @@ import { NowPlayingPage } from "@/pages/NowPlayingPage";
 import { VideoEditorPage } from "@/pages/VideoEditorPage";
 import { ScraperTesterPage } from "@/pages/ScraperTesterPage";
 import { NewVideosPage } from "@/pages/NewVideosPage";
+import { QualityPage } from "@/pages/QualityPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -44,6 +45,7 @@ function App() {
               <Route path="genres" element={<GenresPage />} />
               <Route path="albums" element={<AlbumsPage />} />
               <Route path="ratings" element={<RatingsPage />} />
+              <Route path="quality" element={<QualityPage />} />
               <Route path="playlists" element={<PlaylistsPage />} />
               <Route path="video/:videoId" element={<VideoDetailPage />} />
               <Route path="queue" element={<QueuePage />} />

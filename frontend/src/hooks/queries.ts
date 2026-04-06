@@ -26,6 +26,7 @@ export const qk = {
   albums: (params?: FacetFilterParams) => ["albums", params] as const,
   songRatings: (params?: FacetFilterParams) => ["songRatings", params] as const,
   videoRatings: (params?: FacetFilterParams) => ["videoRatings", params] as const,
+  qualityBuckets: (params?: FacetFilterParams) => ["qualityBuckets", params] as const,
   jobs: (params?: JobsParams) => ["jobs", params] as const,
   job: (id: number) => ["job", id] as const,
   jobLog: (id: number) => ["jobLog", id] as const,
@@ -108,6 +109,9 @@ export function useSongRatings(params?: FacetFilterParams) {
 }
 export function useVideoRatings(params?: FacetFilterParams) {
   return useQuery({ queryKey: qk.videoRatings(params), queryFn: () => libraryApi.videoRatings(params) });
+}
+export function useQualityBuckets(params?: FacetFilterParams) {
+  return useQuery({ queryKey: qk.qualityBuckets(params), queryFn: () => libraryApi.qualityBuckets(params) });
 }
 
 // ─── Facets ───────────────────────────────────────────────
@@ -348,7 +352,7 @@ export function useLibraryScan() {
 export function useLibraryDuplicateScan() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => jobsApi.libraryDuplicateScan(),
+    mutationFn: (rescanAll: boolean = false) => jobsApi.libraryDuplicateScan(rescanAll),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
   });
 }
@@ -540,7 +544,7 @@ export function useBatchDismissReview() {
 export function useScanRenames() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => reviewApi.scanRenames(),
+    mutationFn: (rescanAll: boolean = false) => reviewApi.scanRenames(rescanAll),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["reviewQueue"] }); },
   });
 }

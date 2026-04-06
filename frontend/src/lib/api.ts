@@ -27,6 +27,7 @@ import type {
   PlaylistOut, PlaylistSummary, PlaylistEntry,
   PartyModeParams, PartyModeResponse,
   LogFileEntry, LogReadResponse,
+  ArchiveItem, QualityBucket,
 } from "@/types";
 
 const api = axios.create({ baseURL: "/api" });
@@ -72,6 +73,9 @@ export const libraryApi = {
 
   videoRatings: (params?: FacetFilterParams) =>
     api.get<RatingBucket[]>("/library/video-ratings", { params }).then(r => r.data),
+
+  qualityBuckets: (params?: FacetFilterParams) =>
+    api.get<QualityBucket[]>("/library/quality-buckets", { params }).then(r => r.data),
 
   snapshots: (videoId: number) =>
     api.get<MetadataSnapshot[]>(`/library/${videoId}/snapshots`).then(r => r.data),
@@ -177,8 +181,8 @@ export const jobsApi = {
   libraryScan: (importNew = true) =>
     api.post<JobSummary>("/jobs/library-scan", { import_new: importNew }).then(r => r.data),
 
-  libraryDuplicateScan: () =>
-    api.post<JobSummary>("/jobs/library-duplicate-scan").then(r => r.data),
+  libraryDuplicateScan: (rescanAll = false) =>
+    api.post<JobSummary>("/jobs/library-duplicate-scan", null, { params: { rescan_all: rescanAll } }).then(r => r.data),
 
   libraryExport: (mode: string) =>
     api.post<JobSummary>("/jobs/library-export", { mode }).then(r => r.data),
@@ -293,6 +297,15 @@ export const settingsApi = {
 
   openDirectory: (path: string) =>
     api.post<{ ok: boolean; path: string }>("/settings/open-directory", { path }).then(r => r.data),
+
+  archiveItems: () =>
+    api.get<ArchiveItem[]>("/settings/archive-items").then(r => r.data),
+
+  archiveDelete: (folders: string[]) =>
+    api.post<{ deleted: number; errors: string[] }>("/settings/archive-delete", { folders }).then(r => r.data),
+
+  archiveClear: () =>
+    api.post<{ deleted: number; errors: string[] }>("/settings/archive-clear").then(r => r.data),
 };
 
 // ─── Stats ────────────────────────────────────────────────
@@ -346,8 +359,8 @@ export const reviewApi = {
     api.post<{ status: string; count: number }>("/review/batch/approve", videoIds).then(r => r.data),
   batchDismiss: (videoIds: number[]) =>
     api.post<{ status: string; count: number }>("/review/batch/dismiss", videoIds).then(r => r.data),
-  scanRenames: () =>
-    api.post<{ status: string; flagged: number }>("/review/scan-renames").then(r => r.data),
+  scanRenames: (rescanAll: boolean = false) =>
+    api.post<{ status: string; flagged: number }>(`/review/scan-renames?rescan_all=${rescanAll}`).then(r => r.data),
   applyRename: (videoId: number) =>
     api.post<{ status: string; video_id: number }>(`/review/${videoId}/apply-rename`).then(r => r.data),
   batchApplyRename: (videoIds: number[]) =>

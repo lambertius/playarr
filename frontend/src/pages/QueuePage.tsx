@@ -35,23 +35,17 @@ function getSourceType(job: JobSummary): SourceFilter {
   return "download";
 }
 
+/** Job types whose pipelines dispatch deferred post-processing tasks. */
+const DEFERRED_JOB_TYPES = new Set(["import_url", "rescan", "library_import_video", "playlist_import"]);
+
 function isFinalizing(j: JobSummary) {
-  if (j.job_type.startsWith("video_editor_")) return false;
+  if (!DEFERRED_JOB_TYPES.has(j.job_type)) return false;
   if (j.status !== "complete" || !j.current_step) return false;
-  // These steps are definitively terminal — never finalizing
-  if (j.current_step === "Import complete" || j.current_step.startsWith("All ") || j.current_step.startsWith("Pending review")) return false;
-  // Only treat as finalizing if it was updated recently (deferred tasks actively running)
+  const stepLower = j.current_step.toLowerCase();
+  if (stepLower.endsWith("complete") || j.current_step.startsWith("All ") || j.current_step.startsWith("Pending review")) return false;
   if (!j.updated_at) return false;
   const updMs = new Date(j.updated_at.endsWith("Z") ? j.updated_at : j.updated_at + "Z").getTime();
-  return (Date.now() - updMs) < 60_000;
-}
-
-function isStuckJob(j: JobSummary) {
-  if (!isFinalizing(j)) return false;
-  if (!j.completed_at) return false;
-  const toMs = (ts: string) => new Date(ts.endsWith("Z") ? ts : ts + "Z").getTime();
-  const latestMs = Math.max(toMs(j.completed_at), j.updated_at ? toMs(j.updated_at) : 0);
-  return (Date.now() - latestMs) / 60_000 > 5;
+  return (Date.now() - updMs) < 120_000;
 }
 
 /* ── Pagination controls ── */
@@ -417,7 +411,7 @@ export function QueuePage() {
   const handleBulkRetry = useCallback(() => {
     const ids = Array.from(selectedIds).filter(id => {
       const j = jobs?.find(j => j.id === id);
-      return j?.status === "failed";
+      return j?.status === "failed" || j?.status === "cancelled";
     });
     for (const id of ids) retryMutation.mutate(id);
     toast({ type: "success", title: `Retrying ${ids.length} job(s)` });
@@ -475,8 +469,8 @@ export function QueuePage() {
       onToggleExpand={() =>
         setExpandedJobId(expandedJobId === job.id ? null : job.id)
       }
-      onRetry={job.status === "failed" ? () => handleRetry(job.id) : undefined}
-      onCancel={isActiveJob(job.status) || isStuckJob(job) ? () => handleCancel(job) : undefined}
+      onRetry={job.status === "failed" || job.status === "cancelled" ? () => handleRetry(job.id) : undefined}
+      onCancel={isActiveJob(job.status) || isFinalizing(job) ? () => handleCancel(job) : undefined}
       selected={selectedIds.has(job.id)}
       onSelect={toggleSelect}
     />
@@ -647,34 +641,41 @@ export function QueuePage() {
         )}
       </div>
 
-      {/* Bulk action bar */}
-      {selectedCount > 0 && (
-        <div className="flex items-center gap-3 bg-accent/10 border border-accent/20 rounded-lg px-4 py-2 mb-3">
+      {/* Bulk action bar — always visible when there are jobs */}
+      {currentTotal > 0 && (
+        <div className="flex items-center gap-3 bg-surface-secondary/50 border border-surface-border rounded-lg px-4 py-2 mb-3">
           <input
             type="checkbox"
             checked={currentJobs.length > 0 && currentJobs.every(j => selectedIds.has(j.id))}
+            ref={(el) => {
+              if (el) el.indeterminate = selectedCount > 0 && !currentJobs.every(j => selectedIds.has(j.id));
+            }}
             onChange={toggleSelectAll}
             className="accent-accent w-4 h-4 cursor-pointer"
           />
           <span className="text-sm text-text-secondary flex-1">
-            {selectedCount} selected
+            {selectedCount > 0 ? `${selectedCount} selected` : "Select all"}
           </span>
-          {activeTab === "active" && (
-            <button onClick={handleBulkCancel} className="btn-ghost btn-sm gap-1 text-yellow-400 hover:text-yellow-300 text-xs">
-              <Ban size={13} /> Cancel
-            </button>
+          {selectedCount > 0 && (
+            <>
+              {activeTab === "active" && (
+                <button onClick={handleBulkCancel} className="btn-ghost btn-sm gap-1 text-yellow-400 hover:text-yellow-300 text-xs">
+                  <Ban size={13} /> Cancel
+                </button>
+              )}
+              {activeTab === "history" && (
+                <button onClick={handleBulkRetry} className="btn-ghost btn-sm gap-1 text-accent hover:text-accent/80 text-xs">
+                  <RotateCcw size={13} /> Retry
+                </button>
+              )}
+              <button onClick={handleBulkDelete} className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300 text-xs">
+                <Trash2 size={13} /> Delete
+              </button>
+              <button onClick={() => setSelectedIds(new Set())} className="btn-ghost btn-sm gap-1 text-text-muted text-xs">
+                <X size={13} /> Clear
+              </button>
+            </>
           )}
-          {activeTab === "history" && (
-            <button onClick={handleBulkRetry} className="btn-ghost btn-sm gap-1 text-accent hover:text-accent/80 text-xs">
-              <RotateCcw size={13} /> Retry
-            </button>
-          )}
-          <button onClick={handleBulkDelete} className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300 text-xs">
-            <Trash2 size={13} /> Delete
-          </button>
-          <button onClick={() => setSelectedIds(new Set())} className="btn-ghost btn-sm gap-1 text-text-muted text-xs">
-            <X size={13} /> Clear
-          </button>
         </div>
       )}
 

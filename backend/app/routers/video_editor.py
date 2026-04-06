@@ -50,8 +50,14 @@ def write_archive_manifest(
     video_id: Optional[int] = None,
     artist: str = "",
     title: str = "",
+    archive_reason: str = "edit",
 ) -> None:
-    """Write a manifest alongside an archived video for later re-linking."""
+    """Write a manifest alongside an archived video for later re-linking.
+
+    Args:
+        archive_reason: Why this file was archived — "edit" (video editor crop/encode)
+                        or "redownload" (replaced by a fresh download).
+    """
     import json
     try:
         manifest = {
@@ -64,6 +70,7 @@ def write_archive_manifest(
             "title": title,
             "file_size_bytes": os.path.getsize(archive_video_path),
             "archived_at": datetime.now(timezone.utc).isoformat(),
+            "archive_reason": archive_reason,
         }
         manifest_path = os.path.join(os.path.dirname(archive_video_path), _MANIFEST_NAME)
         with open(manifest_path, "w", encoding="utf-8") as f:
@@ -144,6 +151,80 @@ def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Opt
         pass
 
     return None
+
+
+def find_all_archive_files(file_path: str, library_dir: str, archive_dir: str) -> list:
+    """Locate ALL archived versions for a library file, with reason metadata.
+
+    Returns a list of dicts:
+        [{"path": str, "reason": "edit"|"redownload", "archived_at": str, "file_size_bytes": int}, ...]
+    """
+    import json
+    if not file_path:
+        return []
+
+    from app.config import get_settings
+    _s = get_settings()
+    actual_library_dir = library_dir
+    actual_archive_dir = archive_dir
+    norm_fp = os.path.normpath(file_path)
+    for lib_root in _s.get_all_library_dirs():
+        norm_root = os.path.normcase(os.path.normpath(lib_root))
+        if os.path.normcase(norm_fp).startswith(norm_root + os.sep):
+            actual_library_dir = lib_root
+            actual_archive_dir = os.path.join(lib_root, "_archive")
+            break
+
+    if not actual_archive_dir or not os.path.isdir(actual_archive_dir):
+        return []
+
+    library_root = os.path.normpath(actual_library_dir)
+    norm_fp_val = os.path.normpath(file_path)
+    if norm_fp_val.startswith(library_root + os.sep):
+        rel = os.path.relpath(norm_fp_val, library_root)
+    else:
+        rel = os.path.basename(file_path)
+    rel_norm = os.path.normpath(rel)
+
+    results = []
+
+    # Scan all manifest files in archive_dir
+    try:
+        for root, _dirs, fnames in os.walk(actual_archive_dir):
+            if _MANIFEST_NAME not in fnames:
+                continue
+            manifest_path = os.path.join(root, _MANIFEST_NAME)
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                if os.path.normpath(manifest.get("original_relative_path", "")) == rel_norm:
+                    for fn in os.listdir(root):
+                        if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
+                            results.append({
+                                "path": os.path.join(root, fn),
+                                "reason": manifest.get("archive_reason", "edit"),
+                                "archived_at": manifest.get("archived_at", ""),
+                                "file_size_bytes": manifest.get("file_size_bytes", 0),
+                            })
+                            break
+            except (json.JSONDecodeError, OSError):
+                continue
+    except OSError:
+        pass
+
+    # Also check exact path match (archives without manifests)
+    archive_path = os.path.join(actual_archive_dir, rel)
+    if os.path.isfile(archive_path):
+        already = any(os.path.normpath(r["path"]) == os.path.normpath(archive_path) for r in results)
+        if not already:
+            results.append({
+                "path": archive_path,
+                "reason": "edit",  # legacy archives without manifest are from editor
+                "archived_at": "",
+                "file_size_bytes": os.path.getsize(archive_path),
+            })
+
+    return results
 
 
 # ── Pydantic Schemas ──────────────────────────────────────

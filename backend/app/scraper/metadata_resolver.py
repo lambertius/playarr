@@ -2266,7 +2266,8 @@ def search_wikipedia_artist(artist: str) -> Optional[str]:
         return None
 
     # Final guard: verify the Wikidata short description doesn't identify
-    # the page as a song, single, album, or EP.
+    # the page as a song, single, album, or EP — or a non-music profession
+    # (e.g. footballer, politician, cricketer).
     _wd_desc = _get_wiki_short_description(best["title"])
     if _wd_desc:
         _wd_lower = _wd_desc.lower()
@@ -2276,6 +2277,31 @@ def search_wikipedia_artist(artist: str) -> Optional[str]:
         if any(kw in _wd_lower for kw in _work_kw):
             logger.info(f"Wikipedia artist: '{best['title']}' rejected — "
                         f"Wikidata desc '{_wd_desc}' indicates a musical work")
+            return None
+        # Reject pages that clearly describe a non-music person/entity.
+        # The Wikidata short description is reliable (e.g. "Australian
+        # women's football player", "American politician").
+        _NON_MUSIC_PROFESSIONS = [
+            "football", "soccer", "rugby", "cricket", "tennis",
+            "basketball", "baseball", "hockey", "golfer", "boxer",
+            "wrestler", "athlete", "sprinter", "gymnast", "swimmer",
+            "politician", "governor", "senator", "mayor", "president",
+            "judge", "lawyer", "attorney",
+            "actor", "actress",
+            "novelist", "journalist", "historian", "professor",
+            "biologist", "physicist", "chemist", "mathematician",
+            "general", "admiral", "colonel", "military",
+        ]
+        # Only reject if no music keyword also appears (some musicians
+        # are also actors, etc.)
+        _has_music_kw = any(mk in _wd_lower for mk in [
+            "singer", "musician", "rapper", "songwriter", "band",
+            "composer", "dj", "producer", "vocalist", "artist",
+            "music", "recording",
+        ])
+        if not _has_music_kw and any(p in _wd_lower for p in _NON_MUSIC_PROFESSIONS):
+            logger.info(f"Wikipedia artist: '{best['title']}' rejected — "
+                        f"Wikidata desc '{_wd_desc}' indicates non-music profession")
             return None
 
     logger.info(f"Wikipedia artist match: '{best['title']}' (score={best['score']})")

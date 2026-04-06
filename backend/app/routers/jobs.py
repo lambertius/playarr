@@ -524,19 +524,25 @@ def scan_library(req: LibraryScanRequest = LibraryScanRequest(), db: Session = D
 
 
 @router.post("/library-duplicate-scan", response_model=JobOut)
-def scan_duplicates(db: Session = Depends(get_db)):
-    """Scan the library for potential duplicate video items."""
+def scan_duplicates(rescan_all: bool = False, db: Session = Depends(get_db)):
+    """Scan the library for potential duplicate video items.
+
+    Args:
+        rescan_all: If True, ignore previously resolved duplicates and
+                    re-scan everything from scratch. If False, honour
+                    dismissed duplicate flags.
+    """
     job = ProcessingJob(
         job_type="duplicate_scan",
         status=JobStatus.queued,
-        display_name="Duplicate Scan",
+        display_name="Duplicate Scan" + (" (Full Rescan)" if rescan_all else ""),
         action_label="Duplicate Scan",
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    dispatch_task(duplicate_scan_task, job_id=job.id)
+    dispatch_task(duplicate_scan_task, job_id=job.id, rescan_all=rescan_all)
     return job
 
 
@@ -917,12 +923,12 @@ def get_job_log(job_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{job_id}/retry", response_model=JobOut)
 def retry_job(job_id: int, db: Session = Depends(get_db)):
-    """Retry a failed job."""
+    """Retry a failed or cancelled job."""
     job = db.query(ProcessingJob).get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != JobStatus.failed:
-        raise HTTPException(status_code=400, detail="Only failed jobs can be retried")
+    if job.status not in (JobStatus.failed, JobStatus.cancelled):
+        raise HTTPException(status_code=400, detail="Only failed or cancelled jobs can be retried")
 
     job.status = JobStatus.queued
     job.error_message = None
@@ -952,6 +958,9 @@ def retry_job(job_id: int, db: Session = Depends(get_db)):
         dispatch_task(normalize_task, job_id=job.id, video_id=job.video_id, target_lufs=target)
     elif job.job_type == "wikipedia_scrape" and job.video_id:
         dispatch_task(scrape_wikipedia_task, job_id=job.id, video_id=job.video_id)
+    elif job.job_type == "redownload" and job.video_id:
+        format_spec = (job.input_params or {}).get("format_spec")
+        dispatch_task(redownload_video_task, job_id=job.id, video_id=job.video_id, format_spec=format_spec)
     elif job.job_type == "playlist_import" and job.input_url:
         # Re-submit as a new playlist import (retry the parent)
         job.status = JobStatus.failed

@@ -4,7 +4,7 @@ import {
   Search, ChevronLeft, ChevronRight, CheckCircle2, XCircle,
   GitCompare, FolderInput, Link2, ClipboardList,
   Check, X, Tag, RefreshCw, ChevronDown, LayoutList, FileEdit,
-  Trash2, ScanSearch, FolderSearch, Download,
+  Trash2, ScanSearch, FolderSearch, Download, Volume2, Copy,
 } from "lucide-react";
 import type { ReviewParams, ReviewItem, DuplicateVideoSummary } from "@/types";
 import {
@@ -12,6 +12,7 @@ import {
   useSetReviewVersion, useBatchApproveReview, useBatchDismissReview,
   useScanRenames, useApplyRename, useBatchApplyRename,
   useBatchDeleteReview, useBatchScrapeReview, useRedownload,
+  useLibraryDuplicateScan,
 } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -21,7 +22,7 @@ import { cn, formatBytes, timeAgo } from "@/lib/utils";
 import { ScrapeOptionsModal, type ScrapeOptions } from "@/components/ScrapeOptionsModal";
 
 // ── Types ───────────────────────────────────────────────
-type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned";
+type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned" | "normalization";
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
@@ -79,6 +80,12 @@ const CATEGORY_CONFIG: Record<ReviewCategory, {
     icon: <FolderSearch size={16} />,
     color: "bg-lime-500/10 text-lime-400",
     tooltip: "Untracked files found in the library directory and imported via scan. Scrape metadata to enrich, or delete if unwanted.",
+  },
+  normalization: {
+    label: "Volume",
+    icon: <Volume2 size={16} />,
+    color: "bg-pink-500/10 text-pink-400",
+    tooltip: "Videos where audio normalization (LUFS adjustment) failed due to codec incompatibility. Redownload to get a compatible format, or dismiss if acceptable.",
   },
 };
 
@@ -289,7 +296,10 @@ export default function ReviewQueuePage() {
   const batchDeleteMutation = useBatchDeleteReview();
   const batchScrapeMutation = useBatchScrapeReview();
   const redownloadMutation = useRedownload();
+  const dupeScanMutation = useLibraryDuplicateScan();
   const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
+  const [dupeScanAll, setDupeScanAll] = useState(false);
+  const [renameScanAll, setRenameScanAll] = useState(false);
 
   const items = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
@@ -372,9 +382,9 @@ export default function ReviewQueuePage() {
   }, [selectedIds, batchDismissMutation, toast, confirm]);
 
   const handleScanRenames = useCallback(async () => {
-    const result = await scanRenamesMutation.mutateAsync();
+    const result = await scanRenamesMutation.mutateAsync(renameScanAll);
     toast({ type: "success", title: result.flagged > 0 ? `Found ${result.flagged} item(s) to rename` : "All files match naming convention" });
-  }, [scanRenamesMutation, toast]);
+  }, [scanRenamesMutation, renameScanAll, toast]);
 
   const handleApplyRename = useCallback(async (videoId: number) => {
     await applyRenameMutation.mutateAsync(videoId);
@@ -493,10 +503,47 @@ export default function ReviewQueuePage() {
           <button onClick={() => refetch()} className="btn-ghost btn-sm gap-1.5">
             <RefreshCw size={14} /> Refresh
           </button>
-          <Tooltip content="Scan library for files that don't match the naming convention">
-            <button onClick={handleScanRenames} disabled={scanRenamesMutation.isPending} className="btn-ghost btn-sm gap-1.5">
-              <FileEdit size={14} /> {scanRenamesMutation.isPending ? "Scanning…" : "Scan Renames"}
-            </button>
+          <Tooltip content={renameScanAll ? "Re-scan ALL files for naming convention mismatches, including previously dismissed items" : "Scan for new naming convention mismatches, skipping previously dismissed items"}>
+            <div className="flex items-center">
+              <button onClick={handleScanRenames} disabled={scanRenamesMutation.isPending} className="btn-ghost btn-sm gap-1.5">
+                <FileEdit size={14} /> {scanRenamesMutation.isPending ? "Scanning…" : "Scan Renames"}
+              </button>
+              <Tooltip content={renameScanAll ? "Currently scanning ALL files including previously dismissed. Click to only scan new mismatches." : "Currently ignoring previously dismissed items. Click to scan ALL files including previously dismissed."}>
+                <button
+                  onClick={() => setRenameScanAll((v) => !v)}
+                  className={cn(
+                    "btn-ghost btn-sm text-[10px] px-1.5 ml-0.5 rounded",
+                    renameScanAll ? "text-orange-400 bg-orange-500/10" : "text-text-muted",
+                  )}
+                >
+                  {renameScanAll ? "All" : "New"}
+                </button>
+              </Tooltip>
+            </div>
+          </Tooltip>
+          <Tooltip content={dupeScanAll ? "Re-scan ALL videos for duplicates, including previously resolved pairs" : "Scan for new duplicates, skipping previously resolved pairs"}>
+            <div className="flex items-center">
+              <button
+                onClick={() => dupeScanMutation.mutate(dupeScanAll, {
+                  onSuccess: () => toast({ type: "success", title: dupeScanAll ? "Full duplicate re-scan started" : "Duplicate scan started" }),
+                })}
+                disabled={dupeScanMutation.isPending}
+                className="btn-ghost btn-sm gap-1.5"
+              >
+                <Copy size={14} /> {dupeScanMutation.isPending ? "Scanning…" : "Scan Duplicates"}
+              </button>
+              <Tooltip content={dupeScanAll ? "Currently scanning ALL duplicates including previously resolved. Click to only scan new duplicates." : "Currently ignoring previously resolved duplicates. Click to scan ALL duplicates including previously resolved."}>
+                <button
+                  onClick={() => setDupeScanAll((v) => !v)}
+                  className={cn(
+                    "btn-ghost btn-sm text-[10px] px-1.5 ml-0.5 rounded",
+                    dupeScanAll ? "text-orange-400 bg-orange-500/10" : "text-text-muted",
+                  )}
+                >
+                  {dupeScanAll ? "All" : "New"}
+                </button>
+              </Tooltip>
+            </div>
           </Tooltip>
           <Tooltip content="Export all library items to Kodi-compatible NFO files">
             <button onClick={handleExport} className="btn-ghost btn-sm" disabled={exportMutation.isPending}>
@@ -507,7 +554,7 @@ export default function ReviewQueuePage() {
       </div>
 
       {/* Category stat cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5 mb-5">
+      <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2.5 mb-5">
         <StatCard
           icon={<LayoutList size={16} />}
           label="All"
@@ -587,6 +634,16 @@ export default function ReviewQueuePage() {
           tooltip={CATEGORY_CONFIG.scanned.tooltip}
           onClick={() => handleCategoryChange("scanned")}
           selected={categoryFilter === "scanned"}
+        />
+        <StatCard
+          icon={<Volume2 size={16} />}
+          label="Volume"
+          value={categoryCounts.normalization ?? 0}
+          active={(categoryCounts.normalization ?? 0) > 0}
+          color="bg-pink-500/10 text-pink-400"
+          tooltip={CATEGORY_CONFIG.normalization.tooltip}
+          onClick={() => handleCategoryChange("normalization")}
+          selected={categoryFilter === "normalization"}
         />
       </div>
 

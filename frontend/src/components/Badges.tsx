@@ -59,29 +59,33 @@ const statusConfig: Record<JobStatus, { label: string; className: string }> = {
   skipped:      { label: "Skipped",      className: "bg-orange-500/15 text-orange-400" },
 };
 
+/** Job types whose pipelines dispatch deferred post-processing tasks. */
+const DEFERRED_JOB_TYPES = new Set(["import_url", "rescan", "library_import_video", "playlist_import"]);
+
 interface StatusBadgeProps {
   status: JobStatus;
   className?: string;
+  jobType?: string;
   currentStep?: string | null;
   errorMessage?: string | null;
   completedAt?: string | null;
   updatedAt?: string | null;
 }
 
-export function StatusBadge({ status, className, currentStep, errorMessage, completedAt, updatedAt }: StatusBadgeProps) {
-  const isFinalizing = status === "complete" && !!currentStep && !currentStep.endsWith("complete") && !currentStep.startsWith("All ") && !currentStep.startsWith("Pending review");
-  if (isFinalizing) {
-    // Use the most recent of completedAt / updatedAt to avoid false "Stuck"
-    // while deferred tasks are still actively processing.
-    if (completedAt) {
+export function StatusBadge({ status, className, jobType, currentStep, errorMessage, updatedAt }: StatusBadgeProps) {
+  // Only import/rescan pipelines have deferred tasks that warrant a "Finalising" state.
+  // All other complete jobs show "Complete" regardless of current_step value.
+  if (status === "complete" && jobType && DEFERRED_JOB_TYPES.has(jobType) && currentStep) {
+    const stepLower = currentStep.toLowerCase();
+    const isTerminal = stepLower.endsWith("complete") || currentStep.startsWith("All ") || currentStep.startsWith("Pending review");
+    if (!isTerminal && updatedAt) {
       const toMs = (ts: string) => new Date(ts.endsWith("Z") ? ts : ts + "Z").getTime();
-      const latestMs = Math.max(toMs(completedAt), updatedAt ? toMs(updatedAt) : 0);
-      const ageMin = (Date.now() - latestMs) / 60_000;
-      if (ageMin > 5) {
-        return <span className={cn("bg-red-500/15 text-red-400", className)}>Stuck</span>;
+      const updAgeMs = Date.now() - toMs(updatedAt);
+      // Deferred tasks are still actively running (updated within last 2 minutes)
+      if (updAgeMs < 120_000) {
+        return <span className={cn("bg-amber-500/15 text-amber-400", className)}>Finalising</span>;
       }
     }
-    return <span className={cn("bg-amber-500/15 text-amber-400", className)}>Finalising</span>;
   }
   const isInterrupted = status === "failed" && !!errorMessage && errorMessage.includes("Server restarted");
   if (isInterrupted) {

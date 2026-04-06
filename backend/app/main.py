@@ -844,6 +844,31 @@ def _maybe_startup_duplicate_scan():
         logger.error(f"Startup duplicate scan failed (non-fatal): {e}")
 
 
+def _maybe_startup_rename_scan():
+    """Run a rename-convention scan at startup if the setting is enabled."""
+    try:
+        from app.database import SessionLocal
+        from app.models import AppSetting
+
+        db = SessionLocal()
+        try:
+            row = db.query(AppSetting).filter(
+                AppSetting.key == "startup_rename_scan",
+                AppSetting.user_id.is_(None),
+            ).first()
+            enabled = row and row.value.lower() in ("true", "1", "yes")
+            if not enabled:
+                return
+            logger.info("Startup rename scan enabled — scanning for naming convention mismatches")
+            from app.routers.resolve import scan_renames
+            result = scan_renames(rescan_all=False, db=db)
+            logger.info(f"Startup rename scan complete — flagged {result['flagged']} item(s)")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Startup rename scan failed (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
@@ -927,6 +952,9 @@ async def lifespan(app: FastAPI):
 
     # --- Optional startup duplicate scan ---
     _maybe_startup_duplicate_scan()
+
+    # --- Optional startup rename scan ---
+    _maybe_startup_rename_scan()
 
     yield
 

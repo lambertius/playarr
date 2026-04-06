@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, Check, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Search, Eye, EyeOff, Compass, Download, Power, ScrollText, ExternalLink, Copy } from "lucide-react";
+import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Search, Eye, EyeOff, Compass, Download, Power, ScrollText, ExternalLink, Archive, Trash2, Loader2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport, useLibraryDuplicateScan } from "@/hooks/queries";
+import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport } from "@/hooks/queries";
 import { useGenreBlacklist, useUpdateGenreBlacklist, useCreateGenre } from "@/hooks/queries";
-import { settingsApi, libraryApi, statsApi } from "@/lib/api";
+import { settingsApi, statsApi } from "@/lib/api";
 import { ErrorState, Skeleton } from "@/components/Feedback";
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
@@ -232,6 +232,15 @@ const SETTING_META: Record<string, SettingMeta> = {
       "Runs a background duplicate detection scan each time Playarr starts.\n\n" +
       "Flagged items appear in the Review Queue under the Duplicates tab.",
   },
+  "startup_rename_scan": {
+    group: "server",
+    label: "Rename Scan on Startup",
+    description: "Automatically scan for naming convention mismatches when the server starts.",
+    tooltip:
+      "Checks all files against the current naming convention each time Playarr starts.\n\n" +
+      "Mismatched items appear in the Review Queue under the Renames tab.\n" +
+      "Previously dismissed items are skipped.",
+  },
   "import_scrape_wikipedia": {
     group: "import",
     label: "Scrape Wikipedia",
@@ -333,7 +342,7 @@ interface SettingsTab {
 }
 
 const SETTINGS_TABS: SettingsTab[] = [
-  { id: "library",  label: "Library",  icon: <HardDrive size={16} />, groups: ["library", "import"], extras: ["genremanager"] },
+  { id: "library",  label: "Library",  icon: <HardDrive size={16} />, groups: ["library", "import"], extras: ["genremanager", "archive"] },
   { id: "media",    label: "Media",    icon: <Film size={16} />,      groups: ["av", "previews"] },
   { id: "ai",       label: "AI",       icon: <Sparkles size={16} />,  groups: ["ai"] },
   { id: "playback", label: "Playback", icon: <Play size={16} />,      groups: ["nowplaying"], extras: ["nowplaying", "partymode"] },
@@ -735,6 +744,17 @@ export function SettingsPage() {
           </section>
         )}
 
+        {currentTabDef.extras?.includes("archive") && (
+          <section>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
+              Archive Management
+            </h2>
+            <div className="card space-y-5">
+              <ArchiveManagement />
+            </div>
+          </section>
+        )}
+
         {currentTabDef.extras?.includes("newvideos") && (
           <section>
             <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
@@ -815,6 +835,7 @@ function StartupControls({
   const autoOpen = settings["auto_open_browser"]?.value === "true";
   const trayIcon = settings["minimize_to_tray"]?.value === "true";
   const dupeScanStartup = settings["startup_duplicate_scan"]?.value === "true";
+  const renameScanStartup = settings["startup_rename_scan"]?.value === "true";
   const [delayInput, setDelayInput] = useState(delaySec);
   const [syncing, setSyncing] = useState(false);
 
@@ -977,6 +998,33 @@ function StartupControls({
           <span
             className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
               dupeScanStartup ? "translate-x-[18px]" : "translate-x-[3px]"
+            }`}
+          />
+        </button>
+      </div>
+
+      {/* Rename Scan on Startup */}
+      <div className="flex items-center justify-between">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm font-medium text-text-primary">Rename Scan on Startup</p>
+            <Tooltip content="Checks all files against the naming convention each time Playarr starts. Mismatched items appear in the Review Queue. Previously dismissed items are skipped.">
+              <Info size={13} className="text-text-muted cursor-help" />
+            </Tooltip>
+          </div>
+          <p className="text-xs text-text-muted mt-0.5">
+            Automatically check for naming convention mismatches on launch
+          </p>
+        </div>
+        <button
+          onClick={() => onSave("startup_rename_scan", renameScanStartup ? "false" : "true", "bool")}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+            renameScanStartup ? "bg-accent" : "bg-surface-3"
+          }`}
+        >
+          <span
+            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+              renameScanStartup ? "translate-x-[18px]" : "translate-x-[3px]"
             }`}
           />
         </button>
@@ -1356,16 +1404,6 @@ function NamingConventionEditor({
   const [preview, setPreview] = useState<{ artist: string; title: string; version_type: string; path: string }[]>([]);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
-  const [bulkPreview, setBulkPreview] = useState<{
-    total: number;
-    needs_rename: number;
-    already_correct: number;
-    items: { video_id: number; artist: string; title: string; current_path: string; expected_path: string; needs_rename: boolean }[];
-  } | null>(null);
-  const [bulkLoading, setBulkLoading] = useState(false);
-  const [bulkExecuting, setBulkExecuting] = useState(false);
-  const [bulkResult, setBulkResult] = useState<{ renamed: number; failed: number; errors: string[] } | null>(null);
-  const { toast } = useToast();
 
   const patternDirty = pattern !== namingPattern;
   const structureDirty = structure !== folderStructure;
@@ -1405,36 +1443,6 @@ function NamingConventionEditor({
 
   const saveStructure = () => {
     onSave("library_folder_structure", structure);
-  };
-
-  const handleBulkPreview = async () => {
-    setBulkLoading(true);
-    setBulkResult(null);
-    try {
-      const res = await libraryApi.bulkRenamePreview();
-      setBulkPreview(res);
-    } catch {
-      toast({ type: "error", title: "Failed to generate bulk rename preview" });
-    } finally {
-      setBulkLoading(false);
-    }
-  };
-
-  const handleBulkExecute = async () => {
-    setBulkExecuting(true);
-    try {
-      const res = await libraryApi.bulkRenameExecute();
-      setBulkResult(res);
-      setBulkPreview(null);
-      toast({
-        type: res.failed > 0 ? "warning" : "success",
-        title: `Renamed ${res.renamed} videos${res.failed > 0 ? `, ${res.failed} failed` : ""}`,
-      });
-    } catch {
-      toast({ type: "error", title: "Bulk rename failed" });
-    } finally {
-      setBulkExecuting(false);
-    }
   };
 
   return (
@@ -1574,106 +1582,6 @@ function NamingConventionEditor({
           </div>
         )}
       </div>
-
-      {/* Bulk Rename */}
-      <div className="border-t border-white/5 pt-3 space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-medium text-text-primary">Bulk Rename</p>
-            <p className="text-xs text-text-muted">Rename all existing library files to match the current naming convention.</p>
-          </div>
-          <button
-            onClick={handleBulkPreview}
-            disabled={bulkLoading}
-            className="btn-secondary btn-sm flex items-center gap-1.5"
-          >
-            <RefreshCw size={14} className={bulkLoading ? "animate-spin" : ""} />
-            {bulkLoading ? "Scanning…" : "Preview Changes"}
-          </button>
-        </div>
-
-        {/* Bulk preview results */}
-        {bulkPreview && (
-          <div className="bg-surface-light/30 rounded-lg p-3 space-y-3">
-            <div className="flex items-center gap-4 text-xs">
-              <span className="text-text-muted">Total: <strong className="text-text-primary">{bulkPreview.total}</strong></span>
-              <span className="text-text-muted">Needs rename: <strong className="text-yellow-400">{bulkPreview.needs_rename}</strong></span>
-              <span className="text-text-muted">Already correct: <strong className="text-green-400">{bulkPreview.already_correct}</strong></span>
-            </div>
-
-            {bulkPreview.needs_rename > 0 && (
-              <>
-                <div className="max-h-60 overflow-y-auto space-y-2">
-                  {bulkPreview.items.filter(i => i.needs_rename).slice(0, 50).map((item) => (
-                    <div key={item.video_id} className="text-xs border-b border-white/5 pb-1.5">
-                      <p className="text-text-secondary font-medium">{item.artist} — {item.title}</p>
-                      <div className="flex items-start gap-1 mt-0.5">
-                        <span className="text-red-400 shrink-0">−</span>
-                        <span className="font-mono text-red-400/70 break-all">{item.current_path}</span>
-                      </div>
-                      <div className="flex items-start gap-1">
-                        <span className="text-green-400 shrink-0">+</span>
-                        <span className="font-mono text-green-400/70 break-all">{item.expected_path}</span>
-                      </div>
-                    </div>
-                  ))}
-                  {bulkPreview.items.filter(i => i.needs_rename).length > 50 && (
-                    <p className="text-xs text-text-muted">…and {bulkPreview.items.filter(i => i.needs_rename).length - 50} more</p>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={handleBulkExecute}
-                    disabled={bulkExecuting}
-                    className="btn-primary btn-sm flex items-center gap-1.5"
-                  >
-                    {bulkExecuting ? (
-                      <><RefreshCw size={14} className="animate-spin" /> Renaming…</>
-                    ) : (
-                      <><Check size={14} /> Rename {bulkPreview.needs_rename} Files</>
-                    )}
-                  </button>
-                  <button
-                    onClick={() => setBulkPreview(null)}
-                    className="btn-ghost btn-sm text-xs"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </>
-            )}
-
-            {bulkPreview.needs_rename === 0 && (
-              <div className="flex items-center gap-2 text-xs text-green-400">
-                <Check size={14} />
-                All files already match the current naming convention.
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Bulk execution result */}
-        {bulkResult && (
-          <div className={`rounded-lg p-3 text-xs space-y-1 ${bulkResult.failed > 0 ? "bg-yellow-500/10 border border-yellow-500/20" : "bg-green-500/10 border border-green-500/20"}`}>
-            <div className="flex items-center gap-2">
-              {bulkResult.failed > 0 ? <AlertTriangle size={14} className="text-yellow-400" /> : <Check size={14} className="text-green-400" />}
-              <span className="font-medium text-text-primary">
-                Renamed {bulkResult.renamed} file{bulkResult.renamed !== 1 ? "s" : ""}
-                {bulkResult.failed > 0 && `, ${bulkResult.failed} failed`}
-              </span>
-            </div>
-            {bulkResult.errors.length > 0 && (
-              <div className="mt-1 space-y-0.5 text-yellow-400/80">
-                {bulkResult.errors.slice(0, 10).map((err, i) => (
-                  <p key={i} className="font-mono break-all">{err}</p>
-                ))}
-                {bulkResult.errors.length > 10 && <p>…and {bulkResult.errors.length - 10} more errors</p>}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -1682,7 +1590,6 @@ function LibraryMaintenanceContent() {
   const { toast } = useToast();
   const scanMutation = useLibraryScan();
   const exportMutation = useLibraryExport();
-  const dupeMutation = useLibraryDuplicateScan();
   const [cleanDialogOpen, setCleanDialogOpen] = useState(false);
   const [exportMode, setExportMode] = useState<string>("skip_existing");
 
@@ -1709,26 +1616,6 @@ function LibraryMaintenanceContent() {
             >
               <ScanLine size={14} />
               {scanMutation.isPending ? "Scanning…" : "Scan"}
-            </button>
-          </div>
-          <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-text-secondary">Scan for Duplicates</p>
-              <p className="text-xs text-text-muted leading-relaxed">
-                Detect potential duplicate videos by comparing artist and title. Flagged items appear in the Review Queue for resolution.
-              </p>
-            </div>
-            <button
-              onClick={() =>
-                dupeMutation.mutate(undefined, {
-                  onSuccess: () => toast({ type: "success", title: "Duplicate scan started" }),
-                })
-              }
-              disabled={dupeMutation.isPending}
-              className="btn-secondary btn-sm flex items-center gap-1.5 shrink-0"
-            >
-              <Copy size={14} />
-              {dupeMutation.isPending ? "Scanning…" : "Scan"}
             </button>
           </div>
           <div className="flex items-start gap-3">
@@ -1798,6 +1685,224 @@ function LibraryMaintenanceContent() {
         <CleanLibraryDialog open={cleanDialogOpen} onClose={() => setCleanDialogOpen(false)} />
       )}
     </>
+  );
+}
+
+/* ── Archive Management ── */
+
+function ArchiveManagement() {
+  const { toast } = useToast();
+  const [items, setItems] = useState<Array<{
+    path: string; folder: string; reason: string; artist: string;
+    title: string; video_id: number | null; archived_at: string; file_size_bytes: number;
+  }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [clearing, setClearing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [filter, setFilter] = useState<"all" | "edit" | "redownload">("all");
+
+  const fetchItems = async () => {
+    setLoading(true);
+    try {
+      const data = await settingsApi.archiveItems();
+      setItems(data);
+    } catch {
+      toast({ type: "error", title: "Failed to load archive items" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchItems(); }, []);
+
+  const filtered = filter === "all" ? items : items.filter(i => i.reason === filter);
+
+  const totalSize = items.reduce((s, i) => s + i.file_size_bytes, 0);
+  const editCount = items.filter(i => i.reason === "edit").length;
+  const redownloadCount = items.filter(i => i.reason === "redownload").length;
+
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
+
+  const formatDate = (iso: string) => {
+    if (!iso) return "Unknown";
+    try {
+      return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch { return iso; }
+  };
+
+  const handleDelete = async () => {
+    if (selected.size === 0) return;
+    if (!window.confirm(`Delete ${selected.size} archived item(s)? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      const result = await settingsApi.archiveDelete(Array.from(selected));
+      toast({ type: "success", title: `Deleted ${result.deleted} archive item(s)` });
+      if (result.errors.length) toast({ type: "error", title: result.errors.join(", ") });
+      setSelected(new Set());
+      fetchItems();
+    } catch {
+      toast({ type: "error", title: "Failed to delete archive items" });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (!window.confirm("Delete ALL archived files? This permanently removes all archived originals and cannot be undone.")) return;
+    setClearing(true);
+    try {
+      const result = await settingsApi.archiveClear();
+      toast({ type: "success", title: `Cleared ${result.deleted} archive item(s)` });
+      if (result.errors.length) toast({ type: "error", title: result.errors.join(", ") });
+      setSelected(new Set());
+      fetchItems();
+    } catch {
+      toast({ type: "error", title: "Failed to clear archive" });
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const toggleSelect = (folder: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(folder)) next.delete(folder); else next.add(folder);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selected.size === filtered.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(filtered.map(i => i.folder)));
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-text-primary flex items-center gap-2">
+            <Archive size={16} /> Archive Management
+          </p>
+          <p className="text-xs text-text-muted mt-0.5">
+            {items.length} archived item{items.length !== 1 ? "s" : ""} · {formatSize(totalSize)}
+            {editCount > 0 && <span className="ml-2 text-blue-400">{editCount} edit{editCount !== 1 ? "s" : ""}</span>}
+            {redownloadCount > 0 && <span className="ml-2 text-amber-400">{redownloadCount} redownload{redownloadCount !== 1 ? "s" : ""}</span>}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => fetchItems()}
+            disabled={loading}
+            className="btn-secondary btn-sm flex items-center gap-1.5"
+          >
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+            Refresh
+          </button>
+          <button
+            onClick={handleClearAll}
+            disabled={clearing || items.length === 0}
+            className="btn-sm flex items-center gap-1.5 text-red-400 border border-red-500/30 hover:bg-red-500/10 rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40"
+          >
+            <Trash2 size={14} />
+            {clearing ? "Clearing…" : "Clear All"}
+          </button>
+        </div>
+      </div>
+
+      {/* Filter tabs */}
+      <div className="flex items-center gap-1 border-b border-border">
+        {(["all", "edit", "redownload"] as const).map(f => (
+          <button
+            key={f}
+            onClick={() => { setFilter(f); setSelected(new Set()); }}
+            className={`px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
+              filter === f
+                ? "border-accent text-accent"
+                : "border-transparent text-text-muted hover:text-text-secondary"
+            }`}
+          >
+            {f === "all" ? `All (${items.length})` : f === "edit" ? `Edits (${editCount})` : `Redownloads (${redownloadCount})`}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 size={20} className="animate-spin text-text-muted" />
+        </div>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-text-muted text-center py-6">No archived items</p>
+      ) : (
+        <>
+          {/* Select-all bar + delete selected */}
+          <div className="flex items-center justify-between text-xs text-text-muted">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={selected.size === filtered.length && filtered.length > 0}
+                ref={(el) => { if (el) el.indeterminate = selected.size > 0 && selected.size < filtered.length; }}
+                onChange={toggleSelectAll}
+                className="rounded border-border"
+              />
+              {selected.size > 0 ? `${selected.size} selected` : "Select all"}
+            </label>
+            {selected.size > 0 && (
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors"
+              >
+                <Trash2 size={12} />
+                {deleting ? "Deleting…" : `Delete selected (${selected.size})`}
+              </button>
+            )}
+          </div>
+
+          {/* Items list */}
+          <div className="space-y-1 max-h-[400px] overflow-y-auto pr-1">
+            {filtered.map(item => (
+              <label
+                key={item.folder}
+                className={`flex items-center gap-3 px-3 py-2 rounded-md cursor-pointer transition-colors ${
+                  selected.has(item.folder) ? "bg-accent/10 border border-accent/30" : "hover:bg-surface-hover border border-transparent"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(item.folder)}
+                  onChange={() => toggleSelect(item.folder)}
+                  className="rounded border-border shrink-0"
+                />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-text-primary truncate">
+                    {item.artist && item.title ? `${item.artist} — ${item.title}` : item.path.split(/[\\/]/).pop()}
+                  </p>
+                  <p className="text-xs text-text-muted truncate">{item.folder}</p>
+                </div>
+                <span className={`text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${
+                  item.reason === "redownload"
+                    ? "bg-amber-500/15 text-amber-400"
+                    : "bg-blue-500/15 text-blue-400"
+                }`}>
+                  {item.reason}
+                </span>
+                <span className="text-xs text-text-muted shrink-0 w-16 text-right">{formatSize(item.file_size_bytes)}</span>
+                <span className="text-xs text-text-muted shrink-0 w-28 text-right">{formatDate(item.archived_at)}</span>
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

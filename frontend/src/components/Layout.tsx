@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
-  Library, Users, CalendarDays, Tags, Disc3, Star, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles, ArrowUpCircle, X,
+  Library, Users, CalendarDays, Tags, Disc3, Star, MonitorPlay, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles, ArrowUpCircle, X,
 } from "lucide-react";
 import { useStats, useReviewQueue, useUpdateCheck } from "@/hooks/queries";
 import { useState } from "react";
@@ -20,6 +20,7 @@ const navItems = [
   { to: "/years", icon: CalendarDays, label: "Years" },
   { to: "/genres", icon: Tags, label: "Genres" },
   { to: "/ratings", icon: Star, label: "Ratings" },
+  { to: "/quality", icon: MonitorPlay, label: "Quality" },
   { to: "/playlists", icon: ListMusic, label: "Playlists" },
   { to: "/new-videos", icon: Sparkles, label: "New Videos" },
   "separator",

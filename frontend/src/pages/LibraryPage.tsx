@@ -114,6 +114,7 @@ export function LibraryPage() {
     import_method: searchParams.get("import_method") ?? undefined,
     song_rating: searchParams.get("song_rating") ? Number(searchParams.get("song_rating")) : undefined,
     video_rating: searchParams.get("video_rating") ? Number(searchParams.get("video_rating")) : undefined,
+    quality: searchParams.get("quality") ?? undefined,
     sort_by: searchParams.get("sort") ?? loadStorage(STORAGE_KEY_SORT, "artist"),
     sort_dir: (searchParams.get("dir") as "asc" | "desc") ?? loadStorage(STORAGE_KEY_DIR, "asc") as "asc" | "desc",
   };
@@ -224,13 +225,14 @@ export function LibraryPage() {
     year_to: params.year_to,
     song_rating: params.song_rating,
     video_rating: params.video_rating,
+    quality: params.quality,
   };
 
   const handleFilterChange = useCallback((f: FacetFilterParams) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       // Sync all facet keys
-      const keys: (keyof FacetFilterParams)[] = ["version_type", "artist", "genre", "year_from", "year_to", "song_rating", "video_rating"];
+      const keys: (keyof FacetFilterParams)[] = ["version_type", "artist", "genre", "year_from", "year_to", "song_rating", "video_rating", "quality"];
       for (const k of keys) {
         if (f[k] != null && f[k] !== "") next.set(k, String(f[k]));
         else next.delete(k);
@@ -248,6 +250,7 @@ export function LibraryPage() {
     params.year && { key: "year", label: `Year: ${params.year}` },
     params.enrichment && { key: "enrichment", label: `AI: ${params.enrichment}` },
     params.import_method && { key: "import_method", label: `Source: ${params.import_method}` },
+    params.quality && { key: "quality", label: `Quality: ${params.quality}` },
   ].filter(Boolean) as { key: string; label: string }[];
 
   return (

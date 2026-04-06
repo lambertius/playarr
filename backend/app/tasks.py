@@ -819,9 +819,10 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
         _update_job(job_id, current_step="Organizing files", progress_percent=65)
 
         existing_folder = video_item.folder_path
+        _existing_file_path = video_item.file_path  # capture before archive
 
         # Preserve artwork files (poster, thumb) from the old folder before
-        # archiving â€” organize_file archives the entire folder and these
+        # archiving -- organize_file archives the entire folder and these
         # non-video assets would otherwise be lost.
         _preserved_artwork: list = []
         if existing_folder and os.path.isdir(existing_folder):
@@ -836,12 +837,40 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
                         _art_data = open(_src_art, 'rb').read()
                         _preserved_artwork.append((_af, _art_data))
 
+        # Archive the existing folder first (with manifest for restore)
+        _archive_dest = None
+        if existing_folder and os.path.isdir(existing_folder):
+            from app.services.file_organizer import archive_folder as _archive_folder
+            _archive_dest = _archive_folder(existing_folder)
+            _append_job_log(job_id, f"Archived original to: {_archive_dest}")
+
+            # Write archive manifest with redownload reason
+            try:
+                from app.routers.video_editor import write_archive_manifest
+                _archive_video = None
+                for _afn in os.listdir(_archive_dest):
+                    if os.path.splitext(_afn)[1].lower() in ('.mkv', '.mp4', '.webm', '.avi', '.mov', '.flv'):
+                        _archive_video = os.path.join(_archive_dest, _afn)
+                        break
+                if _archive_video and _existing_file_path:
+                    _rdl_settings = get_settings()
+                    write_archive_manifest(
+                        _archive_video,
+                        _existing_file_path,
+                        _rdl_settings.library_dir,
+                        video_id=video_item.id,
+                        artist=video_item.artist or "",
+                        title=video_item.title or "",
+                        archive_reason="redownload",
+                    )
+            except Exception as _e:
+                _append_job_log(job_id, f"Archive manifest write warning: {_e}")
+
         new_folder, new_file = organize_file(
             downloaded_file,
             video_item.artist,
             video_item.title,
             resolution_label,
-            existing_folder=existing_folder,
             version_type=video_item.version_type or "normal",
             alternate_version_label=video_item.alternate_version_label or "",
         )
@@ -879,6 +908,13 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
                 sig["loudness_lufs"] = after
                 _set_pipeline_step(job_id, "normalize", "success")
                 _set_processing_flag(db, video_item, "audio_normalized", method="redownload")
+                # Clear review flag if it was set due to a prior normalization failure
+                if (video_item.review_status == "needs_human_review"
+                        and video_item.review_reason
+                        and "normalization failed" in video_item.review_reason.lower()):
+                    video_item.review_status = "none"
+                    video_item.review_reason = None
+                    video_item.review_category = None
             else:
                 _append_job_log(job_id, "Normalization skipped or failed")
                 _set_pipeline_step(job_id, "normalize", "skipped")
@@ -935,69 +971,122 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
             _append_job_log(job_id, f"Playarr XML write error: {e}")
 
         # --- Update ONLY file-related fields on video_item ---
+        # Route the final commit through the centralised write queue so it
+        # serialises with import-pipeline writes.  The original ``db``
+        # session is NOT committed -- all state is replayed inside a fresh
+        # session on the writer thread, eliminating SQLite lock contention.
         _update_job(job_id, current_step="Updating file metadata", progress_percent=90)
-        _save_metadata_snapshot(db, video_item, "redownload")
 
-        video_item.folder_path = new_folder
-        video_item.file_path = new_file
-        video_item.file_size_bytes = os.path.getsize(new_file) if os.path.isfile(new_file) else None
-        video_item.resolution_label = resolution_label
+        # Capture values computed during the task so the write-queue
+        # closure is fully self-contained.
+        _final_processing_state = dict(video_item.processing_state or {})
+        _file_size = os.path.getsize(new_file) if os.path.isfile(new_file) else None
+        _vi_review_status = video_item.review_status
+        _vi_review_reason = video_item.review_reason
+        _vi_review_category = video_item.review_category
+        _vi_id = video_item.id
+        _snapshot_data = {
+            "artist": video_item.artist,
+            "title": video_item.title,
+            "album": video_item.album,
+            "year": video_item.year,
+            "plot": video_item.plot,
+            "genres": [g.name for g in video_item.genres] if video_item.genres else [],
+            "mb_artist_id": video_item.mb_artist_id,
+            "mb_recording_id": video_item.mb_recording_id,
+            "mb_release_id": video_item.mb_release_id,
+        }
+        _sig_copy = dict(sig)
+        _norm_before, _norm_after, _norm_gain = before, after, gain
+        _norm_target = get_settings().normalization_target_lufs
+        _new_folder_final = new_folder
+        _new_file_final = new_file
+        _resolution_final = resolution_label
 
-        # Update MediaAsset file_path records to point to the new folder
-        _asset_records = db.query(MediaAsset).filter(
-            MediaAsset.video_id == video_item.id,
-        ).all()
-        for _ma in _asset_records:
-            if _ma.file_path and os.path.dirname(_ma.file_path) != new_folder:
-                _old_basename = os.path.basename(_ma.file_path)
-                _new_asset_path = os.path.join(new_folder, _old_basename)
-                if os.path.isfile(_new_asset_path):
-                    _ma.file_path = _new_asset_path
-                else:
-                    # Try matching by asset type pattern in restored files
-                    _new_base = os.path.basename(new_folder)
-                    _ext = os.path.splitext(_old_basename)[1]
-                    if _ma.asset_type == "poster":
-                        _candidate = os.path.join(new_folder, f"{_new_base}-poster{_ext}")
-                    elif _ma.asset_type == "video_thumb":
-                        _candidate = os.path.join(new_folder, f"{_new_base}-thumb{_ext}")
-                    else:
-                        _candidate = ""
-                    if _candidate and os.path.isfile(_candidate):
-                        _ma.file_path = _candidate
+        # Close the outer session -- we no longer need it for writes.
+        db.rollback()
+        db.close()
 
-        # Update quality signature
-        if video_item.quality_signature:
-            qs = video_item.quality_signature
-        else:
-            qs = QualitySignature(video_id=video_item.id)
-            db.add(qs)
-        for key, val in sig.items():
-            if hasattr(qs, key):
-                setattr(qs, key, val)
+        from app.pipeline_url.write_queue import db_write
+        from sqlalchemy.orm.attributes import flag_modified as _flag_modified
 
-        # Normalization history
-        settings = get_settings()
-        if before is not None:
-            norm_hist = NormalizationHistory(
-                video_id=video_item.id,
-                target_lufs=settings.normalization_target_lufs,
-                measured_lufs_before=before,
-                measured_lufs_after=after,
-                gain_applied_db=gain,
-            )
-            db.add(norm_hist)
+        def _apply_redownload_commit():
+            _db = SessionLocal()
+            try:
+                _vi = _db.query(VideoItem).get(_vi_id)
 
-        # Link job to video
-        job = db.query(ProcessingJob).get(job_id)
-        if job:
-            job.video_id = video_item.id
-            job.status = JobStatus.complete
-            job.progress_percent = 100
-            job.current_step = "Complete"
-            job.completed_at = datetime.now(timezone.utc)
+                # Metadata snapshot (undo breadcrumb)
+                _snap = MetadataSnapshot(
+                    video_id=_vi_id,
+                    snapshot_data=_snapshot_data,
+                    reason="redownload",
+                )
+                _db.add(_snap)
 
-        db.commit()
+                _vi.folder_path = _new_folder_final
+                _vi.file_path = _new_file_final
+                _vi.file_size_bytes = _file_size
+                _vi.resolution_label = _resolution_final
+                _vi.processing_state = _final_processing_state
+                _vi.review_status = _vi_review_status
+                _vi.review_reason = _vi_review_reason
+                _vi.review_category = _vi_review_category
+                _flag_modified(_vi, "processing_state")
+
+                # Update MediaAsset file_path records
+                for _ma in _db.query(MediaAsset).filter(
+                    MediaAsset.video_id == _vi_id,
+                ).all():
+                    if _ma.file_path and os.path.dirname(_ma.file_path) != _new_folder_final:
+                        _old_basename = os.path.basename(_ma.file_path)
+                        _new_asset_path = os.path.join(_new_folder_final, _old_basename)
+                        if os.path.isfile(_new_asset_path):
+                            _ma.file_path = _new_asset_path
+                        else:
+                            _new_base = os.path.basename(_new_folder_final)
+                            _ext = os.path.splitext(_old_basename)[1]
+                            if _ma.asset_type == "poster":
+                                _candidate = os.path.join(_new_folder_final, f"{_new_base}-poster{_ext}")
+                            elif _ma.asset_type == "video_thumb":
+                                _candidate = os.path.join(_new_folder_final, f"{_new_base}-thumb{_ext}")
+                            else:
+                                _candidate = ""
+                            if _candidate and os.path.isfile(_candidate):
+                                _ma.file_path = _candidate
+
+                # Quality signature
+                qs = _vi.quality_signature
+                if not qs:
+                    qs = QualitySignature(video_id=_vi_id)
+                    _db.add(qs)
+                for key, val in _sig_copy.items():
+                    if hasattr(qs, key):
+                        setattr(qs, key, val)
+
+                # Normalization history
+                if _norm_before is not None:
+                    _db.add(NormalizationHistory(
+                        video_id=_vi_id,
+                        target_lufs=_norm_target,
+                        measured_lufs_before=_norm_before,
+                        measured_lufs_after=_norm_after,
+                        gain_applied_db=_norm_gain,
+                    ))
+
+                # Link job to video & mark complete
+                _job = _db.query(ProcessingJob).get(job_id)
+                if _job:
+                    _job.video_id = _vi_id
+                    _job.status = JobStatus.complete
+                    _job.progress_percent = 100
+                    _job.current_step = "Complete"
+                    _job.completed_at = datetime.now(timezone.utc)
+
+                _db.commit()
+            finally:
+                _db.close()
+
+        db_write(_apply_redownload_commit)
         _append_job_log(job_id, f"Redownload complete â€” {resolution_label}")
         telemetry_store.remove(job_id)
 
@@ -1009,7 +1098,10 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
             pass
 
     except JobCancelledError:
-        db.rollback()
+        try:
+            db.rollback()
+        except Exception:
+            pass
         clear_cancel(job_id)
         _update_job(job_id, status=JobStatus.cancelled,
                     error_message="Cancelled by user",
@@ -1023,7 +1115,10 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
         except Exception:
             pass
     except Exception as e:
-        db.rollback()
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.error(f"[Job {job_id}] Redownload FATAL: {e}\n{traceback.format_exc()}")
         _update_job(job_id, status=JobStatus.failed, error_message=str(e),
                      completed_at=datetime.now(timezone.utc))
@@ -1032,7 +1127,10 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
     finally:
         if _pipeline_locked:
             _pipeline_lock.release()
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -4723,6 +4821,8 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                         video_item.review_reason = xml_sidecar_data.get("review_reason") or video_item.review_reason
                     video_item.review_history = xml_rh or None
                     video_item.dismissed_duplicate_ids = xml_sidecar_data.get("dismissed_duplicate_ids")
+                    if xml_sidecar_data.get("rename_dismissed"):
+                        video_item.rename_dismissed = True
                     video_item.mb_artist_id = xml_sidecar_data.get("mb_artist_id")
                     video_item.mb_recording_id = xml_sidecar_data.get("mb_recording_id")
                     video_item.mb_release_id = xml_sidecar_data.get("mb_release_id")
@@ -5084,56 +5184,173 @@ def _normalize_title_for_dup(title: str) -> str:
 
 
 @celery_app.task(bind=True)
-def duplicate_scan_task(self, job_id: int):
-    """Scan library for potential duplicate video items by artist+title."""
+def duplicate_scan_task(self, job_id: int, rescan_all: bool = False):
+    """Scan library for potential duplicate video items.
+
+    Detection tiers (in order of priority):
+    1. Normalized artist + title (with version labels stripped)
+    2. AcoustID identifier (same recording, exact audio match)
+    3. Audio fingerprint similarity (fuzzy match, handles quality/length diffs)
+
+    Args:
+        rescan_all: If True, ignore previously dismissed duplicate pairs and
+                    re-scan everything.  If False (default), honour
+                    dismissed_duplicate_ids flags.
+    """
     _update_job(job_id, status=JobStatus.analyzing, started_at=datetime.now(timezone.utc),
                 celery_task_id=getattr(getattr(self, "request", None), "id", None))
 
+    FINGERPRINT_SIMILARITY_THRESHOLD = 0.55
+
     db = SessionLocal()
     try:
-        # First: clean stale dismissed_duplicate_ids referencing deleted videos
-        all_video_ids = set(
-            r[0] for r in db.query(VideoItem.id).all()
-        )
-        stale_cleaned = 0
-        for vi in db.query(VideoItem).filter(VideoItem.dismissed_duplicate_ids.isnot(None)).all():
-            cleaned = [did for did in (vi.dismissed_duplicate_ids or []) if did in all_video_ids]
-            if len(cleaned) != len(vi.dismissed_duplicate_ids or []):
-                vi.dismissed_duplicate_ids = cleaned if cleaned else None
-                stale_cleaned += 1
-        if stale_cleaned:
-            db.commit()
-            _append_job_log(job_id, f"Cleaned stale dismissed IDs from {stale_cleaned} items")
+        # ── Phase 0: optionally clear dismissed flags ─────────────────
+        if rescan_all:
+            cleared = 0
+            for vi in db.query(VideoItem).filter(VideoItem.dismissed_duplicate_ids.isnot(None)).all():
+                vi.dismissed_duplicate_ids = None
+                cleared += 1
+            if cleared:
+                db.commit()
+                _append_job_log(job_id, f"Rescan-all: cleared dismissed flags from {cleared} items")
+        else:
+            # Clean stale dismissed_duplicate_ids referencing deleted videos
+            all_video_ids = set(
+                r[0] for r in db.query(VideoItem.id).all()
+            )
+            stale_cleaned = 0
+            for vi in db.query(VideoItem).filter(VideoItem.dismissed_duplicate_ids.isnot(None)).all():
+                cleaned = [did for did in (vi.dismissed_duplicate_ids or []) if did in all_video_ids]
+                if len(cleaned) != len(vi.dismissed_duplicate_ids or []):
+                    vi.dismissed_duplicate_ids = cleaned if cleaned else None
+                    stale_cleaned += 1
+            if stale_cleaned:
+                db.commit()
+                _append_job_log(job_id, f"Cleaned stale dismissed IDs from {stale_cleaned} items")
 
         all_items = db.query(VideoItem).all()
+        items_by_id = {vi.id: vi for vi in all_items}
         _append_job_log(job_id, f"Scanning {len(all_items)} items for duplicates")
 
-        # Build buckets keyed by normalized artist + normalized title (with
-        # version labels stripped so "Never Meant" and "Never Meant (Alternate
-        # Version)" land in the same bucket).
-        buckets: dict[str, list[VideoItem]] = {}
+        # ── Phase 1: name-based buckets ───────────────────────────────
+        # Normalized artist + title (version labels stripped so "Never
+        # Meant" and "Never Meant (Alternate Version)" land together).
+        name_buckets: dict[str, list[VideoItem]] = {}
         for vi in all_items:
             if not vi.artist or not vi.title:
                 continue
             key = f"{_normalize_for_dup(vi.artist)}||{_normalize_title_for_dup(vi.title)}"
-            buckets.setdefault(key, []).append(vi)
+            name_buckets.setdefault(key, []).append(vi)
 
-        dup_groups = {k: v for k, v in buckets.items() if len(v) > 1}
-        _append_job_log(job_id, f"Found {len(dup_groups)} potential duplicate groups")
+        dup_groups = {k: v for k, v in name_buckets.items() if len(v) > 1}
+        _append_job_log(job_id, f"Name match: {len(dup_groups)} groups")
 
+        # ── Phase 2: acoustid_id buckets ──────────────────────────────
+        acoustid_buckets: dict[str, list[VideoItem]] = {}
+        for vi in all_items:
+            if vi.acoustid_id:
+                acoustid_buckets.setdefault(vi.acoustid_id, []).append(vi)
+
+        acoustid_groups = {k: v for k, v in acoustid_buckets.items() if len(v) > 1}
+        # Merge acoustid groups that aren't already covered by name buckets
+        already_paired: set[frozenset[int]] = set()
+        for items in dup_groups.values():
+            ids = frozenset(vi.id for vi in items)
+            already_paired.add(ids)
+
+        acoustid_new = 0
+        for aid, items in acoustid_groups.items():
+            ids = frozenset(vi.id for vi in items)
+            if ids not in already_paired:
+                dup_key = f"__acoustid__{aid}"
+                dup_groups[dup_key] = items
+                already_paired.add(ids)
+                acoustid_new += 1
+        if acoustid_new:
+            _append_job_log(job_id, f"AcoustID match: {acoustid_new} additional groups")
+
+        # ── Phase 3: fingerprint similarity ───────────────────────────
+        # For videos with stored fingerprints that aren't already in a
+        # duplicate group, do pairwise comparison.
+        fp_items = [vi for vi in all_items if vi.audio_fingerprint]
+        grouped_ids = set()
+        for items in dup_groups.values():
+            for vi in items:
+                grouped_ids.add(vi.id)
+
+        ungrouped_fp = [vi for vi in fp_items if vi.id not in grouped_ids]
+        fp_new = 0
+
+        if len(ungrouped_fp) >= 2:
+            try:
+                from app.ai.fingerprint_service import fingerprint_similarity
+                _append_job_log(job_id, f"Fingerprint comparison: checking {len(ungrouped_fp)} items")
+
+                # Build similarity pairs via pairwise comparison
+                # (O(n^2) but only on ungrouped fingerprinted items — typically small)
+                fp_pair_groups: dict[int, set[int]] = {}  # union-find-like
+                for i in range(len(ungrouped_fp)):
+                    for j in range(i + 1, len(ungrouped_fp)):
+                        sim = fingerprint_similarity(
+                            ungrouped_fp[i].audio_fingerprint,
+                            ungrouped_fp[j].audio_fingerprint,
+                        )
+                        if sim >= FINGERPRINT_SIMILARITY_THRESHOLD:
+                            a_id, b_id = ungrouped_fp[i].id, ungrouped_fp[j].id
+                            # Merge into same group
+                            group_a = fp_pair_groups.get(a_id)
+                            group_b = fp_pair_groups.get(b_id)
+                            if group_a and group_b:
+                                group_a.update(group_b)
+                                for mid in group_b:
+                                    fp_pair_groups[mid] = group_a
+                            elif group_a:
+                                group_a.add(b_id)
+                                fp_pair_groups[b_id] = group_a
+                            elif group_b:
+                                group_b.add(a_id)
+                                fp_pair_groups[a_id] = group_b
+                            else:
+                                new_group = {a_id, b_id}
+                                fp_pair_groups[a_id] = new_group
+                                fp_pair_groups[b_id] = new_group
+
+                # Collect unique groups
+                seen_groups: set[int] = set()
+                for vid, members in fp_pair_groups.items():
+                    group_id = id(members)
+                    if group_id in seen_groups:
+                        continue
+                    seen_groups.add(group_id)
+                    dup_key = f"__fingerprint__{group_id}"
+                    dup_groups[dup_key] = [items_by_id[mid] for mid in members if mid in items_by_id]
+                    fp_new += 1
+            except Exception as fp_err:
+                logger.warning(f"Fingerprint comparison failed: {fp_err}")
+                _append_job_log(job_id, f"Fingerprint comparison error: {fp_err}")
+
+        if fp_new:
+            _append_job_log(job_id, f"Fingerprint similarity: {fp_new} additional groups")
+
+        _append_job_log(job_id, f"Total: {len(dup_groups)} duplicate groups")
+
+        # ── Phase 4: flag for review ──────────────────────────────────
         flagged = 0
         for key, items in dup_groups.items():
             for vi in items:
                 other_ids = [x.id for x in items if x.id != vi.id]
 
                 # Check dismissed_duplicate_ids — skip if ALL partners are dismissed
-                dismissed = set(vi.dismissed_duplicate_ids or [])
-                undismissed = [oid for oid in other_ids if oid not in dismissed]
-                if not undismissed:
-                    continue
+                if not rescan_all:
+                    dismissed = set(vi.dismissed_duplicate_ids or [])
+                    undismissed = [oid for oid in other_ids if oid not in dismissed]
+                    if not undismissed:
+                        continue
+                else:
+                    undismissed = other_ids
 
-                # Skip if already flagged for review
-                if vi.review_status in ("needs_human_review", "needs_ai_review"):
+                # If already flagged as duplicate, skip
+                if vi.review_status in ("needs_human_review", "needs_ai_review") and vi.review_category == "duplicate":
                     continue
 
                 vi.review_status = "needs_human_review"

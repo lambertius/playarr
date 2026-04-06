@@ -59,6 +59,11 @@ class FinalReviewResult:
     changes: List[str] = field(default_factory=list)
     scraper_overrides: List[str] = field(default_factory=list)
 
+    # Proposed removals — fields the AI recommends setting to null because
+    # the scraped value is incorrect and no correct replacement was found.
+    # Dict mapping field name → reason for removal.
+    proposed_removals: Dict[str, str] = field(default_factory=dict)
+
     # Debugging
     raw_response: str = ""
     prompt_used: str = ""
@@ -176,7 +181,13 @@ If artwork was fetched, confirm it matches the expected song/album. Flag if:
 
 ### Step 4 Ã¢â‚¬â€ Confidence Assessment
 Rate your confidence for each field (0.0Ã¢â‚¬â€œ1.0).
+### Step 5 — Recommend Removals
+If any scraped field contains a value that is **incorrect** and you could not find a correct replacement, add it to `proposed_removals`. This tells the system to set the field to null rather than keeping wrong data. Use this when:
+- The scraped album is actually the parent studio album but no single/release name was found
+- A scraped year is clearly wrong but the correct year is unknown
+- Genres are clearly wrong for this artist/song
 
+Do NOT use `proposed_removals` for artist or title — those are required fields. Only use it when the current value is verifiably wrong. An empty `proposed_removals` object means all scraped values are acceptable or were corrected in `proposed`.
 ## RESPONSE FORMAT
 Respond in **valid JSON only**:
 {{
@@ -205,7 +216,10 @@ Respond in **valid JSON only**:
   ],
   "scraper_overrides": [
     "Fields where scraper output was overridden and why"
-  ]
+  ],
+  "proposed_removals": {{
+    "field_name": "Reason why this field's value is incorrect and should be removed (set to null)"
+  }}
 }}"""
 
 
@@ -433,6 +447,18 @@ def _parse_final_review_response(raw: str) -> FinalReviewResult:
 
     result.changes = data.get("changes", [])
     result.scraper_overrides = data.get("scraper_overrides", [])
+
+    # Parse proposed_removals — AI can recommend specific fields be
+    # set to null when the scraped value is wrong and no replacement
+    # was found.
+    raw_removals = data.get("proposed_removals", {})
+    if isinstance(raw_removals, dict):
+        result.proposed_removals = {
+            k: str(v) for k, v in raw_removals.items()
+            if isinstance(k, str) and v
+        }
+    else:
+        result.proposed_removals = {}
 
     return result
 

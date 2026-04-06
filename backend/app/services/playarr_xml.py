@@ -255,6 +255,10 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
         for did in video.dismissed_duplicate_ids:
             _txt(dd, "id", did)
 
+    # Rename dismissed — user accepted the current filename
+    if video.rename_dismissed:
+        _txt(flags, "rename_dismissed", "true")
+
     # ── related versions ──
     if video.related_versions:
         import json as _json
@@ -644,6 +648,11 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
             ids = [_int(id_el) for id_el in dd_el.findall("id") if _int(id_el)]
             if ids:
                 result["dismissed_duplicate_ids"] = ids
+
+        # Rename dismissed
+        rd_text = _text(flags_el.find("rename_dismissed"))
+        if rd_text and rd_text.lower() in ("true", "1", "yes"):
+            result["rename_dismissed"] = True
 
     # ── related versions ──
     rv_el = root.find("related_versions")
