@@ -333,18 +333,22 @@ def _save_metadata_snapshot(db, video_item: VideoItem, reason: str):
 # Platform metadata backfill
 # ---------------------------------------------------------------------------
 
-def _backfill_source_platform_metadata(db, video_item, job_id: int):
-    """Re-fetch platform metadata from yt-dlp for Sources missing channel_name."""
+def _backfill_source_platform_metadata(db, video_item, job_id: int, force: bool = False):
+    """Re-fetch platform metadata from yt-dlp for Sources missing channel_name.
+
+    When ``force=True`` always re-fetch — used by scrape-metadata to pick up
+    corrected source URLs.
+    """
     if not video_item.sources:
         return
     source = video_item.sources[0]
-    if source.channel_name:
+    if source.channel_name and not force:
         return  # already populated
     url = source.canonical_url or source.original_url
     if not url:
         return
     try:
-        _append_job_log(job_id, "Backfilling platform metadata from yt-dlp...")
+        _append_job_log(job_id, "Refreshing platform metadata from yt-dlp...")
         _, info = get_available_formats(url)
         meta = extract_metadata_from_ytdlp(info)
         source.channel_name = meta.get("channel") or meta.get("uploader")
@@ -2872,7 +2876,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
 
         _check_cancelled(job_id)
         _save_metadata_snapshot(db, video_item, "metadata_scrape")
-        _backfill_source_platform_metadata(db, video_item, job_id)
+        _backfill_source_platform_metadata(db, video_item, job_id, force=True)
 
         modes = []
         if ai_auto_analyse:

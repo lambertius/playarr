@@ -217,7 +217,7 @@ export function VideoDetailPage() {
                     className="btn-ghost btn-icon text-green-400"
                     aria-label="Save description"
                     onClick={() => {
-                      updateMutation.mutate({ plot: plotDraft || null }, { onSuccess: () => setEditingPlot(false) });
+                      updateMutation.mutate({ plot: plotDraft }, { onSuccess: () => setEditingPlot(false) });
                     }}
                   >
                     <Check size={14} />
