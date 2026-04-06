@@ -2407,6 +2407,13 @@ def update_source(video_id: int, source_id: int, body: SourceUpdate, db: Session
         source.original_url = body.original_url
     if body.canonical_url is not None:
         source.canonical_url = body.canonical_url
+    # If URL changed, clear cached platform metadata so next scrape re-fetches
+    if body.original_url is not None or body.canonical_url is not None:
+        source.platform_title = None
+        source.platform_description = None
+        source.platform_tags = None
+        source.channel_name = None
+        source.upload_date = None
     if body.source_type is not None:
         source.source_type = body.source_type
     db.commit()

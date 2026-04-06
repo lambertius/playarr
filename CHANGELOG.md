@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1] - 2026-04-06
+
+### Fixed
+- **AI/Scrape Metadata: Stale Platform Data After Source Correction** — when a user corrected a video's source URL (e.g. from a live version to the studio version) and ran Scrape Metadata, AI Auto, or AI Only, the pipeline used cached platform metadata (title, description, tags, channel) from the original import URL instead of the corrected one; all scrape metadata operations now force-refresh platform metadata from yt-dlp on every run, ensuring the AI and scrapers receive context from the correct video
+- **Source URL Edit: Stale Metadata Not Cleared** — editing a source's URL via the Sources panel did not clear the cached `platform_title`, `platform_description`, `platform_tags`, `channel_name`, and `upload_date` fields, leaving stale data from the old video; these fields are now cleared when the URL changes so the next scrape/AI operation fetches fresh data
+- **Description: Unable to Clear** — clearing the description textarea and saving had no effect because the frontend converted the empty string to `null` (which the backend interprets as "don't change"); empty strings are now sent correctly, allowing the description to be cleared
+
 ## [1.9.0] - 2026-04-06
 
 ### Added
