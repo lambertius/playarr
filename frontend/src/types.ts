@@ -35,6 +35,8 @@ export interface VideoItemSummary {
   enrichment_status?: string;
   import_method?: string | null;
   duration_seconds?: number | null;
+  playarr_video_id?: string | null;
+  playarr_track_id?: string | null;
   created_at: string;
 }
 
@@ -88,6 +90,11 @@ export interface VideoItemDetail {
   mb_artist_id?: string | null;
   mb_recording_id?: string | null;
   mb_release_id?: string | null;
+  mb_release_group_id?: string | null;
+  mb_track_id?: string | null;
+  artist_ids?: { name: string; mb_artist_id?: string }[] | null;
+  playarr_video_id?: string | null;
+  playarr_track_id?: string | null;
   folder_path?: string | null;
   file_path?: string | null;
   file_size_bytes?: number | null;
@@ -112,6 +119,7 @@ export interface VideoItemDetail {
   canonical_track?: CanonicalTrack | null;
   has_archive?: boolean;
   exclude_from_editor_scan?: boolean;
+  field_provenance?: Record<string, string> | null;
   created_at: string;
   updated_at: string;
   sources: SourceInfo[];
@@ -137,6 +145,14 @@ export interface VideoItemUpdate {
   video_rating?: number | null;
   song_rating_set?: boolean;
   video_rating_set?: boolean;
+  mb_artist_id?: string | null;
+  mb_recording_id?: string | null;
+  mb_release_id?: string | null;
+  mb_release_group_id?: string | null;
+  mb_track_id?: string | null;
+  artist_ids?: { name: string; mb_artist_id?: string }[] | null;
+  playarr_video_id?: string | null;
+  playarr_track_id?: string | null;
 }
 
 // ─── Jobs ─────────────────────────────────────────────────
@@ -329,6 +345,17 @@ export interface LibraryHealthResponse {
   orphan_folders: OrphanFolder[];
   redundant_count: number;
   redundant_items: RedundantItem[];
+  stale_archive_count: number;
+  stale_archives: StaleArchive[];
+}
+
+export interface StaleArchive {
+  folder: string;
+  folder_name: string;
+  artist: string;
+  title: string;
+  archived_at: string;
+  size_bytes: number;
 }
 
 // ─── Normalization ────────────────────────────────────────
@@ -377,6 +404,26 @@ export interface GenreBucket {
   genre: string;
   count: number;
   video_ids: number[];
+}
+
+// ─── Metadata Manager ────────────────────────────────────
+export interface ArtistConflict {
+  mb_artist_id: string;
+  names: { name: string; video_count: number }[];
+  total_videos: number;
+}
+
+export interface MbidStats {
+  total_videos: number;
+  with_artist_id: number;
+  with_recording_id: number;
+  with_release_id: number;
+  with_release_group_id: number;
+  with_track_id: number;
+  with_any_mbid: number;
+  artist_conflicts: number;
+  with_playarr_video_id: number;
+  with_playarr_track_id: number;
 }
 export interface GenreBlacklistItem {
   id: number;
@@ -1097,7 +1144,10 @@ export interface CanonicalTrack {
   year?: number | null;
   mb_recording_id?: string | null;
   mb_release_id?: string | null;
+  mb_release_group_id?: string | null;
   mb_artist_id?: string | null;
+  mb_track_id?: string | null;
+  acoustid_id?: string | null;
   artwork_album?: string | null;
   artwork_single?: string | null;
   canonical_verified: boolean;
@@ -1462,6 +1512,7 @@ export interface ScraperTestResult {
   import_nfo_found?: boolean | null;
   import_youtube_match?: Record<string, any> | null;
   import_quality?: Record<string, any> | null;
+  output_file?: string | null;
 }
 
 export interface ScraperTestProgress {

@@ -540,6 +540,9 @@ def _cleanup_fk_violations(eng):
         ("track_genres", "genre_id", "genres"),
         ("video_genres", "video_id", "video_items"),
         ("video_genres", "genre_id", "genres"),
+        ("quality_signatures", "video_id", "video_items"),
+        ("sources", "video_id", "video_items"),
+        ("media_assets", "video_id", "video_items"),
     ]
 
     total = 0

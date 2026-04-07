@@ -2,11 +2,11 @@ import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Scissors, ScanLine, Play, Pause, Trash2, Square, CheckSquare,
-  Loader2, Settings2, MonitorPlay, Film, X, Eye, EyeOff, ArchiveRestore, Ban, ExternalLink,
+  Loader2, Settings2, MonitorPlay, Film, X, Eye, EyeOff, Ban, ExternalLink,
   Volume2, VolumeX, ZoomIn, ZoomOut, Timer, SkipBack, SkipForward, Link2,
   ChevronUp, ChevronDown,
 } from "lucide-react";
-import { useEditorQueue, useDetectLetterbox, useScanLetterbox, useEditorScanResults, useEditorEncodeStatus, useVideoEditorEncode, useVideoEditorBatchEncode, useRestoreFromArchive, useSetExcludeFromScan } from "@/hooks/queries";
+import { useEditorQueue, useDetectLetterbox, useScanLetterbox, useEditorScanResults, useEditorEncodeStatus, useVideoEditorEncode, useVideoEditorBatchEncode, useSetExcludeFromScan } from "@/hooks/queries";
 import { playbackApi } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
@@ -168,7 +168,6 @@ export function VideoEditorPage() {
   const encodeStatus = useEditorEncodeStatus(activeEncodeJob?.jobId ?? null);
   const encodeSingle = useVideoEditorEncode();
   const encodeBatch = useVideoEditorBatchEncode();
-  const restoreArchive = useRestoreFromArchive();
   const excludeFromScan = useSetExcludeFromScan();
 
   // ── Video playback controls ──────────────────────────────
@@ -323,13 +322,32 @@ export function VideoEditorPage() {
     try { localStorage.setItem(AUTO_DETECTED_KEY, JSON.stringify([...autoDetectedRef.current])); } catch {}
   }, []);
 
-  // Auto-detect letterboxing for new queue items without existing crop settings
+  // Auto-detect letterboxing for new queue items without existing crop settings.
+  // If the backend already has stored letterbox data, use that instead of re-detecting.
   useEffect(() => {
     if (!queueItems || queueItems.length === 0) return;
     for (const item of queueItems) {
       const vid = item.video_id;
       if (itemSettings[vid]?.crop || autoDetectedRef.current.has(vid)) continue;
       markAutoDetected(vid);
+
+      // Use stored letterbox data from backend if available
+      if (item.letterbox_detected && item.crop_w != null && item.crop_h != null) {
+        updateItemSetting(vid, {
+          crop: {
+            video_id: vid,
+            original_w: item.width ?? 0,
+            original_h: item.height ?? 0,
+            crop_w: item.crop_w,
+            crop_h: item.crop_h,
+            crop_x: item.crop_x ?? 0,
+            crop_y: item.crop_y ?? 0,
+            effective_ratio: `${item.crop_w}:${item.crop_h}`,
+          },
+        });
+        continue;
+      }
+
       detectLetterbox.mutateAsync(vid).then(result => {
         if (result.detected) {
           updateItemSetting(vid, {
@@ -485,10 +503,10 @@ export function VideoEditorPage() {
   }, [updateItemSetting]);
 
   // ── Letterbox scan ──────────────────────────────────────
-  const handleScanLibrary = useCallback(async () => {
+  const handleScanLibrary = useCallback(async (includeExcluded: boolean = false) => {
     setIsScanning(true);
     try {
-      const result = await scanLetterbox.mutateAsync(200);
+      const result = await scanLetterbox.mutateAsync({ limit: 200, includeExcluded });
       if (result.status === "scanning" && result.job_id) {
         setScanJobId(result.job_id);
         toast({ type: "info", title: "Letterbox scan started..." });
@@ -720,17 +738,6 @@ export function VideoEditorPage() {
     }
   }, [getItemSettings, encodeSingle, toast]);
 
-  const handleRestoreFromArchive = useCallback(async (videoId: number) => {
-    try {
-      await restoreArchive.mutateAsync(videoId);
-      toast({ type: "success", title: "Original restored from archive" });
-      refetchQueue();
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast({ type: "error", title: detail || "Failed to restore from archive" });
-    }
-  }, [restoreArchive, toast, refetchQueue]);
-
   const handleToggleExcludeFromScan = useCallback(async (videoId: number, currentlyExcluded: boolean) => {
     const newExclude = !currentlyExcluded;
     try {
@@ -762,14 +769,25 @@ export function VideoEditorPage() {
 
         {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-surface-border bg-surface">
-          <Tooltip content="Scan library for letterboxed videos">
+          <Tooltip content="Scan library for letterboxed videos (skips excluded)">
             <button
               className="btn-secondary btn-sm"
-              onClick={handleScanLibrary}
+              onClick={() => handleScanLibrary(false)}
               disabled={isScanning}
             >
               {isScanning ? <Loader2 size={14} className="animate-spin" /> : <ScanLine size={14} />}
               Scan
+            </button>
+          </Tooltip>
+
+          <Tooltip content="Scan all videos including excluded">
+            <button
+              className="btn-secondary btn-sm"
+              onClick={() => handleScanLibrary(true)}
+              disabled={isScanning}
+            >
+              {isScanning ? <Loader2 size={14} className="animate-spin" /> : <ScanLine size={14} />}
+              Scan All
             </button>
           </Tooltip>
 
@@ -1098,18 +1116,6 @@ export function VideoEditorPage() {
                   {selectedItem.fps ? ` · ${selectedItem.fps}fps` : ""}
                 </span>
                 <div className="flex items-center gap-1.5 ml-2 pl-2 border-l border-surface-border">
-                  {selectedItem.has_archive && (
-                    <Tooltip content="Delete encoded video and restore original from archive">
-                      <button
-                        className="btn-secondary btn-sm text-amber-400"
-                        onClick={() => handleRestoreFromArchive(selectedItem.video_id)}
-                        disabled={restoreArchive.isPending}
-                      >
-                        {restoreArchive.isPending ? <Loader2 size={14} className="animate-spin" /> : <ArchiveRestore size={14} />}
-                        Restore
-                      </button>
-                    </Tooltip>
-                  )}
                   <Tooltip content={selectedItem.exclude_from_scan ? "Re-include in future letterbox scans" : "Exclude from future letterbox scans (false positive)"}>
                     <button
                       className={`btn-secondary btn-sm ${selectedItem.exclude_from_scan ? "text-orange-400" : "text-text-muted"}`}

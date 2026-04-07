@@ -105,9 +105,26 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     _opt(mb, "recording_id", video.mb_recording_id)
     _opt(mb, "release_id", video.mb_release_id)
     _opt(mb, "release_group_id", video.mb_release_group_id)
+    _opt(mb, "track_id", video.mb_track_id)
     # Remove empty <musicbrainz/> if nothing was added
     if len(mb) == 0:
         root.remove(mb)
+
+    # ── playarr content IDs ──
+    pid = SubElement(root, "playarr_ids")
+    _opt(pid, "video_id", getattr(video, "playarr_video_id", None))
+    _opt(pid, "track_id", getattr(video, "playarr_track_id", None))
+    _opt(pid, "video_phash", getattr(video, "video_phash", None))
+    if len(pid) == 0:
+        root.remove(pid)
+
+    # ── artists (multi-artist support) ──
+    if video.artist_ids:
+        artists_el = SubElement(root, "artists")
+        for a in video.artist_ids:
+            artist_el = SubElement(artists_el, "artist")
+            _txt(artist_el, "name", a.get("name", ""))
+            _opt(artist_el, "mb_artist_id", a.get("mb_artist_id"))
 
     # ── sources (YouTube URLs etc.) ──
     if video.sources:
@@ -141,6 +158,20 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
         _opt(qual, "container", q.container)
         _opt(qual, "duration_seconds", q.duration_seconds)
         _opt(qual, "loudness_lufs", q.loudness_lufs)
+        # Letterbox scan results
+        if q.letterbox_scanned:
+            lb = SubElement(qual, "letterbox")
+            _txt(lb, "scanned", True)
+            _txt(lb, "detected", q.letterbox_detected)
+            if q.letterbox_detected:
+                _opt(lb, "crop_w", q.letterbox_crop_w)
+                _opt(lb, "crop_h", q.letterbox_crop_h)
+                _opt(lb, "crop_x", q.letterbox_crop_x)
+                _opt(lb, "crop_y", q.letterbox_crop_y)
+                _opt(lb, "bar_top", q.letterbox_bar_top)
+                _opt(lb, "bar_bottom", q.letterbox_bar_bottom)
+                _opt(lb, "bar_left", q.letterbox_bar_left)
+                _opt(lb, "bar_right", q.letterbox_bar_right)
 
     # ── artwork ──
     assets = db.query(MediaAsset).filter(
@@ -493,6 +524,27 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         result["mb_recording_id"] = _text(mb.find("recording_id")) or None
         result["mb_release_id"] = _text(mb.find("release_id")) or None
         result["mb_release_group_id"] = _text(mb.find("release_group_id")) or None
+        result["mb_track_id"] = _text(mb.find("track_id")) or None
+
+    # ── playarr content IDs ──
+    pid = root.find("playarr_ids")
+    if pid is not None:
+        result["playarr_video_id"] = _text(pid.find("video_id")) or None
+        result["playarr_track_id"] = _text(pid.find("track_id")) or None
+        result["video_phash"] = _text(pid.find("video_phash")) or None
+
+    # ── artists (multi-artist) ──
+    artists_el = root.find("artists")
+    if artists_el is not None:
+        artist_list = []
+        for a in artists_el.findall("artist"):
+            entry = {"name": _text(a.find("name")) or ""}
+            mb_id = _text(a.find("mb_artist_id"))
+            if mb_id:
+                entry["mb_artist_id"] = mb_id
+            artist_list.append(entry)
+        if artist_list:
+            result["artist_ids"] = artist_list
 
     # ── sources ──
     sources_el = root.find("sources")
@@ -529,6 +581,19 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
             "duration_seconds": _float(qual.find("duration_seconds")),
             "loudness_lufs": _float(qual.find("loudness_lufs")),
         }
+        # Letterbox scan results
+        lb = qual.find("letterbox")
+        if lb is not None:
+            result["quality"]["letterbox_scanned"] = _bool(lb.find("scanned"))
+            result["quality"]["letterbox_detected"] = _bool(lb.find("detected"))
+            result["quality"]["letterbox_crop_w"] = _int(lb.find("crop_w"))
+            result["quality"]["letterbox_crop_h"] = _int(lb.find("crop_h"))
+            result["quality"]["letterbox_crop_x"] = _int(lb.find("crop_x"))
+            result["quality"]["letterbox_crop_y"] = _int(lb.find("crop_y"))
+            result["quality"]["letterbox_bar_top"] = _int(lb.find("bar_top"))
+            result["quality"]["letterbox_bar_bottom"] = _int(lb.find("bar_bottom"))
+            result["quality"]["letterbox_bar_left"] = _int(lb.find("bar_left"))
+            result["quality"]["letterbox_bar_right"] = _int(lb.find("bar_right"))
 
     # ── artwork ──
     art_el = root.find("artwork")

@@ -873,6 +873,41 @@ def batch_scrape_from_review(
     return {"job_id": job.id, "message": f"Queued metadata scrape for {len(ids)} item(s)"}
 
 
+@review_router.post("/scan-enrichment")
+def scan_enrichment(
+    rescan_all: bool = Query(False, description="Re-scan ALL videos including previously dismissed items"),
+    db: Session = Depends(_get_db),
+):
+    """Scan library for videos with incomplete AI enrichment and flag them for review."""
+    query = db.query(VideoItem).filter(VideoItem.file_path.isnot(None))
+    if not rescan_all:
+        query = query.filter(VideoItem.review_status.in_(["none", "reviewed"]))
+
+    videos = query.all()
+    flagged = 0
+    for v in videos:
+        ps = v.processing_state or {}
+        _done = lambda step: ps.get(step, {}).get("completed", False)
+        ai_done = _done("ai_enriched")
+        scenes_done = _done("scenes_analyzed")
+        if ai_done and scenes_done:
+            continue  # fully enriched — skip
+        category = "ai_partial" if (ai_done or scenes_done) else "ai_pending"
+        label = "Partial AI enrichment" if category == "ai_partial" else "No AI enrichment"
+        missing = []
+        if not ai_done:
+            missing.append("AI metadata")
+        if not scenes_done:
+            missing.append("scene analysis")
+        v.review_status = "needs_human_review"
+        v.review_category = category
+        v.review_reason = f"{label} — missing: {', '.join(missing)}"
+        flagged += 1
+
+    db.commit()
+    return {"status": "scanned", "flagged": flagged}
+
+
 @review_router.post("/scan-renames")
 def scan_renames(
     rescan_all: bool = Query(False, description="Re-scan ALL files including previously dismissed items"),

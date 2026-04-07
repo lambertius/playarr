@@ -173,46 +173,82 @@ def extract_playlist_entries(url: str) -> List[Dict[str, str]]:
     Use yt-dlp --flat-playlist to extract individual video URLs from a playlist.
 
     Returns a list of dicts with keys: url, title, id
+
+    Retries automatically (up to 3 times) when the result count lands exactly
+    on a YouTube pagination boundary (100, 200, …) — a common sign that YouTube
+    returned a truncated response.  Keeps retrying while the count is still
+    growing and still a multiple of 100.
     """
     settings = get_settings()
     ytdlp = settings.resolved_ytdlp
     ffmpeg_dir = os.path.dirname(settings.resolved_ffmpeg)
 
-    cmd = [
-        ytdlp,
-        "--ffmpeg-location", ffmpeg_dir,
-        "--flat-playlist",
-        "--dump-json",
-        "--no-warnings",
-        url,
-    ]
-    logger.info(f"Extracting playlist entries for: {url}")
+    def _run_extraction() -> List[Dict[str, str]]:
+        cmd = [
+            ytdlp,
+            "--ffmpeg-location", ffmpeg_dir,
+            "--flat-playlist",
+            "--dump-json",
+            "--no-warnings",
+            url,
+        ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
-                            **_subprocess_kwargs())
-    if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp playlist extraction failed: {result.stderr}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
+                                **_subprocess_kwargs())
+        if result.returncode != 0:
+            raise RuntimeError(f"yt-dlp playlist extraction failed: {result.stderr}")
 
-    entries = []
-    seen_ids = set()
-    for line in result.stdout.strip().split("\n"):
-        if not line.strip():
-            continue
-        try:
-            info = json.loads(line)
-            video_id = info.get("id", "")
-            # Deduplicate — some playlists list the same video more than once
-            if video_id in seen_ids:
+        entries = []
+        seen_ids: set = set()
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
                 continue
-            seen_ids.add(video_id)
-            video_url = info.get("url") or info.get("webpage_url") or ""
-            # yt-dlp --flat-playlist may only give the id, construct URL
-            if not video_url and video_id:
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
-            title = info.get("title", "")
-            entries.append({"url": video_url, "title": title, "id": video_id})
-        except json.JSONDecodeError:
-            continue
+            try:
+                info = json.loads(line)
+                video_id = info.get("id", "")
+                if video_id in seen_ids:
+                    continue
+                seen_ids.add(video_id)
+                video_url = info.get("url") or info.get("webpage_url") or ""
+                if not video_url and video_id:
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                title = info.get("title", "")
+                entries.append({"url": video_url, "title": title, "id": video_id})
+            except json.JSONDecodeError:
+                continue
+        return entries
+
+    logger.info(f"Extracting playlist entries for: {url}")
+    entries = _run_extraction()
+    count = len(entries)
+
+    # YouTube sometimes returns truncated results that land exactly on a
+    # pagination boundary (100, 200, …).  Retry while the count keeps growing
+    # and remains on a boundary, up to a hard cap of 3 retries.
+    max_retries = 3
+    attempt = 0
+    while count > 0 and count % 100 == 0 and attempt < max_retries:
+        attempt += 1
+        logger.warning(
+            f"Playlist returned exactly {count} entries (possible YouTube "
+            f"pagination truncation) — retry {attempt}/{max_retries}"
+        )
+        retry_entries = _run_extraction()
+        retry_count = len(retry_entries)
+        if retry_count > count:
+            logger.info(
+                f"Retry returned {retry_count} entries "
+                f"(up from {count}), using retry result"
+            )
+            entries = retry_entries
+            count = retry_count
+            # Loop continues if new count is still a multiple of 100
+        else:
+            logger.info(
+                f"Retry returned {retry_count} entries (no increase) — "
+                f"accepting {count} as the true playlist size"
+            )
+            break
 
     logger.info(f"Found {len(entries)} playlist entries")
     return entries

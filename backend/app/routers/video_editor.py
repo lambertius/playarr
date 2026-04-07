@@ -264,6 +264,7 @@ class AddToEditorRequest(BaseModel):
 
 class LetterboxScanRequest(BaseModel):
     limit: int = Field(default=200, ge=1, le=2000)
+    include_excluded: bool = False
 
 
 class CropPreviewRequest(BaseModel):
@@ -400,6 +401,15 @@ def get_editor_queue(
             audio_codec=qs.audio_codec if qs else None,
             audio_bitrate=qs.audio_bitrate if qs else None,
             audio_channels=qs.audio_channels if qs else None,
+            letterbox_detected=qs.letterbox_detected if qs and qs.letterbox_scanned else False,
+            crop_w=qs.letterbox_crop_w if qs and qs.letterbox_detected else None,
+            crop_h=qs.letterbox_crop_h if qs and qs.letterbox_detected else None,
+            crop_x=qs.letterbox_crop_x if qs and qs.letterbox_detected else None,
+            crop_y=qs.letterbox_crop_y if qs and qs.letterbox_detected else None,
+            bar_top=qs.letterbox_bar_top or 0 if qs and qs.letterbox_detected else 0,
+            bar_bottom=qs.letterbox_bar_bottom or 0 if qs and qs.letterbox_detected else 0,
+            bar_left=qs.letterbox_bar_left or 0 if qs and qs.letterbox_detected else 0,
+            bar_right=qs.letterbox_bar_right or 0 if qs and qs.letterbox_detected else 0,
             has_archive=archive_file is not None,
             exclude_from_scan=v.exclude_from_editor_scan,
         ))
@@ -409,7 +419,7 @@ def get_editor_queue(
 
 @router.post("/detect-letterbox", response_model=DetectLetterboxResponse)
 def detect_letterbox_single(video_id: int = Query(...), db: Session = Depends(get_db)):
-    """Detect letterboxing on a single video."""
+    """Detect letterboxing on a single video and persist results."""
     from app.services.video_editor import detect_letterbox
 
     video = db.query(VideoItem).get(video_id)
@@ -419,6 +429,22 @@ def detect_letterbox_single(video_id: int = Query(...), db: Session = Depends(ge
         raise HTTPException(400, "Video file not found on disk")
 
     info = detect_letterbox(video.file_path)
+
+    # Persist to QualitySignature
+    qs = db.query(QualitySignature).filter(QualitySignature.video_id == video_id).first()
+    if qs:
+        qs.letterbox_scanned = True
+        qs.letterbox_detected = info["detected"]
+        qs.letterbox_crop_w = info["crop_w"]
+        qs.letterbox_crop_h = info["crop_h"]
+        qs.letterbox_crop_x = info["crop_x"]
+        qs.letterbox_crop_y = info["crop_y"]
+        qs.letterbox_bar_top = info["bar_top"]
+        qs.letterbox_bar_bottom = info["bar_bottom"]
+        qs.letterbox_bar_left = info["bar_left"]
+        qs.letterbox_bar_right = info["bar_right"]
+        db.commit()
+
     return DetectLetterboxResponse(video_id=video_id, **info)
 
 
@@ -435,7 +461,7 @@ def scan_library_letterbox(
     if req.limit <= 20:
         # Small scan — run inline
         from app.services.video_editor import scan_library_for_letterboxing
-        results = scan_library_for_letterboxing(db, limit=req.limit)
+        results = scan_library_for_letterboxing(db, limit=req.limit, include_excluded=req.include_excluded)
         return {"status": "complete", "results": results, "total_scanned": req.limit}
     else:
         # Large scan — create background job
@@ -444,14 +470,14 @@ def scan_library_letterbox(
             status=JobStatus.queued,
             display_name="Letterbox Scan",
             action_label="Letterbox Scan",
-            input_params={"limit": req.limit},
+            input_params={"limit": req.limit, "include_excluded": req.include_excluded},
         )
         db.add(job)
         db.commit()
         db.refresh(job)
 
         # Run in background thread
-        def _run_scan(job_id: int, limit: int):
+        def _run_scan(job_id: int, limit: int, include_excluded: bool):
             from app.services.video_editor import scan_library_for_letterboxing
             sdb = SessionLocal()
             try:
@@ -461,7 +487,7 @@ def scan_library_letterbox(
                 j.current_step = "Scanning for letterboxing..."
                 sdb.commit()
 
-                results = scan_library_for_letterboxing(sdb, limit=limit)
+                results = scan_library_for_letterboxing(sdb, limit=limit, include_excluded=include_excluded)
 
                 j.status = JobStatus.complete
                 j.completed_at = datetime.now(timezone.utc)
@@ -478,7 +504,7 @@ def scan_library_letterbox(
             finally:
                 sdb.close()
 
-        t = threading.Thread(target=_run_scan, args=(job.id, req.limit), daemon=True)
+        t = threading.Thread(target=_run_scan, args=(job.id, req.limit, req.include_excluded), daemon=True)
         t.start()
 
         return {"status": "scanning", "job_id": job.id}
@@ -608,6 +634,19 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
 
         # Write archive manifest for re-linking if archive_dir changes
         v_pre = sdb.query(VideoItem).get(video_id)
+
+        # Determine archive reason from encode parameters
+        has_crop = crop_params is not None
+        has_trim = trim_start is not None or trim_end is not None
+        if has_crop and has_trim:
+            reason = "both"
+        elif has_crop:
+            reason = "crop"
+        elif has_trim:
+            reason = "trim"
+        else:
+            reason = "edit"
+
         write_archive_manifest(
             archive_video_path=archive_path,
             original_library_path=norm_input,
@@ -615,6 +654,7 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             video_id=video_id,
             artist=v_pre.artist if v_pre else "",
             title=v_pre.title if v_pre else "",
+            archive_reason=reason,
         )
 
         shutil.move(temp_output, final_path)

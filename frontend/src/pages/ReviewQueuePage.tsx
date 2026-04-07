@@ -1,19 +1,19 @@
 import { useState, useMemo, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Search, ChevronLeft, ChevronRight, CheckCircle2, XCircle,
   GitCompare, FolderInput, Link2, ClipboardList,
   Check, X, Tag, RefreshCw, ChevronDown, LayoutList, FileEdit,
   Trash2, ScanSearch, FolderSearch, Download, Volume2, Copy,
-  Unlink2, AlertTriangle, HelpCircle,
+  Unlink2, AlertTriangle, HelpCircle, Sparkles, BrainCircuit,
 } from "lucide-react";
 import type { ReviewParams, ReviewItem, DuplicateVideoSummary } from "@/types";
 import {
-  useReviewQueue, useExportKodi, useApproveReview, useDismissReview,
+  useReviewQueue, useApproveReview, useDismissReview,
   useSetReviewVersion, useBatchApproveReview, useBatchDismissReview,
   useScanRenames, useApplyRename, useBatchApplyRename,
   useBatchDeleteReview, useBatchScrapeReview, useRedownload,
-  useLibraryDuplicateScan,
+  useLibraryDuplicateScan, useScanEnrichment,
 } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -24,7 +24,7 @@ import { ScrapeOptionsModal, type ScrapeOptions } from "@/components/ScrapeOptio
 import { ScanOptionsModal } from "@/components/ScanOptionsModal";
 
 // ── Types ───────────────────────────────────────────────
-type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned" | "normalization" | "canonical_missing" | "canonical_conflict" | "canonical_low_confidence";
+type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned" | "normalization" | "canonical_missing" | "canonical_conflict" | "canonical_low_confidence" | "ai_pending" | "ai_partial";
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
@@ -107,7 +107,154 @@ const CATEGORY_CONFIG: Record<ReviewCategory, {
     color: "bg-orange-500/10 text-orange-400",
     tooltip: "Videos with an auto-linked canonical track but low match confidence. Verify the link is correct or reassign.",
   },
+  ai_pending: {
+    label: "No AI",
+    icon: <BrainCircuit size={16} />,
+    color: "bg-zinc-500/10 text-zinc-400",
+    tooltip: "Videos that have not been processed by AI enrichment (no AI metadata or scene analysis). Run a metadata scrape with AI enabled to resolve.",
+  },
+  ai_partial: {
+    label: "AI Partial",
+    icon: <Sparkles size={16} />,
+    color: "bg-yellow-500/10 text-yellow-400",
+    tooltip: "Videos with partial AI enrichment — either AI metadata or scene analysis is missing. Run a metadata scrape with AI enabled to complete enrichment.",
+  },
 };
+
+// ── Help dialog ─────────────────────────────────────────
+const HELP_ROWS: { category: ReviewCategory; cause: string; meaning: string; resolution: string }[] = [
+  {
+    category: "version_detection",
+    cause: "AI or metadata scrapers detect the video may be a live performance, cover, acoustic, remix, or alternate version.",
+    meaning: "The system is unsure of the exact version type and wants you to confirm or correct it.",
+    resolution: "Approve to confirm the detected type, use the dropdown to change it, or dismiss to clear the flag.",
+  },
+  {
+    category: "duplicate",
+    cause: "The duplicate scanner found another library item with a matching artist and title.",
+    meaning: "Two or more videos may be the same track. One might be lower quality or redundant.",
+    resolution: "Compare the items side-by-side, then delete the unwanted copy or assign different version types (e.g. Normal vs Live).",
+  },
+  {
+    category: "url_import_error",
+    cause: "A URL-based download completed but metadata scraping or AI enrichment encountered a non-fatal error.",
+    meaning: "The video is in your library but may have incomplete or inaccurate metadata.",
+    resolution: "Re-run metadata scraping, redownload the video, or dismiss if the metadata looks acceptable.",
+  },
+  {
+    category: "import_error",
+    cause: "A library import (folder scan or batch add) succeeded but had warnings during metadata processing.",
+    meaning: "The file was imported but metadata may be incomplete or parsing encountered issues.",
+    resolution: "Scrape metadata to enrich, manually edit the track details, or dismiss if acceptable.",
+  },
+  {
+    category: "manual_review",
+    cause: "An item was imported without running the scraping pipeline (e.g. folder add without auto-scrape).",
+    meaning: "The video exists in the library but has not been enriched with external metadata.",
+    resolution: "Run metadata scraping to populate artist/title/artwork, or dismiss if you prefer to keep it as-is.",
+  },
+  {
+    category: "rename",
+    cause: "The file or folder name doesn't match the current naming convention (Artist - Title [Resolution]).",
+    meaning: "The item will still play correctly but its file path is inconsistent with the rest of the library.",
+    resolution: "Apply the suggested rename to fix the path, or dismiss to keep the current name.",
+  },
+  {
+    category: "scanned",
+    cause: "A library scan detected an untracked file in the library directory that is not registered in the database.",
+    meaning: "The video file exists on disk but Playarr has no record of it — it may have been added manually or by another tool.",
+    resolution: "Scrape metadata to register and enrich the file, or delete it if unwanted.",
+  },
+  {
+    category: "normalization",
+    cause: "Audio normalization (LUFS loudness adjustment) failed, usually due to an incompatible codec.",
+    meaning: "The video's audio levels may be inconsistent with the rest of your library.",
+    resolution: "Redownload to get a compatible format, or dismiss if the volume level is acceptable.",
+  },
+  {
+    category: "canonical_missing",
+    cause: "The video could not be automatically linked to a canonical track (the abstract song entity).",
+    meaning: "Version relationships (e.g. Normal, Live, Cover) cannot be established without a canonical link.",
+    resolution: "Link to an existing canonical track or let the system create one during metadata scraping.",
+  },
+  {
+    category: "canonical_conflict",
+    cause: "The video is linked to a canonical track whose metadata (artist/title) doesn't match.",
+    meaning: "The canonical link may be incorrect, or the track was renamed since linking.",
+    resolution: "Review the canonical track details and correct the link or update the metadata.",
+  },
+  {
+    category: "canonical_low_confidence",
+    cause: "The system auto-linked a canonical track but the match confidence was below the threshold.",
+    meaning: "The link is likely correct but might be a false positive (e.g. similar titles by different artists).",
+    resolution: "Verify the canonical link is correct and approve, or reassign to the right track.",
+  },
+  {
+    category: "ai_pending",
+    cause: "The video has not been through AI enrichment (no AI metadata analysis or scene analysis has been performed).",
+    meaning: "The track is missing AI-generated metadata corrections, genre suggestions, and scene thumbnails.",
+    resolution: "Select the items and use the Scrape button with AI Auto or AI Only enabled, or dismiss if AI enrichment is not needed.",
+  },
+  {
+    category: "ai_partial",
+    cause: "Only part of the AI enrichment pipeline completed — either AI metadata was analysed but scenes were not, or vice versa.",
+    meaning: "The track has incomplete AI enrichment. Some features (like smart thumbnails or corrected metadata) may be missing.",
+    resolution: "Run a metadata scrape with AI enabled to complete the remaining enrichment step, or dismiss if acceptable.",
+  },
+];
+
+function ReviewHelpDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="bg-surface rounded-xl shadow-2xl border border-surface-border w-full max-w-4xl max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-surface-border">
+          <h2 className="text-lg font-semibold text-text-primary flex items-center gap-2">
+            <HelpCircle size={20} className="text-accent" />
+            Review Categories Reference
+          </h2>
+          <button onClick={onClose} className="btn-ghost p-1"><X size={18} /></button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-surface-border text-left text-text-muted">
+                <th className="pb-2 pr-3 font-medium w-[140px]">Category</th>
+                <th className="pb-2 pr-3 font-medium">How it occurs</th>
+                <th className="pb-2 pr-3 font-medium">What it means</th>
+                <th className="pb-2 font-medium">How to resolve</th>
+              </tr>
+            </thead>
+            <tbody>
+              {HELP_ROWS.map((row) => {
+                const config = CATEGORY_CONFIG[row.category];
+                return (
+                  <tr key={row.category} className="border-b border-surface-border/50 align-top">
+                    <td className="py-2.5 pr-3">
+                      <span className={cn("inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded-full whitespace-nowrap", config.color)}>
+                        {config.icon}
+                        {config.label}
+                      </span>
+                    </td>
+                    <td className="py-2.5 pr-3 text-text-secondary">{row.cause}</td>
+                    <td className="py-2.5 pr-3 text-text-secondary">{row.meaning}</td>
+                    <td className="py-2.5 text-text-secondary">{row.resolution}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="flex justify-end px-5 py-3 border-t border-surface-border">
+          <button onClick={onClose} className="btn-ghost btn-sm">Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── Version type options ────────────────────────────────
 const VERSION_TYPE_OPTIONS = [
@@ -183,9 +330,8 @@ function FilterPill({ icon, label, value, active, color, tooltip, onClick, selec
           "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border text-xs font-medium transition-all duration-150 cursor-pointer whitespace-nowrap",
           selected
             ? `${color} border-current/30 ring-1 ring-current/20 shadow-md`
-            : active
-              ? `${color} border-current/15 hover:border-current/40 hover:shadow-sm hover:brightness-125`
-              : "bg-surface/40 border-surface-border text-text-muted/50 hover:border-text-muted/30 hover:bg-surface-hover/40",
+            : "bg-surface/40 border-surface-border text-text-secondary hover:border-text-muted/40 hover:bg-surface-hover/40",
+          !selected && !active && "text-text-muted/50",
         )}
       >
         <span className="opacity-70">{icon}</span>
@@ -194,7 +340,7 @@ function FilterPill({ icon, label, value, active, color, tooltip, onClick, selec
           "min-w-[1.25rem] px-1 py-0.5 rounded-full text-[10px] font-bold tabular-nums leading-none text-center",
           selected
             ? "bg-current/20"
-            : active ? "bg-current/10" : "bg-surface-border/50",
+            : active ? `${color} rounded-full` : "bg-surface-border/50",
         )}>
           {value}
         </span>
@@ -291,12 +437,19 @@ function VersionTypeDropdown({ currentType, onSelect }: {
 
 export default function ReviewQueuePage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
 
-  const [categoryFilter, setCategoryFilter] = useState<ReviewCategory>("all");
+  const [categoryFilter, setCategoryFilter] = useState<ReviewCategory>(() => {
+    const fromUrl = searchParams.get("tab") as ReviewCategory | null;
+    if (fromUrl && fromUrl in CATEGORY_CONFIG) return fromUrl;
+    const saved = localStorage.getItem("review_category_filter") as ReviewCategory | null;
+    return saved && saved in CATEGORY_CONFIG ? saved : "all";
+  });
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [showHelp, setShowHelp] = useState(false);
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(() => {
@@ -313,7 +466,7 @@ export default function ReviewQueuePage() {
   }), [categoryFilter, searchQuery, page, pageSize]);
 
   const { data, isLoading, refetch } = useReviewQueue(params);
-  const exportMutation = useExportKodi();
+
   const approveMutation = useApproveReview();
   const dismissMutation = useDismissReview();
   const setVersionMutation = useSetReviewVersion();
@@ -326,9 +479,11 @@ export default function ReviewQueuePage() {
   const batchScrapeMutation = useBatchScrapeReview();
   const redownloadMutation = useRedownload();
   const dupeScanMutation = useLibraryDuplicateScan();
+  const enrichScanMutation = useScanEnrichment();
   const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
   const [renameScanModalOpen, setRenameScanModalOpen] = useState(false);
   const [dupeScanModalOpen, setDupeScanModalOpen] = useState(false);
+  const [enrichScanModalOpen, setEnrichScanModalOpen] = useState(false);
 
   const items = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
@@ -423,6 +578,12 @@ export default function ReviewQueuePage() {
     });
   }, [dupeScanMutation, toast]);
 
+  const handleScanEnrichment = useCallback(async (rescanAll: boolean) => {
+    setEnrichScanModalOpen(false);
+    const result = await enrichScanMutation.mutateAsync(rescanAll);
+    toast({ type: "success", title: result.flagged > 0 ? `Found ${result.flagged} item(s) needing AI enrichment` : "All videos are fully AI-enriched" });
+  }, [enrichScanMutation, toast]);
+
   const handleApplyRename = useCallback(async (videoId: number) => {
     await applyRenameMutation.mutateAsync(videoId);
     toast({ type: "success", title: "Renamed successfully" });
@@ -494,21 +655,18 @@ export default function ReviewQueuePage() {
     setSelectedIds(new Set());
   }, [selectedIds, redownloadMutation, toast, confirm]);
 
-  const handleExport = useCallback(async () => {
-    try {
-      const result = await exportMutation.mutateAsync({});
-      toast({ type: "success", title: result.message });
-    } catch {
-      toast({ type: "error", title: "Export failed" });
-    }
-  }, [exportMutation, toast]);
-
   // Reset page on filter changes
   const handleCategoryChange = useCallback((cat: ReviewCategory) => {
     setCategoryFilter(cat);
     setPage(1);
     setSelectedIds(new Set());
-  }, []);
+    localStorage.setItem("review_category_filter", cat);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (cat === "all") next.delete("tab"); else next.set("tab", cat);
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
 
   const handlePageSizeChange = useCallback((size: number) => {
     localStorage.setItem("review_page_size", String(size));
@@ -546,9 +704,12 @@ export default function ReviewQueuePage() {
           <button onClick={() => setDupeScanModalOpen(true)} disabled={dupeScanMutation.isPending} className="btn-ghost btn-sm gap-1.5">
             <Copy size={14} /> {dupeScanMutation.isPending ? "Scanning…" : "Scan Duplicates"}
           </button>
-          <Tooltip content="Export all library items to Kodi-compatible NFO files">
-            <button onClick={handleExport} className="btn-ghost btn-sm" disabled={exportMutation.isPending}>
-              Export to Kodi
+          <button onClick={() => setEnrichScanModalOpen(true)} disabled={enrichScanMutation.isPending} className="btn-ghost btn-sm gap-1.5">
+            <BrainCircuit size={14} /> {enrichScanMutation.isPending ? "Scanning…" : "Scan AI Enrichment"}
+          </button>
+          <Tooltip content="Review category reference">
+            <button onClick={() => setShowHelp(true)} className="btn-ghost btn-sm">
+              <HelpCircle size={14} />
             </button>
           </Tooltip>
         </div>
@@ -676,55 +837,85 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("canonical_low_confidence")}
           selected={categoryFilter === "canonical_low_confidence"}
         />
+        <FilterPill
+          icon={<BrainCircuit size={14} />}
+          label="No AI"
+          value={categoryCounts.ai_pending ?? 0}
+          active={(categoryCounts.ai_pending ?? 0) > 0}
+          color="bg-zinc-500/10 text-zinc-400"
+          tooltip={CATEGORY_CONFIG.ai_pending.tooltip}
+          onClick={() => handleCategoryChange("ai_pending")}
+          selected={categoryFilter === "ai_pending"}
+        />
+        <FilterPill
+          icon={<Sparkles size={14} />}
+          label="AI Partial"
+          value={categoryCounts.ai_partial ?? 0}
+          active={(categoryCounts.ai_partial ?? 0) > 0}
+          color="bg-yellow-500/10 text-yellow-400"
+          tooltip={CATEGORY_CONFIG.ai_partial.tooltip}
+          onClick={() => handleCategoryChange("ai_partial")}
+          selected={categoryFilter === "ai_partial"}
+        />
       </div>
 
-      {/* Bulk action bar */}
-      {someSelected && (
-        <div className="flex items-center gap-3 bg-accent/10 border border-accent/20 rounded-lg px-4 py-2.5 mb-4">
-          <span className="text-sm text-accent font-medium flex-1">
-            {selectedIds.size} item{selectedIds.size !== 1 ? "s" : ""} selected
+      {/* Bulk action bar — always visible when there are items */}
+      {items.length > 0 && (
+        <div className="flex items-center gap-3 bg-surface-secondary/50 border border-surface-border rounded-lg px-4 py-2 mb-3">
+          <input
+            type="checkbox"
+            checked={items.length > 0 && allSelected}
+            ref={(el) => {
+              if (el) el.indeterminate = someSelected && !allSelected;
+            }}
+            onChange={toggleSelectAll}
+            className="accent-accent w-4 h-4 cursor-pointer"
+          />
+          <span className="text-sm text-text-secondary flex-1">
+            {someSelected ? `${selectedIds.size} selected` : "Select all"}
           </span>
-          <Tooltip content="Approve all selected items — accepts their current classifications and removes them from review">
-            <button onClick={handleBatchApprove} disabled={batchApproveMutation.isPending}
-              className="btn-ghost btn-sm gap-1 text-emerald-400 hover:text-emerald-300">
-              <CheckCircle2 size={14} /> Approve All
-            </button>
-          </Tooltip>
-          <Tooltip content="Dismiss all selected items — clears review flags and removes them from the queue">
-            <button onClick={handleBatchDismiss} disabled={batchDismissMutation.isPending}
-              className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300">
-              <XCircle size={14} /> Dismiss All
-            </button>
-          </Tooltip>
-          {categoryFilter === "rename" && (
-            <Tooltip content="Apply naming convention rename to all selected items">
-              <button onClick={handleBatchApplyRename} disabled={batchApplyRenameMutation.isPending}
-                className="btn-ghost btn-sm gap-1 text-teal-400 hover:text-teal-300">
-                <FileEdit size={14} /> Rename All
-              </button>
-            </Tooltip>
+          {someSelected && (
+            <>
+              <Tooltip content="Approve all selected items — accepts their current classifications and removes them from review">
+                <button onClick={handleBatchApprove} disabled={batchApproveMutation.isPending}
+                  className="btn-ghost btn-sm gap-1 text-emerald-400 hover:text-emerald-300 text-xs">
+                  <CheckCircle2 size={13} /> Approve
+                </button>
+              </Tooltip>
+              <Tooltip content="Dismiss all selected items — clears review flags and removes them from the queue">
+                <button onClick={handleBatchDismiss} disabled={batchDismissMutation.isPending}
+                  className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300 text-xs">
+                  <XCircle size={13} /> Dismiss
+                </button>
+              </Tooltip>
+              {categoryFilter === "rename" && (
+                <Tooltip content="Apply naming convention rename to all selected items">
+                  <button onClick={handleBatchApplyRename} disabled={batchApplyRenameMutation.isPending}
+                    className="btn-ghost btn-sm gap-1 text-teal-400 hover:text-teal-300 text-xs">
+                    <FileEdit size={13} /> Rename
+                  </button>
+                </Tooltip>
+              )}
+              <Tooltip content="Queue metadata scrape for all selected items — fetches artist, album, genres, artwork from MusicBrainz and Wikipedia">
+                <button onClick={handleBatchScrape} disabled={batchScrapeMutation.isPending}
+                  className="btn-ghost btn-sm gap-1 text-blue-400 hover:text-blue-300 text-xs">
+                  <ScanSearch size={13} /> Scrape
+                </button>
+              </Tooltip>
+              <Tooltip content="Re-download all selected items from their original source URLs. Source links may be outdated.">
+                <button onClick={handleBatchRedownload} disabled={redownloadMutation.isPending}
+                  className="btn-ghost btn-sm gap-1 text-orange-400 hover:text-orange-300 text-xs">
+                  <Download size={13} /> Redownload
+                </button>
+              </Tooltip>
+              <Tooltip content="Permanently delete all selected items and their files from disk">
+                <button onClick={handleBatchDelete} disabled={batchDeleteMutation.isPending}
+                  className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300 text-xs">
+                  <Trash2 size={13} /> Delete
+                </button>
+              </Tooltip>
+            </>
           )}
-          <Tooltip content="Queue metadata scrape for all selected items — fetches artist, album, genres, artwork from MusicBrainz and Wikipedia">
-            <button onClick={handleBatchScrape} disabled={batchScrapeMutation.isPending}
-              className="btn-ghost btn-sm gap-1 text-blue-400 hover:text-blue-300">
-              <ScanSearch size={14} /> Scrape All
-            </button>
-          </Tooltip>
-          <Tooltip content="Re-download all selected items from their original source URLs. Source links may be outdated.">
-            <button onClick={handleBatchRedownload} disabled={redownloadMutation.isPending}
-              className="btn-ghost btn-sm gap-1 text-orange-400 hover:text-orange-300">
-              <Download size={14} /> Redownload All
-            </button>
-          </Tooltip>
-          <Tooltip content="Permanently delete all selected items and their files from disk">
-            <button onClick={handleBatchDelete} disabled={batchDeleteMutation.isPending}
-              className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300">
-              <Trash2 size={14} /> Delete All
-            </button>
-          </Tooltip>
-          <button onClick={() => setSelectedIds(new Set())} className="btn-ghost btn-sm text-xs text-text-muted">
-            Clear Selection
-          </button>
         </div>
       )}
 
@@ -864,6 +1055,8 @@ export default function ReviewQueuePage() {
         </>
       )}
 
+      <ReviewHelpDialog open={showHelp} onClose={() => setShowHelp(false)} />
+
       {dialog}
 
       <ScrapeOptionsModal
@@ -888,6 +1081,14 @@ export default function ReviewQueuePage() {
         onClose={() => setDupeScanModalOpen(false)}
         onScan={handleScanDuplicates}
         isPending={dupeScanMutation.isPending}
+      />
+
+      <ScanOptionsModal
+        kind="enrichment"
+        open={enrichScanModalOpen}
+        onClose={() => setEnrichScanModalOpen(false)}
+        onScan={handleScanEnrichment}
+        isPending={enrichScanMutation.isPending}
       />
     </div>
   );

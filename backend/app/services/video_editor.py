@@ -421,28 +421,77 @@ def encode_video(
     }
 
 
-def scan_library_for_letterboxing(db, limit: int = 500) -> list:
+def scan_library_for_letterboxing(
+    db, limit: int = 500, include_excluded: bool = False, force_rescan: bool = False,
+) -> list:
     """Scan video library for files with letterboxing.
 
-    Returns a list of dicts with video_id, artist, title, and crop info.
+    Persists results to QualitySignature so subsequent scans skip already-analyzed
+    files. Returns a list of dicts with video_id, artist, title, and crop info
+    (both newly detected and previously stored).
+
+    Args:
+        include_excluded: If True, also scan videos marked exclude_from_editor_scan.
+        force_rescan: If True, re-run detection even on already-scanned videos.
     """
     from app.models import VideoItem, QualitySignature
 
-    results = []
-    videos = (
+    query = (
         db.query(VideoItem)
         .join(QualitySignature, VideoItem.id == QualitySignature.video_id, isouter=True)
         .filter(VideoItem.file_path.isnot(None))
-        .filter(VideoItem.exclude_from_editor_scan == False)
-        .limit(limit)
-        .all()
     )
+    if not include_excluded:
+        query = query.filter(VideoItem.exclude_from_editor_scan == False)
+    videos = query.limit(limit).all()
 
+    results = []
     for video in videos:
         if not video.file_path or not os.path.isfile(video.file_path):
             continue
+
+        qs = video.quality_signature
+        if not qs:
+            continue
+
+        # Already scanned — return stored result if letterboxing was found
+        if qs.letterbox_scanned and not force_rescan:
+            if qs.letterbox_detected:
+                results.append({
+                    "video_id": video.id,
+                    "artist": video.artist,
+                    "title": video.title,
+                    "file_path": video.file_path,
+                    "detected": True,
+                    "original_w": qs.width,
+                    "original_h": qs.height,
+                    "crop_w": qs.letterbox_crop_w,
+                    "crop_h": qs.letterbox_crop_h,
+                    "crop_x": qs.letterbox_crop_x,
+                    "crop_y": qs.letterbox_crop_y,
+                    "bar_top": qs.letterbox_bar_top or 0,
+                    "bar_bottom": qs.letterbox_bar_bottom or 0,
+                    "bar_left": qs.letterbox_bar_left or 0,
+                    "bar_right": qs.letterbox_bar_right or 0,
+                })
+            continue  # skip re-detection either way
+
         try:
             info = detect_letterbox(video.file_path)
+
+            # Persist results to QualitySignature
+            qs.letterbox_scanned = True
+            qs.letterbox_detected = info["detected"]
+            qs.letterbox_crop_w = info["crop_w"]
+            qs.letterbox_crop_h = info["crop_h"]
+            qs.letterbox_crop_x = info["crop_x"]
+            qs.letterbox_crop_y = info["crop_y"]
+            qs.letterbox_bar_top = info["bar_top"]
+            qs.letterbox_bar_bottom = info["bar_bottom"]
+            qs.letterbox_bar_left = info["bar_left"]
+            qs.letterbox_bar_right = info["bar_right"]
+            db.commit()
+
             if info["detected"]:
                 results.append({
                     "video_id": video.id,

@@ -521,3 +521,177 @@ def undo_refresh(entity_type: str, entity_id: int, db: Session = Depends(get_db)
 
     db.commit()
     return {"detail": f"Rolled back {entity_type}#{entity_id}", "entity_id": entity_id}
+
+
+# ---------------------------------------------------------------------------
+# Artist Consolidation — detect & fix conflicting artist names via MBID
+# ---------------------------------------------------------------------------
+
+class ArtistConflict(BaseModel):
+    mb_artist_id: str
+    names: list  # list of {name, video_count}
+    total_videos: int
+
+class ArtistConsolidateRequest(BaseModel):
+    mb_artist_id: str
+    canonical_name: str
+
+
+def _primary_artist(name: str) -> str:
+    """Extract the primary artist (first name before ';') from a possibly multi-artist string."""
+    return name.split(";")[0].strip() if name else name
+
+
+@router.get("/artist-conflicts", response_model=List[ArtistConflict])
+def detect_artist_conflicts(db: Session = Depends(get_db)):
+    """
+    Find artists that share the same MusicBrainz ID but have different names
+    in the library. These are candidates for name consolidation.
+
+    Multi-artist entries like "Sigrid; Bring Me the Horizon" are compared by
+    their primary artist (before the semicolon) so featuring collaborations
+    are NOT flagged as conflicts with the solo artist name.
+    """
+    from sqlalchemy import func, distinct
+
+    # Group video_items by mb_artist_id where it's not null
+    rows = (
+        db.query(
+            VideoItem.mb_artist_id,
+            VideoItem.artist,
+            func.count(VideoItem.id).label("cnt"),
+        )
+        .filter(VideoItem.mb_artist_id.isnot(None))
+        .group_by(VideoItem.mb_artist_id, VideoItem.artist)
+        .all()
+    )
+
+    # Group by mb_artist_id, keyed by *primary* artist name (before ";")
+    from collections import defaultdict
+    groups: dict[str, list] = defaultdict(list)
+    for mb_id, artist_name, cnt in rows:
+        groups[mb_id].append({"name": artist_name, "video_count": cnt})
+
+    # Only flag as conflicts when the *primary* artist names differ.
+    # "Sigrid" vs "Sigrid; Bring Me the Horizon" share primary "Sigrid" → NOT a conflict.
+    # '"Weird Al" Yankovic' vs 'Weird Al Yankovic' → different primaries → IS a conflict.
+    conflicts = []
+    for mb_id, entries in groups.items():
+        if len(entries) <= 1:
+            continue
+        primary_names = {_primary_artist(e["name"]).lower() for e in entries}
+        if len(primary_names) > 1:
+            conflicts.append(ArtistConflict(
+                mb_artist_id=mb_id,
+                names=entries,
+                total_videos=sum(e["video_count"] for e in entries),
+            ))
+
+    conflicts.sort(key=lambda c: c.total_videos, reverse=True)
+    return conflicts
+
+
+@router.post("/artist-consolidate")
+def consolidate_artist(body: ArtistConsolidateRequest, db: Session = Depends(get_db)):
+    """
+    Apply a canonical name to all videos sharing the given MBID.
+    For multi-artist entries (containing ";"), only the primary artist portion
+    is replaced so featured collaborations are preserved.
+    Also updates the ArtistEntity canonical_name if it exists.
+    """
+    videos = (
+        db.query(VideoItem)
+        .filter(VideoItem.mb_artist_id == body.mb_artist_id)
+        .all()
+    )
+    updated = 0
+    for video in videos:
+        parts = [p.strip() for p in video.artist.split(";")] if video.artist else []
+        if len(parts) > 1:
+            # Replace only the primary artist, keep featured artists
+            parts[0] = body.canonical_name
+            new_name = "; ".join(parts)
+        else:
+            new_name = body.canonical_name
+        if video.artist != new_name:
+            video.artist = new_name
+            updated += 1
+
+    # Update the ArtistEntity canonical_name as well
+    artist_ent = (
+        db.query(ArtistEntity)
+        .filter(ArtistEntity.mb_artist_id == body.mb_artist_id)
+        .first()
+    )
+    if artist_ent:
+        artist_ent.canonical_name = body.canonical_name
+
+    db.commit()
+    return {"updated": updated, "mb_artist_id": body.mb_artist_id, "canonical_name": body.canonical_name}
+
+
+# ---------------------------------------------------------------------------
+# MBID Statistics — overview for metadata manager dashboard
+# ---------------------------------------------------------------------------
+
+class MbidStats(BaseModel):
+    total_videos: int
+    with_artist_id: int
+    with_recording_id: int
+    with_release_id: int
+    with_release_group_id: int
+    with_track_id: int
+    with_any_mbid: int
+    artist_conflicts: int
+    with_playarr_video_id: int = 0
+    with_playarr_track_id: int = 0
+
+
+@router.get("/mbid-stats", response_model=MbidStats)
+def get_mbid_stats(db: Session = Depends(get_db)):
+    """Summary statistics for MusicBrainz ID coverage across the library."""
+    from sqlalchemy import func, or_
+
+    total = db.query(func.count(VideoItem.id)).scalar() or 0
+    with_artist = db.query(func.count(VideoItem.id)).filter(VideoItem.mb_artist_id.isnot(None)).scalar() or 0
+    with_recording = db.query(func.count(VideoItem.id)).filter(VideoItem.mb_recording_id.isnot(None)).scalar() or 0
+    with_release = db.query(func.count(VideoItem.id)).filter(VideoItem.mb_release_id.isnot(None)).scalar() or 0
+    with_rg = db.query(func.count(VideoItem.id)).filter(VideoItem.mb_release_group_id.isnot(None)).scalar() or 0
+    with_track = db.query(func.count(VideoItem.id)).filter(VideoItem.mb_track_id.isnot(None)).scalar() or 0
+    with_any = db.query(func.count(VideoItem.id)).filter(
+        or_(
+            VideoItem.mb_artist_id.isnot(None),
+            VideoItem.mb_recording_id.isnot(None),
+            VideoItem.mb_release_id.isnot(None),
+            VideoItem.mb_release_group_id.isnot(None),
+            VideoItem.mb_track_id.isnot(None),
+        )
+    ).scalar() or 0
+
+    # Playarr content IDs
+    with_pvid = db.query(func.count(VideoItem.id)).filter(VideoItem.playarr_video_id.isnot(None)).scalar() or 0
+    with_ptid = db.query(func.count(VideoItem.id)).filter(VideoItem.playarr_track_id.isnot(None)).scalar() or 0
+
+    # Count conflicts
+    conflict_count = 0
+    groups = (
+        db.query(VideoItem.mb_artist_id, func.count(func.distinct(VideoItem.artist)))
+        .filter(VideoItem.mb_artist_id.isnot(None))
+        .group_by(VideoItem.mb_artist_id)
+        .having(func.count(func.distinct(VideoItem.artist)) > 1)
+        .all()
+    )
+    conflict_count = len(groups)
+
+    return MbidStats(
+        total_videos=total,
+        with_artist_id=with_artist,
+        with_recording_id=with_recording,
+        with_release_id=with_release,
+        with_release_group_id=with_rg,
+        with_track_id=with_track,
+        with_any_mbid=with_any,
+        artist_conflicts=conflict_count,
+        with_playarr_video_id=with_pvid,
+        with_playarr_track_id=with_ptid,
+    )

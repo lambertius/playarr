@@ -890,12 +890,18 @@ def _search_single_release_group(
     # Extract artist from release group
     mb_artist_id = None
     artist_name = artist
+    mb_artist_credits = None
     ac_list = best_rg.get("artist-credit", [])
     if ac_list:
-        ac = ac_list[0] if isinstance(ac_list, list) else ac_list
-        if isinstance(ac, dict) and "artist" in ac:
-            artist_name = ac["artist"].get("name", artist)
-            mb_artist_id = ac["artist"].get("id")
+        _credit_dicts = [c for c in ac_list if isinstance(c, dict) and "artist" in c]
+        if _credit_dicts:
+            mb_artist_id = _credit_dicts[0]["artist"].get("id")
+            _all_names = [c["artist"].get("name", "") for c in _credit_dicts if c["artist"].get("name")]
+            if len(_all_names) > 1:
+                artist_name = "; ".join(_all_names)
+            else:
+                artist_name = _all_names[0] if _all_names else artist
+            mb_artist_credits = _credit_dicts
 
     # Build full joined artist-credit for comparison
     _full_artist_credit = ""
@@ -1048,6 +1054,7 @@ def _search_single_release_group(
         "mb_recording_id": mb_recording_id,
         "mb_release_id": mb_release_id,
         "mb_release_group_id": rg_id,
+        "mb_artist_credits": mb_artist_credits,
         "artist": artist_name,
         "title": rg_title,
         "album": album_name,
@@ -1216,13 +1223,21 @@ def search_musicbrainz(
         result["mb_recording_id"] = rec.get("id")
         result["title"] = rec.get("title", title)
 
-        # Artist
+        # Artist — extract all credits for multi-artist support
         artist_credits = rec.get("artist-credit", [])
         if artist_credits:
-            ac = artist_credits[0]
-            if isinstance(ac, dict) and "artist" in ac:
-                result["artist"] = ac["artist"].get("name", artist)
-                result["mb_artist_id"] = ac["artist"].get("id")
+            _credit_dicts = [c for c in artist_credits if isinstance(c, dict) and "artist" in c]
+            if _credit_dicts:
+                # Primary artist MBID from first credit
+                result["mb_artist_id"] = _credit_dicts[0]["artist"].get("id")
+                # Build semicolon-separated name from all credits
+                _all_names = [c["artist"].get("name", "") for c in _credit_dicts if c["artist"].get("name")]
+                if len(_all_names) > 1:
+                    result["artist"] = "; ".join(_all_names)
+                else:
+                    result["artist"] = _all_names[0] if _all_names else artist
+                # Store raw credits for downstream artist_ids population
+                result["mb_artist_credits"] = _credit_dicts
 
         # Release
         if best_rel is None:

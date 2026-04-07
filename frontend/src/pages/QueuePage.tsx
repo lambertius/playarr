@@ -3,7 +3,7 @@ import {
   RefreshCw, Wifi, WifiOff, Search, AlertTriangle, RotateCcw,
   ChevronLeft, ChevronRight, Trash2,
   Download, FolderInput, Activity, CheckCircle2, XCircle, Ban, SkipForward,
-  Clapperboard, FileSearch, X,
+  Clapperboard, FileSearch,
 } from "lucide-react";
 import { useJobs, useJobLog, useRetryJob, useCancelJob, useClearHistory, useDeleteBatch } from "@/hooks/queries";
 import { jobsApi } from "@/lib/api";
@@ -207,6 +207,16 @@ export function QueuePage() {
     if (historyFilter === "all") return historyJobs;
     return historyJobs.filter((j) => j.status === historyFilter);
   }, [historyJobs, historyFilter]);
+
+  // History type counts (for sub-tab badges)
+  const historyTypeCounts = useMemo(() => {
+    const c = { all: filteredHistory.length, download: 0, import: 0, editor: 0, scraper: 0 };
+    for (const j of filteredHistory) {
+      const src = getSourceType(j);
+      c[src]++;
+    }
+    return c;
+  }, [filteredHistory]);
 
   // Status breakdown for stats
   const statusCounts = useMemo(() => {
@@ -641,6 +651,42 @@ export function QueuePage() {
         )}
       </div>
 
+      {/* History type sub-tabs — shows type breakdown when viewing history */}
+      {activeTab === "history" && filteredHistory.length > 0 && (
+        <div className="flex items-center gap-1 mb-3">
+          {(["all", "download", "import", "editor", "scraper"] as const).map((f) => {
+            const labels: Record<SourceFilter | "all", string> = {
+              all: "All Types", download: "Downloads", import: "Imports", editor: "Editor", scraper: "Scraper",
+            };
+            const icons: Record<string, React.ReactNode> = {
+              download: <Download size={12} />, import: <FolderInput size={12} />,
+              editor: <Clapperboard size={12} />, scraper: <FileSearch size={12} />,
+            };
+            const count = historyTypeCounts[f as keyof typeof historyTypeCounts];
+            return (
+              <button
+                key={f}
+                onClick={() => setSourceFilter(f === "all" ? "all" : f)}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                  sourceFilter === f
+                    ? "bg-accent/15 text-accent border-accent/30"
+                    : count > 0
+                    ? "bg-surface-lighter/50 text-text-secondary border-surface-border hover:bg-surface-lighter"
+                    : "bg-surface/30 text-text-muted/50 border-transparent cursor-default"
+                }`}
+                disabled={count === 0 && f !== "all"}
+              >
+                {icons[f]}
+                {labels[f]}
+                <span className={`text-[10px] tabular-nums ${sourceFilter === f ? "text-accent" : "text-text-muted"}`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Bulk action bar — always visible when there are jobs */}
       {currentTotal > 0 && (
         <div className="flex items-center gap-3 bg-surface-secondary/50 border border-surface-border rounded-lg px-4 py-2 mb-3">
@@ -659,21 +705,24 @@ export function QueuePage() {
           {selectedCount > 0 && (
             <>
               {activeTab === "active" && (
-                <button onClick={handleBulkCancel} className="btn-ghost btn-sm gap-1 text-yellow-400 hover:text-yellow-300 text-xs">
-                  <Ban size={13} /> Cancel
-                </button>
+                <Tooltip content="Cancel selected jobs — stops processing and marks them as cancelled">
+                  <button onClick={handleBulkCancel} className="btn-ghost btn-sm gap-1 text-yellow-400 hover:text-yellow-300 text-xs">
+                    <Ban size={13} /> Cancel
+                  </button>
+                </Tooltip>
               )}
               {activeTab === "history" && (
-                <button onClick={handleBulkRetry} className="btn-ghost btn-sm gap-1 text-accent hover:text-accent/80 text-xs">
-                  <RotateCcw size={13} /> Retry
-                </button>
+                <Tooltip content="Retry selected jobs — re-queues them for processing">
+                  <button onClick={handleBulkRetry} className="btn-ghost btn-sm gap-1 text-accent hover:text-accent/80 text-xs">
+                    <RotateCcw size={13} /> Retry
+                  </button>
+                </Tooltip>
               )}
-              <button onClick={handleBulkDelete} className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300 text-xs">
-                <Trash2 size={13} /> Delete
-              </button>
-              <button onClick={() => setSelectedIds(new Set())} className="btn-ghost btn-sm gap-1 text-text-muted text-xs">
-                <X size={13} /> Clear
-              </button>
+              <Tooltip content="Permanently remove selected jobs from the queue">
+                <button onClick={handleBulkDelete} className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300 text-xs">
+                  <Trash2 size={13} /> Delete
+                </button>
+              </Tooltip>
             </>
           )}
         </div>

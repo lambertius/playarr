@@ -108,6 +108,10 @@ class VideoItem(Base):
     mb_recording_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     mb_release_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     mb_release_group_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    mb_track_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+    # Multi-artist support — JSON list of {name, mb_artist_id} for featured/collaborating artists
+    artist_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     # FK links to canonical entity graph (nullable for backward compat)
     artist_entity_id: Mapped[Optional[int]] = mapped_column(
@@ -190,6 +194,18 @@ class VideoItem(Base):
     # Audio fingerprint (Chromaprint) for canonical track identification
     audio_fingerprint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     acoustid_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+
+    # Playarr content IDs — deterministic hashes for cross-quality / cross-version matching
+    # playarr_video_id: same visual content regardless of quality/resolution/crops.
+    #   Alternate versions and 18+ edits get different video IDs.
+    # playarr_track_id: same musical composition/performance regardless of video.
+    #   Covers and live versions get different track IDs; alternate/18+ share the same one.
+    playarr_video_id: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    playarr_track_id: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+
+    # Perceptual hash of a representative video frame — used to distinguish
+    # visually different music videos for the same song (e.g. two official videos).
+    video_phash: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
 
     # Field-level provenance — tracks which provider sourced each metadata field
     # JSON dict: {"artist": "musicbrainz", "plot": "wikipedia", "album": "tmvdb", ...}
@@ -358,6 +374,18 @@ class QualitySignature(Base):
 
     # Integrated loudness (LUFS)
     loudness_lufs: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Letterbox scan results — persisted so rescans don't re-analyze every file
+    letterbox_scanned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    letterbox_detected: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    letterbox_crop_w: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    letterbox_crop_h: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    letterbox_crop_x: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    letterbox_crop_y: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    letterbox_bar_top: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    letterbox_bar_bottom: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    letterbox_bar_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    letterbox_bar_right: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     video_item: Mapped["VideoItem"] = relationship(back_populates="quality_signature")
 

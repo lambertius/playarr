@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.9.3] - 2026-04-07
+
+### Fixed
+- **Library Scan: NULL Loudness & Lost Metadata** — three bugs in library scan import: `autoflush=False` caused loudness/quality writes to silently vanish; rescan destroyed existing source links; partial XML data could overwrite richer DB values. Added `_merge_existing_xml_quality()` helper for safe XML quality merging
+- **Feat Artist Normalization: Band Name False Positives** — `parse_multi_artist` incorrectly split band names like "Mumford & Sons", "Coheed and Cambria", "Earth, Wind & Fire", "Iron & Wine" etc. into separate artists; added `_PROTECTED_NAMES` set and `"and the"` pattern guard alongside existing `"& The"` protection
+
+### Added
+- **Review Queue: AI Enrichment Categories** — two new review categories ("No AI Enrichment", "Partial AI Enrichment") with scan endpoint to flag tracks missing AI metadata; includes filter pills, help dialog rows, and Scan AI Enrichment button in the review queue
+- **Feat → Semicolon Normalization** — artist strings like "DJ Snake feat. Lil Jon" are now normalized to "DJ Snake; Lil Jon" across all pipeline stages (import, rescan, scrape, AI); retroactively corrected 101 existing tracks with updated DB fields, artist_ids, and XML sidecars
+
+### Changed
+- **Scraper Tester: Download Log Redesign** — removed per-field comment inputs; enlarged Download Log button; added two-step download dialog with optional feedback for bug reports
+
 ## [1.9.2] - 2026-04-06
 
 ### Fixed

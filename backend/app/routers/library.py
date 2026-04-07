@@ -1,6 +1,7 @@
 """
 Library API — CRUD and search for video items.
 """
+import json
 import math
 import os
 import random
@@ -412,23 +413,40 @@ def list_artists(
     quality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """List all unique artists with video count and video IDs."""
+    """List all unique artists with video count and video IDs.
+
+    Multi-artist entries (semicolon-separated) are split so each individual
+    artist gets its own row with the correct aggregate count and video IDs.
+    """
     query = (
         db.query(
+            VideoItem.id,
             VideoItem.artist,
-            func.count(VideoItem.id),
-            func.group_concat(VideoItem.id),
         )
     )
     query = _apply_facet_filters(query, version_type=version_type,
                                  year_from=year_from, year_to=year_to,
                                  song_rating=song_rating, video_rating=video_rating,
                                  genre=genre, quality=quality)
-    results = query.group_by(VideoItem.artist).order_by(VideoItem.artist).all()
-    return [
-        {"artist": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
-        for r in results
+    rows = query.all()
+
+    # Split semicolon-separated artists into individual buckets
+    from collections import defaultdict
+    artist_map: dict[str, set[int]] = defaultdict(set)
+    for vid_id, artist_name in rows:
+        if not artist_name:
+            continue
+        parts = [p.strip() for p in artist_name.split(";")]
+        for part in parts:
+            if part:
+                artist_map[part].add(vid_id)
+
+    results = [
+        {"artist": name, "count": len(ids), "video_ids": sorted(ids)}
+        for name, ids in artist_map.items()
     ]
+    results.sort(key=lambda r: r["artist"])
+    return results
 
 
 @router.get("/years", response_model=List[dict])
@@ -932,6 +950,9 @@ def library_health(db: Session = Depends(get_db)):
     # --- Redundant files: tracked folders with extra/mismatched sidecars ---
     redundant_items = _detect_redundant_files(all_videos)
 
+    # --- Stale archives: _archive folders with missing video files ---
+    stale_archives = _detect_stale_archives(all_dirs)
+
     return {
         "stale_count": len(stale_items),
         "stale_items": stale_items,
@@ -941,7 +962,52 @@ def library_health(db: Session = Depends(get_db)):
         "orphan_folders": orphan_folders,
         "redundant_count": len(redundant_items),
         "redundant_items": redundant_items,
+        "stale_archive_count": len(stale_archives),
+        "stale_archives": stale_archives,
     }
+
+
+def _detect_stale_archives(all_dirs: list[str]) -> list[dict]:
+    """Find _archive sub-folders whose video file has been deleted/moved."""
+    from app.routers.video_editor import _MANIFEST_NAME, _VIDEO_EXTS
+
+    stale: list[dict] = []
+    for lib_root in all_dirs:
+        archive_dir = os.path.join(lib_root, "_archive")
+        if not os.path.isdir(archive_dir):
+            continue
+        for entry in os.scandir(archive_dir):
+            if not entry.is_dir():
+                continue
+            folder = entry.path
+            # Check if the folder still has a video file
+            has_video = any(
+                os.path.splitext(f.name)[1].lower() in _VIDEO_EXTS
+                for f in os.scandir(folder)
+                if f.is_file()
+            )
+            if has_video:
+                continue
+            # Read manifest for display info
+            meta: dict = {}
+            manifest_path = os.path.join(folder, _MANIFEST_NAME)
+            if os.path.isfile(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    pass
+            stale.append({
+                "folder": folder,
+                "folder_name": entry.name,
+                "artist": meta.get("artist", ""),
+                "title": meta.get("title", ""),
+                "archived_at": meta.get("archived_at", ""),
+                "size_bytes": sum(
+                    f.stat().st_size for f in os.scandir(folder) if f.is_file()
+                ),
+            })
+    return stale
 
 
 def _detect_redundant_files(all_videos: list) -> list:
@@ -1383,6 +1449,43 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
         item.video_rating = update.video_rating
         item.video_rating_set = True if update.video_rating_set is None else update.video_rating_set
 
+    # MusicBrainz IDs
+    _id_fields_changed = []
+    if update.mb_artist_id is not None:
+        item.mb_artist_id = update.mb_artist_id or None
+        _metadata_changed = True
+        _id_fields_changed.append("mb_artist_id")
+    if update.mb_recording_id is not None:
+        item.mb_recording_id = update.mb_recording_id or None
+        _metadata_changed = True
+        _id_fields_changed.append("mb_recording_id")
+    if update.mb_release_id is not None:
+        item.mb_release_id = update.mb_release_id or None
+        _metadata_changed = True
+        _id_fields_changed.append("mb_release_id")
+    if update.mb_release_group_id is not None:
+        item.mb_release_group_id = update.mb_release_group_id or None
+        _metadata_changed = True
+        _id_fields_changed.append("mb_release_group_id")
+    if update.mb_track_id is not None:
+        item.mb_track_id = update.mb_track_id or None
+        _metadata_changed = True
+        _id_fields_changed.append("mb_track_id")
+    if update.artist_ids is not None:
+        item.artist_ids = update.artist_ids or None
+        _metadata_changed = True
+        _id_fields_changed.append("artist_ids")
+
+    # Playarr Content IDs
+    if update.playarr_video_id is not None:
+        item.playarr_video_id = update.playarr_video_id or None
+        _metadata_changed = True
+        _id_fields_changed.append("playarr_video_id")
+    if update.playarr_track_id is not None:
+        item.playarr_track_id = update.playarr_track_id or None
+        _metadata_changed = True
+        _id_fields_changed.append("playarr_track_id")
+
     if update.genres is not None:
         item.genres.clear()
         for g in update.genres:
@@ -1403,6 +1506,7 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
         _manually_changed.append("plot")
     if update.genres is not None:
         _manually_changed.append("genres")
+    _manually_changed.extend(_id_fields_changed)
     if _manually_changed:
         from sqlalchemy.orm.attributes import flag_modified as _fp_flag
         fp = dict(item.field_provenance or {})

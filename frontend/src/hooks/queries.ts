@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, exportApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi } from "@/lib/api";
+import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, exportApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi, metadataManagerApi } from "@/lib/api";
 import type {
   LibraryParams, JobsParams, VideoItemUpdate, FacetFilterParams,
   ImportRequest, NormalizeRequest, BatchRescanRequest, SettingUpdate,
@@ -359,6 +359,17 @@ export function useCleanRedundant() {
   });
 }
 
+export function useCleanStaleArchives() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (folders: string[]) => libraryApi.cleanStaleArchives(folders),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["library-health"] });
+      qc.invalidateQueries({ queryKey: ["archive-items"] });
+    },
+  });
+}
+
 // ─── Log Viewer ───────────────────────────────────────────
 export function useLogFiles() {
   return useQuery({
@@ -622,6 +633,14 @@ export function useScanRenames() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (rescanAll: boolean = false) => reviewApi.scanRenames(rescanAll),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["reviewQueue"] }); },
+  });
+}
+
+export function useScanEnrichment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rescanAll: boolean = false) => reviewApi.scanEnrichment(rescanAll),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["reviewQueue"] }); },
   });
 }
@@ -1056,7 +1075,8 @@ export function useDetectLetterbox() {
 
 export function useScanLetterbox() {
   return useMutation({
-    mutationFn: (limit: number) => videoEditorApi.scanLetterbox(limit),
+    mutationFn: ({ limit, includeExcluded }: { limit: number; includeExcluded?: boolean }) =>
+      videoEditorApi.scanLetterbox(limit, includeExcluded),
   });
 }
 
@@ -1124,6 +1144,46 @@ export function useSetExcludeFromScan() {
       videoEditorApi.setExcludeFromScan(videoId, exclude),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["editorQueue"] });
+    },
+  });
+}
+
+// ─── Archive Queries ──────────────────────────────────────
+export function useArchiveItems() {
+  return useQuery({
+    queryKey: ["archiveItems"],
+    queryFn: () => settingsApi.archiveItems(),
+  });
+}
+
+export function useArchiveRestore() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (folder: string) => settingsApi.archiveRestore(folder),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["archiveItems"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["editorQueue"] });
+    },
+  });
+}
+
+export function useArchiveDelete() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (folders: string[]) => settingsApi.archiveDelete(folders),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["archiveItems"] });
+    },
+  });
+}
+
+export function useArchiveClear() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => settingsApi.archiveClear(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["archiveItems"] });
     },
   });
 }
@@ -1251,5 +1311,29 @@ export function useNewVideosFeedback() {
   return useMutation({
     mutationFn: (data: { suggested_video_id?: number; feedback_type: string; provider?: string; provider_video_id?: string; artist?: string; category?: string }) =>
       newVideosApi.feedback(data),
+  });
+}
+
+// ─── Metadata Manager ────────────────────────────────────
+
+export function useMbidStats() {
+  return useQuery({ queryKey: ["mbidStats"], queryFn: metadataManagerApi.mbidStats });
+}
+
+export function useArtistConflicts() {
+  return useQuery({ queryKey: ["artistConflicts"], queryFn: metadataManagerApi.artistConflicts });
+}
+
+export function useConsolidateArtist() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { mb_artist_id: string; canonical_name: string }) =>
+      metadataManagerApi.consolidateArtist(data.mb_artist_id, data.canonical_name),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["artistConflicts"] });
+      qc.invalidateQueries({ queryKey: ["mbidStats"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["artists"] });
+    },
   });
 }

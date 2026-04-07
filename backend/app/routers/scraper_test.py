@@ -563,7 +563,7 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
         _title_before_feat = title
         title, feat_credit = extract_featuring_credit(title)
         if feat_credit and artist and feat_credit.lower() not in artist.lower():
-            artist = f"{artist} ft. {feat_credit}"
+            artist = f"{artist}; {feat_credit}"
             pre_logs.append(f"[scraper-test] Featuring credit extracted: '{feat_credit}' merged into artist")
 
     artist = artist or "Unknown Artist"
@@ -2118,3 +2118,54 @@ def run_import_test_stream(req: ImportTestRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/download-log")
+def download_scraper_log(file: str = Query(..., description="Log file name")):
+    """Download a scraper test log file."""
+    from fastapi.responses import FileResponse as _FileResponse
+    scraper_dir = _get_scraper_test_dir()
+    # Only allow the basename to prevent path traversal
+    safe_name = os.path.basename(file)
+    file_path = os.path.join(scraper_dir, safe_name)
+    if not os.path.isfile(file_path):
+        raise HTTPException(404, "Log file not found")
+    return _FileResponse(
+        file_path,
+        media_type="text/plain",
+        filename=safe_name,
+        headers={"Content-Disposition": f"attachment; filename={safe_name}"},
+    )
+
+
+class _CommentPayload(BaseModel):
+    file: str
+    comments: Dict[str, str]  # field_label -> comment text
+
+
+@router.post("/save-comments")
+def save_scraper_comments(payload: _CommentPayload):
+    """Append user review comments to a scraper test log file."""
+    scraper_dir = _get_scraper_test_dir()
+    safe_name = os.path.basename(payload.file)
+    file_path = os.path.join(scraper_dir, safe_name)
+    if not os.path.isfile(file_path):
+        raise HTTPException(404, "Log file not found")
+
+    lines: List[str] = [
+        "",
+        "",
+        "=" * 72,
+        "  USER REVIEW COMMENTS",
+        "=" * 72,
+        f"  Saved: {datetime.datetime.now().isoformat()}",
+        "",
+    ]
+    for field_label, comment in payload.comments.items():
+        if comment.strip():
+            lines.append(f"  [{field_label}]: {comment}")
+    lines.append("")
+
+    with open(file_path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    return {"ok": True}
