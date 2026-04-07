@@ -337,11 +337,15 @@ def update_source_directories(body: SourceDirsUpdate, db: Session = Depends(get_
                 # Analyze quality via ffprobe
                 try:
                     sig = extract_quality_signature(video_file)
-                    qs = QualitySignature(video_id=video_item.id)
+                    qs = db.query(QualitySignature).filter(
+                        QualitySignature.video_id == video_item.id
+                    ).first()
+                    if not qs:
+                        qs = QualitySignature(video_id=video_item.id)
+                        db.add(qs)
                     for k, v in sig.items():
                         if hasattr(qs, k):
                             setattr(qs, k, v)
-                    db.add(qs)
                     video_item.resolution_label = derive_resolution_label(sig.get("height"))
                 except Exception as e:
                     logger.warning(f"Quality analysis failed for {entry_name}: {e}")
@@ -793,6 +797,171 @@ def clear_archive():
                 except OSError as e:
                     errors.append(f"{entry_path}: {e}")
     return {"deleted": deleted, "errors": errors}
+
+
+@router.post("/archive-clean-stale")
+def clean_stale_archives(body: DeleteArchiveRequest):
+    """Delete archive folders that no longer contain a video file."""
+    from app.config import get_settings as _get_settings
+    from app.routers.video_editor import _VIDEO_EXTS
+    _settings = _get_settings()
+    allowed_roots = set()
+    for lib_root in _settings.get_all_library_dirs():
+        allowed_roots.add(os.path.normcase(os.path.normpath(os.path.join(lib_root, "_archive"))))
+
+    deleted = 0
+    errors: list[str] = []
+    for folder in body.folders:
+        norm_folder = os.path.normcase(os.path.normpath(folder))
+        if not any(norm_folder.startswith(ar + os.sep) or norm_folder == ar for ar in allowed_roots):
+            errors.append(f"Not inside archive: {folder}")
+            continue
+        if not os.path.isdir(folder):
+            errors.append(f"Not found: {folder}")
+            continue
+        # Only delete if the folder truly has no video file
+        has_video = any(
+            os.path.splitext(f.name)[1].lower() in _VIDEO_EXTS
+            for f in os.scandir(folder) if f.is_file()
+        )
+        if has_video:
+            errors.append(f"Still has video: {folder}")
+            continue
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(folder)
+            deleted += 1
+        except OSError as e:
+            errors.append(f"{folder}: {e}")
+    return {"deleted": deleted, "errors": errors}
+
+
+class RestoreArchiveRequest(BaseModel):
+    folder: str
+
+
+@router.post("/archive-restore")
+def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_db)):
+    """Restore an archived video back to its library location."""
+    from app.config import get_settings as _get_settings
+    from app.routers.video_editor import _MANIFEST_NAME, _VIDEO_EXTS
+    from app.services.media_analyzer import extract_quality_signature
+    from app.models import QualitySignature as QualitySigModel, VideoItem
+
+    _settings = _get_settings()
+
+    folder = body.folder
+    norm_folder = os.path.normcase(os.path.normpath(folder))
+    allowed = False
+    for lib_root in _settings.get_all_library_dirs():
+        archive_root = os.path.normcase(os.path.normpath(os.path.join(lib_root, "_archive")))
+        if norm_folder.startswith(archive_root + os.sep) or norm_folder == archive_root:
+            allowed = True
+            break
+    if not allowed:
+        raise HTTPException(403, "Path is not inside archive directory")
+    if not os.path.isdir(folder):
+        raise HTTPException(404, "Archive folder not found")
+
+    # Find the video file in the archive folder
+    archive_file = None
+    for fn in os.listdir(folder):
+        if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
+            archive_file = os.path.join(folder, fn)
+            break
+    if not archive_file:
+        raise HTTPException(404, "No video file found in archive folder")
+
+    # Read manifest
+    manifest_path = os.path.join(folder, _MANIFEST_NAME)
+    meta: dict = {}
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    video_id = meta.get("video_id")
+    video = db.query(VideoItem).get(video_id) if video_id else None
+
+    if video and video.file_path:
+        # Kill any active streaming processes holding the file
+        from app.routers.playback import kill_streams_for_file
+        kill_streams_for_file(video.file_path)
+
+        # Delete the current encoded file
+        if os.path.isfile(video.file_path):
+            import time
+            for attempt in range(5):
+                try:
+                    os.remove(video.file_path)
+                    break
+                except PermissionError:
+                    if attempt < 4:
+                        time.sleep(0.5)
+                    else:
+                        raise HTTPException(
+                            409,
+                            "Cannot delete current file — it is currently in use. "
+                            "Stop playback and try again."
+                        )
+
+        # Determine restored file path
+        archive_ext = os.path.splitext(archive_file)[1]
+        current_ext = os.path.splitext(video.file_path)[1]
+        if archive_ext.lower() != current_ext.lower():
+            restored_path = os.path.splitext(video.file_path)[0] + archive_ext
+        else:
+            restored_path = video.file_path
+
+        import shutil as _shutil
+        os.makedirs(os.path.dirname(restored_path), exist_ok=True)
+        _shutil.move(archive_file, restored_path)
+
+        # Update DB
+        if restored_path != video.file_path:
+            video.file_path = restored_path
+            video.folder_path = os.path.dirname(restored_path)
+
+        # Re-analyze quality
+        try:
+            new_sig = extract_quality_signature(video.file_path)
+            qs = db.query(QualitySigModel).filter(QualitySigModel.video_id == video_id).first()
+            if qs:
+                for k, val in new_sig.items():
+                    setattr(qs, k, val)
+            video.file_size_bytes = os.path.getsize(video.file_path)
+            if new_sig.get("height"):
+                video.resolution_label = f"{new_sig['height']}p"
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Post-restore analysis failed: {e}")
+    else:
+        # No linked video — just move the file back to library root
+        import shutil as _shutil
+        lib_dir = _settings.library_dir
+        artist = meta.get("artist", "Unknown Artist")
+        title = meta.get("title", os.path.splitext(os.path.basename(archive_file))[0])
+        dest_folder = os.path.join(lib_dir, artist, f"{artist} - {title}")
+        os.makedirs(dest_folder, exist_ok=True)
+        _shutil.move(archive_file, os.path.join(dest_folder, os.path.basename(archive_file)))
+
+    # Clean up archive subfolder
+    if os.path.isfile(manifest_path):
+        try:
+            os.remove(manifest_path)
+        except OSError:
+            pass
+    if os.path.isdir(folder):
+        try:
+            import shutil as _shutil2
+            _shutil2.rmtree(folder)
+        except OSError:
+            pass
+
+    return {"message": "Restored from archive", "video_id": video_id}
+
 
 
 @router.post("/startup")

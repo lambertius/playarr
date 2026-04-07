@@ -218,6 +218,71 @@ async def stream_video(video_id: int, request: Request, db: Session = Depends(ge
     )
 
 
+@router.get("/stream-archive")
+async def stream_archive(path: str, request: Request):
+    """Stream an archived video file by its direct path (validated to be inside an archive dir)."""
+    from app.config import get_settings
+    _settings = get_settings()
+    norm_path = os.path.normcase(os.path.normpath(path))
+    allowed = False
+    for lib_root in _settings.get_all_library_dirs():
+        archive_root = os.path.normcase(os.path.normpath(os.path.join(lib_root, "_archive")))
+        if norm_path.startswith(archive_root + os.sep) or norm_path == archive_root:
+            allowed = True
+            break
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Path is not inside archive directory")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Archived file not found")
+
+    file_size = os.path.getsize(path)
+    ext = os.path.splitext(path)[1].lower()
+    mime_map = {
+        ".mp4": "video/mp4",
+        ".mkv": "video/x-matroska",
+        ".webm": "video/webm",
+        ".avi": "video/x-msvideo",
+    }
+    content_type = mime_map.get(ext, "video/mp4")
+
+    range_header = request.headers.get("range")
+    if range_header:
+        start, end = _parse_range(range_header, file_size)
+        chunk_size = end - start + 1
+
+        def iter_file():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    read_size = min(remaining, 1024 * 1024)
+                    data = f.read(read_size)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            iter_file(),
+            status_code=206,
+            media_type=content_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(chunk_size),
+            },
+        )
+
+    return FileResponse(
+        path,
+        media_type=content_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        },
+    )
+
+
 @router.get("/preview/{video_id}")
 async def get_preview(video_id: int, db: Session = Depends(get_db)):
     """Get or generate a preview clip for hover preview."""

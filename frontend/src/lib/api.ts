@@ -28,6 +28,7 @@ import type {
   PartyModeParams, PartyModeResponse,
   LogFileEntry, LogReadResponse,
   ArchiveItem, QualityBucket,
+  ArtistConflict, MbidStats,
 } from "@/types";
 
 const api = axios.create({ baseURL: "/api" });
@@ -120,6 +121,9 @@ export const libraryApi = {
 
   cleanRedundant: (filePaths: string[]) =>
     api.post<{ results: { file: string; status: string; reason?: string }[]; deleted: number }>("/library/clean-redundant", { file_paths: filePaths }).then(r => r.data),
+
+  cleanStaleArchives: (folders: string[]) =>
+    api.post<{ deleted: number; errors: string[] }>("/settings/archive-clean-stale", { folders }).then(r => r.data),
 
   rename: (videoId: number) =>
     api.post<VideoItemDetail>(`/library/${videoId}/rename`).then(r => r.data),
@@ -328,6 +332,12 @@ export const settingsApi = {
 
   archiveClear: () =>
     api.post<{ deleted: number; errors: string[] }>("/settings/archive-clear").then(r => r.data),
+
+  archiveRestore: (folder: string) =>
+    api.post<{ message: string; video_id: number | null }>("/settings/archive-restore", { folder }).then(r => r.data),
+
+  archiveStreamUrl: (path: string) =>
+    `/api/playback/stream-archive?path=${encodeURIComponent(path)}`,
 };
 
 // ─── Stats ────────────────────────────────────────────────
@@ -383,6 +393,8 @@ export const reviewApi = {
     api.post<{ status: string; count: number }>("/review/batch/dismiss", videoIds).then(r => r.data),
   scanRenames: (rescanAll: boolean = false) =>
     api.post<{ status: string; flagged: number }>(`/review/scan-renames?rescan_all=${rescanAll}`).then(r => r.data),
+  scanEnrichment: (rescanAll: boolean = false) =>
+    api.post<{ status: string; flagged: number }>(`/review/scan-enrichment?rescan_all=${rescanAll}`).then(r => r.data),
   applyRename: (videoId: number) =>
     api.post<{ status: string; video_id: number }>(`/review/${videoId}/apply-rename`).then(r => r.data),
   batchApplyRename: (videoIds: number[]) =>
@@ -539,9 +551,9 @@ export const videoEditorApi = {
       params: { video_id: videoId },
     }).then(r => r.data),
 
-  scanLetterbox: (limit: number = 200) =>
+  scanLetterbox: (limit: number = 200, includeExcluded: boolean = false) =>
     api.post<{ status: string; job_id?: number; results?: LetterboxScanItem[]; total_scanned?: number }>(
-      "/video-editor/scan-letterbox", { limit },
+      "/video-editor/scan-letterbox", { limit, include_excluded: includeExcluded },
     ).then(r => r.data),
 
   getScanResults: (jobId: number) =>
@@ -681,6 +693,12 @@ export const scraperTestApi = {
 
     return { close: () => es.close() };
   },
+
+  downloadLogUrl: (file: string) =>
+    `/api/scraper-test/download-log?file=${encodeURIComponent(file)}`,
+
+  saveComments: (file: string, comments: Record<string, string>) =>
+    api.post("/api/scraper-test/save-comments", { file, comments }),
 };
 
 // ─── New Videos / Discovery ──────────────────────────────
@@ -728,4 +746,18 @@ export const newVideosApi = {
 
   updateSettings: (updates: { key: string; value: string }[]) =>
     api.post<{ status: string; saved: string[] }>("/new-videos/settings", updates).then(r => r.data),
+};
+
+// ─── Metadata Manager ────────────────────────────────────
+export const metadataManagerApi = {
+  mbidStats: () =>
+    api.get<MbidStats>("/metadata/mbid-stats").then(r => r.data),
+
+  artistConflicts: () =>
+    api.get<ArtistConflict[]>("/metadata/artist-conflicts").then(r => r.data),
+
+  consolidateArtist: (mb_artist_id: string, canonical_name: string) =>
+    api.post<{ updated: number; mb_artist_id: string; canonical_name: string }>(
+      "/metadata/artist-consolidate", { mb_artist_id, canonical_name },
+    ).then(r => r.data),
 };

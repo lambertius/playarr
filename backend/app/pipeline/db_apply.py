@@ -131,14 +131,26 @@ def _execute_plan(plan: dict) -> int:
                     return existing.id
 
         # ── 2. Create or update VideoItem ────────────────────────────
+        # Normalize featuring credits to semicolons before DB write
+        from app.services.source_validation import normalize_feat_to_semicolons, build_artist_ids
+        _raw_artist = v.get("artist", "Unknown Artist")
+        _normalized_artist = normalize_feat_to_semicolons(_raw_artist)
+        _artist_ids = v.get("artist_ids") or build_artist_ids(
+            _normalized_artist,
+            mb_artist_credits=v.get("mb_artist_credits"),
+            primary_mb_artist_id=v.get("mb_artist_id"),
+        )
+
         if v.get("action") == "update" and v.get("existing_id"):
             video_item = db.query(VideoItem).get(v["existing_id"])
             if not video_item:
                 raise ValueError(f"VideoItem {v['existing_id']} not found for update")
+            v["artist"] = _normalized_artist
+            v["artist_ids"] = _artist_ids
             _apply_video_fields(video_item, v, plan)
         else:
             video_item = VideoItem(
-                artist=v.get("artist", "Unknown Artist"),
+                artist=_normalized_artist,
                 title=v.get("title", "Unknown Title"),
                 album=v.get("album", ""),
                 year=v.get("year"),
@@ -160,6 +172,7 @@ def _execute_plan(plan: dict) -> int:
                 mb_release_id=v.get("mb_release_id"),
                 processing_state=v.get("processing_state") or {},
                 import_method="url",
+                artist_ids=_artist_ids,
             )
             db.add(video_item)
 
@@ -310,6 +323,16 @@ def _execute_plan(plan: dict) -> int:
             existing_fp.update(fp)
             video_item.field_provenance = existing_fp
             flag_modified(video_item, "field_provenance")
+
+        # ── 9c. Playarr content IDs ─────────────────────────────────
+        try:
+            from app.services.content_id import compute_ids_for_video
+            ids = compute_ids_for_video(video_item)
+            video_item.playarr_track_id = ids["playarr_track_id"]
+            video_item.playarr_video_id = ids["playarr_video_id"]
+        except Exception as e:
+            logger.warning(f"[Job {job_id}] Content ID generation: {e}")
+
         # ── 10. Job linkage + terminal status ────────────────────────
         #  Mark the job complete INSIDE the apply transaction so it's
         #  atomic — no separate _coarse_update needed for the terminal
@@ -355,6 +378,10 @@ def _apply_video_fields(video_item, v: dict, plan: dict) -> None:
                   "mb_artist_id", "mb_recording_id", "mb_release_id"):
         if v.get(field) is not None:
             setattr(video_item, field, v[field])
+
+    # Update artist_ids when available
+    if v.get("artist_ids") is not None:
+        video_item.artist_ids = v["artist_ids"]
 
     if not all_locked and "version_type" not in locked:
         video_item.version_type = plan.get("version_type", "normal")

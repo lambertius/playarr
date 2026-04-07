@@ -172,6 +172,11 @@ class TrackEntity(Base):
     mb_release_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     mb_release_group_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     mb_artist_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    mb_track_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+
+    # Audio fingerprinting
+    acoustid_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    audio_fingerprint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     track_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

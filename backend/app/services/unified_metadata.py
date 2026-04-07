@@ -212,20 +212,25 @@ def _scrape_with_ai_links(
                 # different artist with the same song title.
                 artist_credits = recording.get("artist-credit", [])
                 if artist_credits:
-                    ac = artist_credits[0]
-                    if isinstance(ac, dict) and "artist" in ac:
+                    # Filter to actual credit dicts (skip joinphrase strings)
+                    _credit_dicts = [c for c in artist_credits if isinstance(c, dict) and "artist" in c]
+                    ac = _credit_dicts[0] if _credit_dicts else None
+                    if ac:
                         _mb_artist_name = ac["artist"].get("name", "")
                         if _mb_artist_name and artist:
                             from difflib import SequenceMatcher as _SM_art
                             from app.services.metadata_resolver import (
                                 _normalize_for_compare, _tokens_overlap,
                             )
+                            # Compare against primary artist (strip feat. credits)
+                            from app.services.source_validation import parse_multi_artist as _pma_validate
+                            _input_primary, _ = _pma_validate(artist)
                             _art_sim = _SM_art(
                                 None,
-                                _normalize_for_compare(artist),
+                                _normalize_for_compare(_input_primary),
                                 _normalize_for_compare(_mb_artist_name),
                             ).ratio()
-                            _art_tok = _tokens_overlap(_mb_artist_name, artist, 0.4)
+                            _art_tok = _tokens_overlap(_mb_artist_name, _input_primary, 0.4)
                             if _art_sim < 0.6 and not _art_tok:
                                 logs.append(
                                     f"MusicBrainz: AI-provided recording rejected — "
@@ -234,8 +239,16 @@ def _scrape_with_ai_links(
                                     f"Falling back to search."
                                 )
                                 raise ValueError("Recording artist mismatch")
-                        metadata["artist"] = _mb_artist_name or artist
+
+                        # Build semicolon-separated artist name from all credits
+                        _all_credit_names = [c["artist"].get("name", "") for c in _credit_dicts if c["artist"].get("name")]
+                        if len(_all_credit_names) > 1:
+                            metadata["artist"] = "; ".join(_all_credit_names)
+                        else:
+                            metadata["artist"] = _mb_artist_name or artist
                         metadata["mb_artist_id"] = ac["artist"].get("id")
+                        # Store raw credits for building artist_ids downstream
+                        metadata["mb_artist_credits"] = _credit_dicts
 
                 if best_rel:
                     _rel_album = best_rel.get("title")
@@ -649,12 +662,23 @@ def _scrape_with_ai_links(
         if metadata["album"] != _orig_album:
             logs.append(f"Album sanitized: '{_orig_album}' → {metadata['album'] or 'null'}")
 
-    # ── Multi-artist parsing ──
-    from app.services.source_validation import parse_multi_artist
+    # ── Multi-artist parsing & normalization ──
+    from app.services.source_validation import parse_multi_artist, normalize_feat_to_semicolons, build_artist_ids
     if metadata.get("artist"):
         primary, featured = parse_multi_artist(metadata["artist"])
         metadata["primary_artist"] = primary
         metadata["featured_artists"] = featured
+        # Normalize "feat."/"ft."/"featuring" to semicolon-separated format
+        _orig_artist = metadata["artist"]
+        metadata["artist"] = normalize_feat_to_semicolons(metadata["artist"])
+        if metadata["artist"] != _orig_artist:
+            logs.append(f"Artist normalized: '{_orig_artist}' → '{metadata['artist']}'")
+        # Build artist_ids list from MB credits or parsed artists
+        metadata["artist_ids"] = build_artist_ids(
+            metadata["artist"],
+            mb_artist_credits=metadata.get("mb_artist_credits"),
+            primary_mb_artist_id=metadata.get("mb_artist_id"),
+        )
     else:
         metadata["primary_artist"] = metadata.get("artist", "")
         metadata["featured_artists"] = []

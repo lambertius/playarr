@@ -1,9 +1,11 @@
 import { useState, useMemo, useRef, useCallback, type FormEvent } from "react";
+import ReactDOM from "react-dom";
 import {
   FlaskConical, Link as LinkIcon, User, Music, Loader2, Info,
   CheckCircle2, AlertTriangle, ChevronDown, ChevronUp, ExternalLink,
   Database, Sparkles, Tag, Clock, Image, ArrowRight,
-  Disc3, Search, Globe, XCircle, Zap, Timer, FolderOpen, File,
+  Disc3, Search, Globe, XCircle, Zap, Timer, FolderOpen, File, Download,
+  MessageSquarePlus,
 } from "lucide-react";
 import { scraperTestApi } from "@/lib/api";
 import { useToast } from "@/components/Toast";
@@ -732,6 +734,11 @@ export function ScraperTesterPage() {
   const streamRef = useRef<{ close: () => void } | null>(null);
   const { toast } = useToast();
 
+  // Download dialog state
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [downloadStep, setDownloadStep] = useState<"warning" | "feedback">("warning");
+  const [feedbackText, setFeedbackText] = useState("");
+
   const urlInfo = useMemo(() => {
     const t = url.trim();
     if (!t) return null;
@@ -1017,9 +1024,135 @@ export function ScraperTesterPage() {
       {/* ═══════════════ RESULTS ═══════════════ */}
       {result && (
         <>
-          <CompletedStepsBar steps={steps} />
+          <div className="flex items-center gap-3">
+            <div className="flex-1">
+              <CompletedStepsBar steps={steps} />
+            </div>
+            {result.output_file && (
+              <button
+                onClick={() => { setDownloadDialogOpen(true); setDownloadStep("warning"); setFeedbackText(""); }}
+                className="btn-primary gap-2 shrink-0"
+              >
+                <Download size={16} /> Download Log
+              </button>
+            )}
+          </div>
           <ResultsView r={result} />
         </>
+      )}
+
+      {/* ═══════════════ DOWNLOAD LOG DIALOG ═══════════════ */}
+      {downloadDialogOpen && result?.output_file && ReactDOM.createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setDownloadDialogOpen(false)} />
+          <div
+            className="relative z-10 w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-xl border border-surface-border bg-surface-light p-6 shadow-[0_0_40px_rgba(225,29,46,0.1)]"
+            style={{ background: "linear-gradient(135deg, rgba(21,25,35,0.97) 0%, rgba(28,34,48,0.92) 100%)" }}
+            role="dialog"
+            aria-modal="true"
+          >
+            <button onClick={() => setDownloadDialogOpen(false)} className="absolute top-4 right-4 text-text-muted hover:text-text-primary" aria-label="Close">
+              <XCircle size={18} />
+            </button>
+
+            {downloadStep === "warning" ? (
+              <>
+                <div className="flex items-center gap-2 mb-3">
+                  <Download size={20} className="text-accent" />
+                  <h2 className="text-lg font-semibold text-text-primary">Download Scraper Log</h2>
+                </div>
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 mb-5">
+                  <p className="text-sm text-text-secondary leading-relaxed">
+                    If you wish to submit this log for <span className="text-amber-400 font-medium">bug testing</span> or <span className="text-amber-400 font-medium">improving scraper functionality</span>, you should also describe what the correct results should be. Detailed feedback helps pinpoint exactly what went wrong.
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setDownloadStep("feedback")}
+                    className="btn-primary flex-1 gap-2"
+                  >
+                    <MessageSquarePlus size={16} /> Add Details
+                  </button>
+                  <button
+                    onClick={() => {
+                      const a = document.createElement("a");
+                      a.href = scraperTestApi.downloadLogUrl(result.output_file!);
+                      a.download = "";
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      setDownloadDialogOpen(false);
+                    }}
+                    className="btn-ghost flex-1 gap-2"
+                  >
+                    <Download size={16} /> Download Without Details
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 mb-3">
+                  <MessageSquarePlus size={20} className="text-accent" />
+                  <h2 className="text-lg font-semibold text-text-primary">Describe Expected Results</h2>
+                </div>
+
+                <div className="rounded-lg border border-surface-border bg-surface/50 p-4 mb-4">
+                  <p className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-2">Example of a useful report</p>
+                  <div className="space-y-1.5 text-xs text-text-secondary leading-relaxed">
+                    <p>• <span className="text-emerald-400">Incorrect MusicBrainz album linked.</span> The scraper matched "Greatest Hits" but the correct release is <span className="text-accent">https://musicbrainz.org/release/...</span></p>
+                    <p>• <span className="text-emerald-400">Correct source found, but wrong artwork selected.</span> The album art is from a different release — should be the 2008 reissue cover.</p>
+                    <p>• <span className="text-emerald-400">Wikipedia article not found.</span> No result was returned, but this track has an article at <span className="text-accent">https://en.wikipedia.org/wiki/...</span></p>
+                    <p>• <span className="text-emerald-400">Artist name incorrect.</span> Should be "The Lonely Island" not "Lonely Island".</p>
+                    <p>• <span className="text-emerald-400">Year is wrong.</span> Shows 2010 but the single was released in 2009.</p>
+                  </div>
+                  <p className="text-[11px] text-text-muted mt-3 italic">
+                    More complete descriptions with links to correct sources will improve the scraper more effectively.
+                  </p>
+                </div>
+
+                <textarea
+                  value={feedbackText}
+                  onChange={(e) => setFeedbackText(e.target.value)}
+                  placeholder="Describe what's wrong and what the correct results should be..."
+                  rows={5}
+                  className="w-full rounded-lg border border-surface-border bg-surface-lighter/50 px-3 py-2 text-sm text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/50 resize-y mb-4"
+                />
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={async () => {
+                      if (result.output_file && feedbackText.trim()) {
+                        try {
+                          await scraperTestApi.saveComments(result.output_file, { "User Feedback": feedbackText.trim() });
+                        } catch { /* ignore */ }
+                      }
+                      const a = document.createElement("a");
+                      a.href = scraperTestApi.downloadLogUrl(result.output_file!);
+                      a.download = "";
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      setDownloadDialogOpen(false);
+                      setDownloadStep("warning");
+                      setFeedbackText("");
+                    }}
+                    disabled={!feedbackText.trim()}
+                    className="btn-primary flex-1 gap-2 disabled:opacity-40"
+                  >
+                    <Download size={16} /> Download with Feedback
+                  </button>
+                  <button
+                    onClick={() => setDownloadStep("warning")}
+                    className="btn-ghost px-4"
+                  >
+                    Back
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -1285,7 +1418,9 @@ function ResultsView({ r }: { r: ScraperTestResult }) {
         {/* Core Library Fields */}
         <div className="lg:col-span-1">
           <div className="card h-full space-y-0">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">Library Metadata</h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">Library Metadata</h3>
+            </div>
             <MetaRow icon={<User size={13} />} label="Artist" field={r.artist} />
             <MetaRow icon={<Music size={13} />} label="Title" field={r.title} />
             <MetaRow icon={<Disc3 size={13} />} label="Album" field={r.album} />
@@ -1576,19 +1711,23 @@ function LogLine({ index, entry }: { index: number; entry: string }) {
 }
 
 /* ─────────────────────── MetaRow ─────────────────────── */
-function MetaRow({ icon, label, field, mono }: { icon: React.ReactNode; label: string; field: ProvenanceField; mono?: boolean }) {
+function MetaRow({ icon, label, field, mono }: {
+  icon: React.ReactNode; label: string; field: ProvenanceField; mono?: boolean;
+}) {
   const val = fmtVal(field.value);
   const found = val !== "";
   return (
-    <div className="flex items-start gap-2 py-2 border-b border-surface-border/30 last:border-0">
-      <span className="text-text-muted mt-0.5 flex-shrink-0">{icon}</span>
-      <div className="min-w-0 flex-1">
-        <p className="text-[11px] text-text-muted leading-none mb-0.5">{label}</p>
-        <p className={`text-sm break-words ${found ? (mono ? "font-mono text-xs text-text-primary" : "text-text-primary font-medium") : "text-text-muted italic"}`}>
-          {found ? val : "Not found"}
-        </p>
+    <div className="py-2 border-b border-surface-border/30 last:border-0">
+      <div className="flex items-start gap-2">
+        <span className="text-text-muted mt-0.5 flex-shrink-0">{icon}</span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] text-text-muted leading-none mb-0.5">{label}</p>
+          <p className={`text-sm break-words ${found ? (mono ? "font-mono text-xs text-text-primary" : "text-text-primary font-medium") : "text-text-muted italic"}`}>
+            {found ? val : "Not found"}
+          </p>
+        </div>
+        <Badge source={field.source} className="flex-shrink-0 mt-1" />
       </div>
-      <Badge source={field.source} className="flex-shrink-0 mt-1" />
     </div>
   );
 }

@@ -55,6 +55,14 @@ class VideoItemUpdate(BaseModel):
     video_rating: Optional[int] = None
     song_rating_set: Optional[bool] = None
     video_rating_set: Optional[bool] = None
+    mb_artist_id: Optional[str] = None
+    mb_recording_id: Optional[str] = None
+    mb_release_id: Optional[str] = None
+    mb_release_group_id: Optional[str] = None
+    mb_track_id: Optional[str] = None
+    artist_ids: Optional[list] = None
+    playarr_video_id: Optional[str] = None
+    playarr_track_id: Optional[str] = None
 
 
 class QualitySignatureOut(BaseModel):
@@ -147,6 +155,11 @@ class VideoItemOut(BaseModel):
     mb_artist_id: Optional[str] = None
     mb_recording_id: Optional[str] = None
     mb_release_id: Optional[str] = None
+    mb_release_group_id: Optional[str] = None
+    mb_track_id: Optional[str] = None
+    artist_ids: Optional[list] = None
+    playarr_video_id: Optional[str] = None
+    playarr_track_id: Optional[str] = None
     folder_path: Optional[str] = None
     file_path: Optional[str] = None
     file_size_bytes: Optional[int] = None
@@ -170,6 +183,7 @@ class VideoItemOut(BaseModel):
     canonical_track_id: Optional[int] = None
     has_archive: bool = False
     exclude_from_editor_scan: bool = False
+    field_provenance: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
 
@@ -387,7 +401,10 @@ class CanonicalTrackOut(BaseModel):
     genres: List[GenreOut] = []
     mb_recording_id: Optional[str] = None
     mb_release_id: Optional[str] = None
+    mb_release_group_id: Optional[str] = None
     mb_artist_id: Optional[str] = None
+    mb_track_id: Optional[str] = None
+    acoustid_id: Optional[str] = None
     artwork_album: Optional[str] = None
     artwork_single: Optional[str] = None
     canonical_verified: bool = False

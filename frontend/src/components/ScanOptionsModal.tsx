@@ -3,9 +3,9 @@
  * running rename or duplicate scans from the Review Queue.
  */
 import ReactDOM from "react-dom";
-import { X, FileEdit, Copy } from "lucide-react";
+import { X, FileEdit, Copy, BrainCircuit } from "lucide-react";
 
-type ScanKind = "renames" | "duplicates";
+type ScanKind = "renames" | "duplicates" | "enrichment";
 
 interface ScanOptionsModalProps {
   kind: ScanKind;
@@ -52,6 +52,24 @@ const CONFIG: Record<ScanKind, {
         label: "Full library re-scan",
         description:
           "Re-scan the entire library for all duplicate pairs, including those previously resolved. Use this if you've made bulk changes to your library or want to re-evaluate old decisions.",
+        rescanAll: true,
+      },
+    ],
+  },
+  enrichment: {
+    title: "Scan AI Enrichment",
+    icon: BrainCircuit,
+    options: [
+      {
+        label: "Unflagged videos only",
+        description:
+          "Scan for videos that haven't been AI-enriched yet, skipping any already in the review queue. Best for finding newly imported tracks that need AI processing.",
+        rescanAll: false,
+      },
+      {
+        label: "Full library re-scan",
+        description:
+          "Re-scan every video in the library for incomplete AI enrichment, including items already flagged or dismissed. Use this for a complete audit of AI enrichment status.",
         rescanAll: true,
       },
     ],

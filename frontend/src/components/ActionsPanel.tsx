@@ -5,8 +5,8 @@ import {
   Wrench, Wand2, FileText, Sparkles, Fingerprint,
   FileCheck, Globe, Loader2, Bot, Check, ChevronDown,
   AlertTriangle, Lock, CheckCheck, Zap, FolderSync,
-  ShieldCheck, Music, Link2, Film, ArchiveRestore, Ban,
-  FolderOpen, X,
+  ShieldCheck, Music, Link2, Film, Ban,
+  FolderOpen, X, Hash,
 } from "lucide-react";
 import type {
   QualitySignature, AIFieldComparison,
@@ -18,8 +18,8 @@ import {
   useAIComparison, useAIResults,
   useAIEnrich, useAIApplyFields,
   useAIUndo, useAIFingerprint, useAISettings, useRedownload,
-  useRenameToExpected, useRestoreFromArchive, useSetExcludeFromScan, qk,
-  useSettings,
+  useRenameToExpected, useSetExcludeFromScan, qk,
+  useSettings, useUpdateVideo,
 } from "@/hooks/queries";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/components/Toast";
@@ -615,11 +615,170 @@ function ScrapeMetadataPopup({
   );
 }
 
+/* ─── Edit Track IDs Popup ─── */
+function EditTrackIDsPopup({
+  videoId,
+  onClose,
+}: {
+  videoId: number;
+  onClose: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const updateMutation = useUpdateVideo(videoId);
+
+  const [fields, setFields] = useState({
+    mb_artist_id: "",
+    mb_recording_id: "",
+    mb_release_id: "",
+    mb_release_group_id: "",
+    mb_track_id: "",
+    playarr_video_id: "",
+    playarr_track_id: "",
+  });
+  const [provenance, setProvenance] = useState<Record<string, string>>({});
+  const [original, setOriginal] = useState(fields);
+
+  useEffect(() => {
+    libraryApi.get(videoId).then((video) => {
+      const f = {
+        mb_artist_id: video.mb_artist_id || "",
+        mb_recording_id: video.mb_recording_id || "",
+        mb_release_id: video.mb_release_id || "",
+        mb_release_group_id: video.mb_release_group_id || "",
+        mb_track_id: video.mb_track_id || "",
+        playarr_video_id: video.playarr_video_id || "",
+        playarr_track_id: video.playarr_track_id || "",
+      };
+      setFields(f);
+      setOriginal(f);
+      setProvenance(video.field_provenance || {});
+      setLoading(false);
+    });
+  }, [videoId]);
+
+  const fieldDefs: { key: keyof typeof fields; label: string; group: string; placeholder: string }[] = [
+    { key: "mb_artist_id", label: "Artist ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
+    { key: "mb_recording_id", label: "Recording ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
+    { key: "mb_release_id", label: "Release ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
+    { key: "mb_release_group_id", label: "Release Group ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
+    { key: "mb_track_id", label: "Track ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
+    { key: "playarr_video_id", label: "Video ID", group: "Playarr", placeholder: "PVD-xxxxxxxxxxxx" },
+    { key: "playarr_track_id", label: "Track ID", group: "Playarr", placeholder: "PTR-xxxxxxxxxxxx" },
+  ];
+
+  const hasChanges = Object.keys(fields).some(
+    (k) => fields[k as keyof typeof fields] !== original[k as keyof typeof fields],
+  );
+
+  const handleSave = () => {
+    const update: Record<string, string | null> = {};
+    for (const k of Object.keys(fields) as (keyof typeof fields)[]) {
+      if (fields[k] !== original[k]) {
+        update[k] = fields[k].trim() || null;
+      }
+    }
+    setSaving(true);
+    updateMutation.mutate(update as any, {
+      onSuccess: () => {
+        toast({ type: "success", title: "Track IDs updated" });
+        qc.invalidateQueries({ queryKey: qk.video(videoId) });
+        onClose();
+      },
+      onError: () => {
+        toast({ type: "error", title: "Failed to update Track IDs" });
+        setSaving(false);
+      },
+    });
+  };
+
+  const provenanceLabel = (key: string) => {
+    const src = provenance[key];
+    if (!src) return null;
+    const colors: Record<string, string> = {
+      manual: "text-blue-400",
+      musicbrainz: "text-orange-400",
+      wikipedia: "text-green-400",
+      ai: "text-purple-400",
+      acoustid: "text-cyan-400",
+      computed: "text-emerald-400",
+    };
+    return (
+      <span className={`text-[10px] ${colors[src] || "text-text-muted"}`}>
+        {src}
+      </span>
+    );
+  };
+
+  const groups = ["MusicBrainz", "Playarr"] as const;
+
+  return (
+    <PopupOverlay onClose={onClose}>
+      <h2 className="text-lg font-semibold text-text-primary mb-1">Edit Track IDs</h2>
+      <p className="text-sm text-text-secondary mb-4">
+        View and edit MusicBrainz and Playarr identifiers. Changes are tracked via provenance.
+      </p>
+
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-8 text-text-muted">
+          <Loader2 size={16} className="animate-spin" /> Loading…
+        </div>
+      ) : (
+        <div className="space-y-4 mb-5">
+          {groups.map((group) => (
+            <div key={group}>
+              <h4 className="text-[11px] font-medium text-text-muted uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                {group === "MusicBrainz" ? <Music size={12} /> : <Hash size={12} />}
+                {group}
+              </h4>
+              <div className="space-y-2">
+                {fieldDefs
+                  .filter((f) => f.group === group)
+                  .map((f) => (
+                    <div key={f.key}>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <label className="text-xs text-text-secondary">{f.label}</label>
+                        {provenanceLabel(f.key)}
+                      </div>
+                      <input
+                        type="text"
+                        value={fields[f.key]}
+                        onChange={(e) => setFields((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                        placeholder={f.placeholder}
+                        className={`input-field w-full text-xs font-mono ${
+                          fields[f.key] !== original[f.key] ? "!border-accent/60" : ""
+                        }`}
+                      />
+                    </div>
+                  ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex justify-end gap-3">
+        <button onClick={onClose} className="btn-secondary btn-sm">Cancel</button>
+        <button
+          onClick={handleSave}
+          disabled={!hasChanges || saving}
+          className="btn-primary btn-sm"
+        >
+          {saving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+          Save
+        </button>
+      </div>
+    </PopupOverlay>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════
    Main Actions Panel
    ═══════════════════════════════════════════════════════════ */
 
-export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, filePath, artist, title, resolutionLabel, processingState, versionType, alternateVersionLabel, isLocked, hasArchive, excludeFromEditorScan, className }: ActionsPanelProps) {
+export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, filePath, artist, title, resolutionLabel, processingState, versionType, alternateVersionLabel, isLocked, hasArchive: _hasArchive, excludeFromEditorScan, className }: ActionsPanelProps) {
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
   const qc = useQueryClient();
@@ -653,6 +812,7 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
   const [showRedownload, setShowRedownload] = useState(false);
   const [showCheckFilename, setShowCheckFilename] = useState(false);
   const [showScrape, setShowScrape] = useState(false);
+  const [showEditTrackIDs, setShowEditTrackIDs] = useState(false);
   const [showAIResults, setShowAIResults] = useState(false);
   const [pollingScrapeResult, setPollingScrapeResult] = useState(false);
   const prevCompResultId = useRef<number | null>(null);
@@ -674,7 +834,6 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
   const scrapeMutation = useScrapeMetadata();
   const redownloadMutation = useRedownload();
   const renameMutation = useRenameToExpected();
-  const restoreArchiveMutation = useRestoreFromArchive();
   const excludeFromScanMutation = useSetExcludeFromScan();
 
   // AI mutations
@@ -846,6 +1005,12 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
         }
       },
     },
+    {
+      label: "Edit Track IDs",
+      icon: <Hash size={14} />,
+      tooltip: "View and edit MusicBrainz IDs and Playarr Content IDs. Changes are tracked via provenance.",
+      onClick: () => setShowEditTrackIDs(true),
+    },
   ];
 
   const mediaActions: ActionItem[] = [
@@ -873,31 +1038,6 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
         toast({ type: "success", title: "Added to Video Editor queue" });
       },
     },
-    ...(hasArchive ? [{
-      label: "Restore from Archive",
-      icon: <ArchiveRestore size={14} />,
-      tooltip: "Delete the current encoded video and restore the original from archive.",
-      pending: restoreArchiveMutation.isPending,
-      onClick: async () => {
-        const ok = await confirm({
-          title: "Restore original from archive?",
-          description: "This will delete the current (encoded) video file and restore the original from the archive.",
-          confirmLabel: "Restore",
-        });
-        if (ok) {
-          restoreArchiveMutation.mutate(videoId, {
-            onSuccess: () => {
-              toast({ type: "success", title: "Original restored from archive" });
-              qc.invalidateQueries({ queryKey: qk.video(videoId) });
-            },
-            onError: (err: any) => {
-              const detail = err?.response?.data?.detail;
-              toast({ type: "error", title: detail || "Failed to restore from archive" });
-            },
-          });
-        }
-      },
-    }] as ActionItem[] : []),
     {
       label: excludeFromEditorScan ? "Editor Included" : "Editor Excluded",
       icon: <Ban size={14} />,
@@ -1070,6 +1210,13 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
               },
             });
           }}
+        />
+      )}
+
+      {showEditTrackIDs && (
+        <EditTrackIDsPopup
+          videoId={videoId}
+          onClose={() => setShowEditTrackIDs(false)}
         />
       )}
 

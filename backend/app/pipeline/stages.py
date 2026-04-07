@@ -2010,6 +2010,6 @@ def _determine_artist_title_from_ytdlp(ytdlp_meta: dict,
     if title:
         title, feat_credit = extract_featuring_credit(title)
         if feat_credit and artist and feat_credit.lower() not in artist.lower():
-            artist = f"{artist} ft. {feat_credit}"
+            artist = f"{artist}; {feat_credit}"
 
     return artist or "Unknown Artist", title or os.path.splitext(os.path.basename(downloaded_file))[0]

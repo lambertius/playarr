@@ -388,6 +388,40 @@ PROCESSING_STEPS = (
 )
 
 
+def _merge_existing_xml_quality(db, video_item: VideoItem, folder_path: str):
+    """Backfill QualitySignature fields from the existing XML sidecar.
+
+    When the DB is missing quality data (e.g. loudness_lufs is NULL because
+    the library scan had an autoflush bug or the field was never scraped),
+    read the existing .playarr.xml and merge any non-null values so the
+    subsequent XML write doesn't overwrite production data with nulls.
+    """
+    from app.services.playarr_xml import find_playarr_xml, parse_playarr_xml
+    xml_path = find_playarr_xml(folder_path) if folder_path else None
+    if not xml_path:
+        return
+    existing = parse_playarr_xml(xml_path)
+    if not existing:
+        return
+    xml_q = existing.get("quality", {})
+    if not xml_q:
+        return
+    qs = video_item.quality_signature
+    if not qs:
+        return
+    for field in ("loudness_lufs", "audio_codec", "audio_bitrate",
+                  "audio_sample_rate", "audio_channels",
+                  "letterbox_scanned", "letterbox_detected",
+                  "letterbox_crop_w", "letterbox_crop_h",
+                  "letterbox_crop_x", "letterbox_crop_y",
+                  "letterbox_bar_top", "letterbox_bar_bottom",
+                  "letterbox_bar_left", "letterbox_bar_right"):
+        db_val = getattr(qs, field, None)
+        xml_val = xml_q.get(field)
+        if db_val is None and xml_val is not None:
+            setattr(qs, field, xml_val)
+
+
 def _set_processing_flag(db, video_item: VideoItem, step: str, *,
                          method: str = "auto", version: str = "1.0"):
     """Mark a processing step as completed on a VideoItem.
@@ -1292,8 +1326,10 @@ def _rescan_from_disk(job_id: int, video_id: int,
             # Pre-rescan snapshot
             _save_metadata_snapshot(db, video_item, "rescan_from_disk")
 
-            # Identity fields
-            video_item.artist = xml_artist or video_item.artist
+            # Identity fields — normalize feat credits to semicolons
+            from app.services.source_validation import normalize_feat_to_semicolons, build_artist_ids
+            _rescan_artist = xml_artist or video_item.artist
+            video_item.artist = normalize_feat_to_semicolons(_rescan_artist)
             video_item.title = xml_title or video_item.title
             video_item.album = xml_album
             video_item.year = xml_year
@@ -1310,6 +1346,12 @@ def _rescan_from_disk(job_id: int, video_id: int,
             video_item.mb_recording_id = xml_mb_recording_id
             video_item.mb_release_id = xml_mb_release_id
             video_item.mb_release_group_id = xml_mb_release_group_id
+
+            # Artist IDs (rebuild from normalized artist + available MBIDs)
+            video_item.artist_ids = build_artist_ids(
+                video_item.artist,
+                primary_mb_artist_id=xml_mb_artist_id,
+            )
 
             # Genres
             if xml_genres:
@@ -1547,6 +1589,15 @@ def _rescan_from_disk(job_id: int, video_id: int,
                     _set_processing_flag(db, video_item, "nfo_exported", method="rescan_from_disk")
             except Exception as _nfo_e:
                 _append_job_log(job_id, f"NFO rewrite warning: {_nfo_e}")
+
+            # Compute Playarr content IDs
+            try:
+                from app.services.content_id import compute_ids_for_video
+                ids = compute_ids_for_video(video_item)
+                video_item.playarr_track_id = ids["playarr_track_id"]
+                video_item.playarr_video_id = ids["playarr_video_id"]
+            except Exception as _cid_e:
+                _append_job_log(job_id, f"Content ID generation warning: {_cid_e}")
 
             db.commit()
             _append_job_log(job_id, "All XML data applied successfully")
@@ -2118,12 +2169,21 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                     if backfill_data.get("upload_date"):
                         src.upload_date = backfill_data["upload_date"]
 
-                # Apply metadata fields
-                video_item.artist = new_artist
+                # Apply metadata fields — normalize feat credits to semicolons
+                from app.services.source_validation import normalize_feat_to_semicolons, build_artist_ids
+                video_item.artist = normalize_feat_to_semicolons(new_artist)
                 video_item.title = new_title
                 video_item.album = new_album
                 video_item.year = new_year
                 video_item.plot = new_plot
+
+                # Artist IDs (structured multi-artist list)
+                _scrape_artist_ids = metadata.get("artist_ids") or build_artist_ids(
+                    video_item.artist,
+                    mb_artist_credits=metadata.get("mb_artist_credits"),
+                    primary_mb_artist_id=new_mb_artist_id,
+                )
+                video_item.artist_ids = _scrape_artist_ids
 
                 # MusicBrainz IDs
                 video_item.mb_artist_id = new_mb_artist_id
@@ -2171,8 +2231,10 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                 # IMDB) so stale links from a previous scrape don't persist.
                 # The primary video source (YouTube etc.) is preserved.
                 # Skip clearing when all fields are locked.
+                # Only clear if the scrape actually found replacement sources;
+                # otherwise we'd destroy existing data with nothing to replace it.
                 from app.pipeline_url.db_apply import _upsert_source
-                if not all_locked:
+                if not all_locked and source_links:
                     _cleared = db.query(Source).filter(
                         Source.video_id == video_id,
                         Source.source_type != "video",
@@ -2296,9 +2358,15 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                     _set_processing_flag(db, video_item, "description_generated", method="rescan")
                 if ctx_folder_path:
                     _set_processing_flag(db, video_item, "nfo_exported", method="rescan")
-                    # Write Playarr XML sidecar
+                    # Write Playarr XML sidecar — merge existing XML quality
+                    # data first so that values the DB doesn't have (e.g.
+                    # loudness_lufs from a previous normalization) are not
+                    # lost when the XML is rewritten.
                     try:
-                        from app.services.playarr_xml import write_playarr_xml
+                        from app.services.playarr_xml import (
+                            write_playarr_xml, find_playarr_xml, parse_playarr_xml,
+                        )
+                        _merge_existing_xml_quality(db, video_item, ctx_folder_path)
                         db.flush()  # persist entity links before XML generation
                         db.refresh(video_item)
                         write_playarr_xml(video_item, db)
@@ -2306,15 +2374,21 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                     except Exception as _xml_e:
                         _append_job_log(job_id, f"Playarr XML write error: {_xml_e}")
 
+                # Compute Playarr content IDs
+                try:
+                    from app.services.content_id import compute_ids_for_video
+                    ids = compute_ids_for_video(video_item)
+                    video_item.playarr_track_id = ids["playarr_track_id"]
+                    video_item.playarr_video_id = ids["playarr_video_id"]
+                except Exception as _cid_e:
+                    _append_job_log(job_id, f"Content ID generation warning: {_cid_e}")
+
                 db.commit()
             except Exception:
                 db.rollback()
                 raise
             finally:
                 db.close()
-
-        from app.pipeline_url.write_queue import db_write
-        db_write(_execute_rescan_write)
 
         # Job status update (uses own session via _update_job)
         _set_pipeline_step(job_id, "Resolving entities", "success")
@@ -4045,6 +4119,8 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
 
             try:
                 from app.services.playarr_xml import write_playarr_xml
+                _merge_existing_xml_quality(db, video_item,
+                                            video_item.folder_path)
                 db.refresh(video_item)
                 write_playarr_xml(video_item, db)
                 _set_processing_flag(db, video_item, "xml_exported", method="scrape_metadata")
@@ -4079,6 +4155,15 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             }
             video_item.processing_state = _ps
             _flag_mod(video_item, "processing_state")
+
+        # Recompute Playarr content IDs (metadata may have changed)
+        try:
+            from app.services.content_id import compute_ids_for_video
+            _ids = compute_ids_for_video(video_item)
+            video_item.playarr_track_id = _ids["playarr_track_id"]
+            video_item.playarr_video_id = _ids["playarr_video_id"]
+        except Exception as _cid_e:
+            _append_job_log(job_id, f"Content ID generation warning: {_cid_e}")
 
         # Deduplicate updated_fields for summary
         seen = set()
@@ -4862,29 +4947,51 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                         video_item.genres.append(genre_obj)
 
                 # Analyze quality
+                _scan_qs = None  # Track QS object for XML override below
                 try:
                     sig = extract_quality_signature(entry["file_path"])
-                    qs = QualitySignature(video_id=video_item.id)
+                    qs = db.query(QualitySignature).filter(
+                        QualitySignature.video_id == video_item.id
+                    ).first()
+                    if not qs:
+                        qs = QualitySignature(video_id=video_item.id)
+                        db.add(qs)
                     for k, v in sig.items():
                         if hasattr(qs, k):
                             setattr(qs, k, v)
-                    db.add(qs)
                     video_item.resolution_label = derive_resolution_label(sig.get("height"))
+                    _scan_qs = qs
                 except Exception as e:
                     _append_job_log(job_id, f"Analysis failed for {entry['folder_name']}: {e}")
 
-                # Apply XML quality overrides (loudness etc.)
+                # Apply XML quality overrides (loudness, audio codec, etc.)
+                # NOTE: We reference _scan_qs directly instead of
+                # video_item.quality_signature because the session uses
+                # autoflush=False — the unflushed QualitySignature is
+                # invisible to the lazy-loading relationship query.
                 if xml_sidecar_data:
                     xml_q = xml_sidecar_data.get("quality", {})
-                    if xml_q and video_item.quality_signature:
-                        qs_obj = video_item.quality_signature
+                    if xml_q:
+                        # Ensure QS exists even if ffprobe failed
+                        if not _scan_qs:
+                            _scan_qs = db.query(QualitySignature).filter(
+                                QualitySignature.video_id == video_item.id
+                            ).first()
+                            if not _scan_qs:
+                                _scan_qs = QualitySignature(video_id=video_item.id)
+                                db.add(_scan_qs)
                         for qf in ("width", "height", "loudness_lufs", "fps", "video_codec", "video_bitrate",
                                     "hdr", "audio_codec", "audio_bitrate",
                                     "audio_sample_rate", "audio_channels",
-                                    "container", "duration_seconds"):
+                                    "container", "duration_seconds",
+                                    "letterbox_scanned", "letterbox_detected",
+                                    "letterbox_crop_w", "letterbox_crop_h",
+                                    "letterbox_crop_x", "letterbox_crop_y",
+                                    "letterbox_bar_top", "letterbox_bar_bottom",
+                                    "letterbox_bar_left", "letterbox_bar_right"):
                             qv = xml_q.get(qf)
                             if qv is not None:
-                                setattr(qs_obj, qf, qv)
+                                setattr(_scan_qs, qf, qv)
 
                     # Restore sources
                     xml_sources = xml_sidecar_data.get("sources", [])
@@ -5139,6 +5246,26 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                     _set_processing_flag(db, video_item, "xml_exported", method="library_scan")
                 if nfo_path:
                     _set_processing_flag(db, video_item, "nfo_exported", method="library_scan")
+
+                # Flag tracks with incomplete AI enrichment for the review queue
+                ps = video_item.processing_state or {}
+                _ps_done = lambda step: ps.get(step, {}).get("completed", False)
+                ai_done = _ps_done("ai_enriched")
+                scenes_done = _ps_done("scenes_analyzed")
+                if not (ai_done and scenes_done):
+                    _enrich_cat = "ai_partial" if (ai_done or scenes_done) else "ai_pending"
+                    _missing = []
+                    if not ai_done:
+                        _missing.append("AI metadata")
+                    if not scenes_done:
+                        _missing.append("scene analysis")
+                    video_item.review_status = "needs_human_review"
+                    video_item.review_category = _enrich_cat
+                    video_item.review_reason = (
+                        f"{'Partial' if _enrich_cat == 'ai_partial' else 'No'} AI enrichment"
+                        f" — missing: {', '.join(_missing)}"
+                    )
+
                 db.commit()
                 new_count += 1
                 _append_job_log(job_id, f"Imported: {artist} - {title}")

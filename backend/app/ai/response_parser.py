@@ -240,9 +240,12 @@ def _validate_schema(parsed: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def normalize_featuring(artist: str) -> str:
-    """Standardize featuring credit format to 'feat.' """
+    """Normalize featuring credits to semicolon-separated format.
+
+    Converts "Artist feat. Other", "Artist ft. Other", "Artist featuring Other"
+    to "Artist; Other" for consistent multi-artist representation.
+    """
     if not artist:
         return artist
-    artist = re.sub(r'\bfeaturing\b', 'feat.', artist, flags=re.IGNORECASE)
-    artist = re.sub(r'\bft\.?\b', 'feat.', artist, flags=re.IGNORECASE)
-    return artist.strip()
+    from app.services.source_validation import normalize_feat_to_semicolons
+    return normalize_feat_to_semicolons(artist)

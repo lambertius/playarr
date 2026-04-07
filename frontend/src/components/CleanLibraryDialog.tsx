@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
-import { X, AlertTriangle, FileX, FolderOpen, Trash2, Loader2, CheckCircle2, Unplug, Copy } from "lucide-react";
-import { useLibraryHealth, useCleanStale, useCleanOrphans, useCleanRedundant } from "@/hooks/queries";
+import { X, AlertTriangle, FileX, FolderOpen, Trash2, Loader2, CheckCircle2, Unplug, Copy, Archive } from "lucide-react";
+import { useLibraryHealth, useCleanStale, useCleanOrphans, useCleanRedundant, useCleanStaleArchives } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
-import type { StaleItem, OrphanFolder, RedundantItem } from "@/types";
+import type { StaleItem, OrphanFolder, RedundantItem, StaleArchive } from "@/types";
 
 interface Props {
   open: boolean;
@@ -15,10 +15,12 @@ export function CleanLibraryDialog({ open, onClose }: Props) {
   const cleanStaleMutation = useCleanStale();
   const cleanOrphansMutation = useCleanOrphans();
   const cleanRedundantMutation = useCleanRedundant();
+  const cleanStaleArchivesMutation = useCleanStaleArchives();
   const [selectedStale, setSelectedStale] = useState<Set<number>>(new Set());
   const [selectedUnmanaged, setSelectedUnmanaged] = useState<Set<number>>(new Set());
   const [selectedOrphans, setSelectedOrphans] = useState<Set<string>>(new Set());
   const [selectedRedundant, setSelectedRedundant] = useState<Set<string>>(new Set());
+  const [selectedStaleArchives, setSelectedStaleArchives] = useState<Set<string>>(new Set());
 
   // Reset selections when dialog opens/data changes
   useEffect(() => {
@@ -27,6 +29,7 @@ export function CleanLibraryDialog({ open, onClose }: Props) {
       setSelectedUnmanaged(new Set());
       setSelectedOrphans(new Set());
       setSelectedRedundant(new Set());
+      setSelectedStaleArchives(new Set());
       refetch();
     }
   }, [open, refetch]);
@@ -37,6 +40,7 @@ export function CleanLibraryDialog({ open, onClose }: Props) {
   const unmanagedItems: StaleItem[] = data?.unmanaged_items ?? [];
   const orphanFolders: OrphanFolder[] = data?.orphan_folders ?? [];
   const redundantItems: RedundantItem[] = data?.redundant_items ?? [];
+  const staleArchives: StaleArchive[] = data?.stale_archives ?? [];
   const allRedundantFiles = redundantItems.flatMap((r) => r.files.map((f) => f.file_path));
 
   const toggleStale = (id: number) => {
@@ -159,7 +163,37 @@ export function CleanLibraryDialog({ open, onClose }: Props) {
     });
   };
 
-  const healthy = staleItems.length === 0 && unmanagedItems.length === 0 && orphanFolders.length === 0 && redundantItems.length === 0;
+  const toggleStaleArchive = (folder: string) => {
+    setSelectedStaleArchives((prev) => {
+      const next = new Set(prev);
+      if (next.has(folder)) next.delete(folder);
+      else next.add(folder);
+      return next;
+    });
+  };
+
+  const selectAllStaleArchives = () => {
+    if (selectedStaleArchives.size === staleArchives.length) {
+      setSelectedStaleArchives(new Set());
+    } else {
+      setSelectedStaleArchives(new Set(staleArchives.map((a) => a.folder)));
+    }
+  };
+
+  const handleCleanStaleArchives = () => {
+    const folders = [...selectedStaleArchives];
+    if (folders.length === 0) return;
+    cleanStaleArchivesMutation.mutate(folders, {
+      onSuccess: (res) => {
+        toast({ type: "success", title: `Removed ${res.deleted} stale archive(s)` });
+        setSelectedStaleArchives(new Set());
+        refetch();
+      },
+      onError: () => toast({ type: "error", title: "Failed to clean stale archives" }),
+    });
+  };
+
+  const healthy = staleItems.length === 0 && unmanagedItems.length === 0 && orphanFolders.length === 0 && redundantItems.length === 0 && staleArchives.length === 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
@@ -405,6 +439,59 @@ export function CleanLibraryDialog({ open, onClose }: Props) {
                           ))}
                         </div>
                       </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {/* Stale Archives Section */}
+              {staleArchives.length > 0 && (
+                <section>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-sm font-semibold text-text-primary flex items-center gap-1.5">
+                      <Archive size={16} className="text-cyan-400" />
+                      Stale Archives ({staleArchives.length})
+                    </h3>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={selectAllStaleArchives}
+                        className="text-xs text-accent hover:underline"
+                      >
+                        {selectedStaleArchives.size === staleArchives.length ? "Deselect all" : "Select all"}
+                      </button>
+                      <button
+                        onClick={handleCleanStaleArchives}
+                        disabled={selectedStaleArchives.size === 0 || cleanStaleArchivesMutation.isPending}
+                        className="btn-danger btn-sm text-xs"
+                      >
+                        <Trash2 size={12} /> Delete Selected
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-xs text-text-muted mb-2">
+                    Archive folders whose video file has been deleted or moved. Only leftover manifests and sidecars remain.
+                  </p>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {staleArchives.map((item) => (
+                      <label
+                        key={item.folder}
+                        className="flex items-center gap-2 p-2 rounded hover:bg-surface-secondary/50 cursor-pointer text-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedStaleArchives.has(item.folder)}
+                          onChange={() => toggleStaleArchive(item.folder)}
+                          className="h-3.5 w-3.5 rounded border-surface-border accent-[var(--color-accent)]"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <span className="font-medium text-text-primary truncate block">
+                            {item.artist && item.title ? `${item.artist} — ${item.title}` : item.folder_name}
+                          </span>
+                          <span className="text-xs text-text-muted">
+                            {(item.size_bytes / 1024).toFixed(0)} KB leftover
+                          </span>
+                        </div>
+                      </label>
                     ))}
                   </div>
                 </section>

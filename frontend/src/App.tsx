@@ -20,6 +20,8 @@ import { VideoEditorPage } from "@/pages/VideoEditorPage";
 import { ScraperTesterPage } from "@/pages/ScraperTesterPage";
 import { NewVideosPage } from "@/pages/NewVideosPage";
 import { QualityPage } from "@/pages/QualityPage";
+import { ArchivePage } from "@/pages/ArchivePage";
+import { MetadataManagerPage } from "@/pages/MetadataManagerPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -55,6 +57,8 @@ function App() {
               <Route path="library-import" element={<ImportLibraryPage />} />
               <Route path="now-playing" element={<NowPlayingPage />} />
               <Route path="video-editor" element={<VideoEditorPage />} />
+              <Route path="metadata-manager" element={<MetadataManagerPage />} />
+              <Route path="archive" element={<ArchivePage />} />
               <Route path="scraper-tester" element={<ScraperTesterPage />} />
               <Route path="new-videos" element={<NewVideosPage />} />
               <Route path="*" element={<Navigate to="/library" replace />} />

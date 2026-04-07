@@ -104,6 +104,41 @@ def infer_source_type_from_url(url: str, provider: str = "") -> str:
 # Multi-artist parsing
 # ---------------------------------------------------------------------------
 
+# Band / duo names that contain separators (& , and , with , x) but must NOT
+# be split.  Matched case-insensitively against the full artist string before
+# any tokenisation occurs.
+_PROTECTED_NAMES: set[str] = {
+    "angels & airwaves",
+    "angus & julia stone",
+    "coheed and cambria",
+    "earth, wind & fire",
+    "earth wind & fire",
+    "hunters & collectors",
+    "iron & wine",
+    "mumford & sons",
+    "of monsters and men",
+    "roger glover & guests",
+    "something with numbers",
+    "womack & womack",
+    "simon & garfunkel",
+    "hall & oates",
+    "tears for fears",
+    "brooks & dunn",
+    "she & him",
+    "tegan and sara",
+    "belle and sebastian",
+    "peter, paul and mary",
+    "crosby, stills & nash",
+    "crosby, stills, nash & young",
+    "emerson, lake & palmer",
+    "blood, sweat & tears",
+    "hootie & the blowfish",
+    "josie and the pussycats",
+    "echo & the bunnymen",
+    "bob & earl",
+    "needtobreathe",
+}
+
 # Patterns that separate primary artist from featured/additional artists
 _FEAT_PATTERNS = [
     r'\s*\(feat\.?\s+',   # "(feat. X)" — parenthesized
@@ -150,6 +185,10 @@ def parse_multi_artist(artist_string: str) -> Tuple[str, List[str]]:
         return ("", [])
 
     artist_string = artist_string.strip()
+
+    # Bail out immediately for known band names containing separators
+    if artist_string.lower() in _PROTECTED_NAMES:
+        return (artist_string, [])
 
     # Step 1: Split on featuring patterns
     primary_part = artist_string
@@ -201,6 +240,11 @@ def _split_artists(artist_str: str) -> List[str]:
     if re.search(r'&\s+the\s+', artist_str, re.IGNORECASE):
         return [artist_str.strip()]
 
+    # Protect "X and the Y" patterns (band names like "Nick Cave and the Bad Seeds",
+    # "Marina and the Diamonds", "Tom Petty and the Heartbreakers").
+    if re.search(r'\band\s+the\s+', artist_str, re.IGNORECASE):
+        return [artist_str.strip()]
+
     # Try splitting on "and" first (most natural separator)
     # But only if "and" appears as a standalone word, not inside a name
     for pattern in _ARTIST_SEPARATORS:
@@ -212,6 +256,76 @@ def _split_artists(artist_str: str) -> List[str]:
                 return parts
 
     return [artist_str.strip()]
+
+
+def normalize_feat_to_semicolons(artist_string: str) -> str:
+    """Convert featuring-style artist strings to semicolon-separated format.
+
+    Splits the artist string into individual artists using ``parse_multi_artist``
+    and rejoins them with ``; `` (semicolon + space).
+
+    Examples:
+        "Sigrid feat. Bring Me the Horizon"  → "Sigrid; Bring Me the Horizon"
+        "AronChupa ft. Little Sis Nora"      → "AronChupa; Little Sis Nora"
+        "DJ Snake & Lil Jon"                 → "DJ Snake; Lil Jon"
+        "Sigrid"                             → "Sigrid"
+        "Florence + the Machine"             → "Florence + the Machine"
+
+    Returns:
+        Semicolon-separated artist string, or the original if only one artist.
+    """
+    if not artist_string:
+        return artist_string
+    primary, additional = parse_multi_artist(artist_string)
+    if not additional:
+        return primary or artist_string
+    all_artists = [primary] + additional
+    return "; ".join(a for a in all_artists if a)
+
+
+def build_artist_ids(artist_string: str,
+                     mb_artist_credits: Optional[List[dict]] = None,
+                     primary_mb_artist_id: Optional[str] = None,
+                     ) -> List[dict]:
+    """Build an ``artist_ids`` list suitable for storing in the DB JSON column.
+
+    Each entry is ``{"name": "...", "mb_artist_id": "..."}`` (mb_artist_id may
+    be absent).
+
+    Uses MusicBrainz artist-credit records when available (each credit entry
+    has ``{"artist": {"id": "...", "name": "..."}, "joinphrase": "..."}``).
+    Falls back to splitting ``artist_string`` with ``parse_multi_artist`` and
+    attaching ``primary_mb_artist_id`` to the first entry.
+
+    Returns:
+        List of artist id dicts (always at least one entry).
+    """
+    # ── Strategy 1: MusicBrainz artist-credit array ──
+    if mb_artist_credits:
+        result: List[dict] = []
+        for credit in mb_artist_credits:
+            if isinstance(credit, dict) and "artist" in credit:
+                a = credit["artist"]
+                entry: dict = {"name": a.get("name", "")}
+                if a.get("id"):
+                    entry["mb_artist_id"] = a["id"]
+                if entry["name"]:
+                    result.append(entry)
+        if result:
+            return result
+
+    # ── Strategy 2: parse from string ──
+    primary, additional = parse_multi_artist(artist_string)
+    all_names = [primary] + additional
+    result = []
+    for i, name in enumerate(all_names):
+        if not name:
+            continue
+        entry = {"name": name}
+        if i == 0 and primary_mb_artist_id:
+            entry["mb_artist_id"] = primary_mb_artist_id
+        result.append(entry)
+    return result or [{"name": artist_string}]
 
 
 def extract_primary_artist_from_description(description: str) -> Optional[str]:

@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
-  Library, Users, CalendarDays, Tags, Disc3, Star, MonitorPlay, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles, ArrowUpCircle, X, Heart,
+  Library, Users, CalendarDays, Tags, Disc3, Star, MonitorPlay, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles, ArrowUpCircle, X, Heart, Archive, Database,
 } from "lucide-react";
 import { useStats, useReviewQueue, useUpdateCheck } from "@/hooks/queries";
 import { useState } from "react";
@@ -27,6 +27,9 @@ const navItems = [
   { to: "/queue", icon: ListOrdered, label: "Queue" },
   { to: "/review", icon: CheckCircle2, label: "Review" },
   { to: "/video-editor", icon: Film, label: "Video Editor" },
+  { to: "/metadata-manager", icon: Database, label: "Metadata" },
+  "separator",
+  { to: "/archive", icon: Archive, label: "Archive" },
   { to: "/scraper-tester", icon: FlaskConical, label: "Scraper Tester" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ] as const;
