@@ -221,6 +221,46 @@ def _apply_schema_upgrades(eng):
                 with eng.begin() as conn:
                     conn.execute(text(f"ALTER TABLE {tbl_name} ADD COLUMN field_provenance JSON"))
 
+    # ── Letterbox scan fields on quality_signatures (migration 011) ──
+    if "quality_signatures" in existing_tables:
+        qs_cols = {c["name"] for c in insp.get_columns("quality_signatures")}
+        _new_qs = {
+            "letterbox_scanned": "BOOLEAN DEFAULT 0",
+            "letterbox_detected": "BOOLEAN DEFAULT 0",
+            "letterbox_crop_w": "INTEGER",
+            "letterbox_crop_h": "INTEGER",
+            "letterbox_crop_x": "INTEGER",
+            "letterbox_crop_y": "INTEGER",
+            "letterbox_bar_top": "INTEGER",
+            "letterbox_bar_bottom": "INTEGER",
+            "letterbox_bar_left": "INTEGER",
+            "letterbox_bar_right": "INTEGER",
+        }
+        with eng.begin() as conn:
+            for col_name, col_type in _new_qs.items():
+                if col_name not in qs_cols:
+                    conn.execute(text(f"ALTER TABLE quality_signatures ADD COLUMN {col_name} {col_type}"))
+
+    # ── Multi-artist / MB track ID (migration 012) ──
+    if "video_items" in existing_tables:
+        vi_cols2 = {c["name"] for c in insp.get_columns("video_items")}
+        with eng.begin() as conn:
+            if "mb_track_id" not in vi_cols2:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN mb_track_id VARCHAR(36)"))
+            if "artist_ids" not in vi_cols2:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN artist_ids JSON"))
+
+    # ── Playarr content IDs (migration 013) ──
+    if "video_items" in existing_tables:
+        vi_cols3 = {c["name"] for c in insp.get_columns("video_items")}
+        with eng.begin() as conn:
+            if "playarr_video_id" not in vi_cols3:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN playarr_video_id VARCHAR(12)"))
+            if "playarr_track_id" not in vi_cols3:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN playarr_track_id VARCHAR(12)"))
+            if "video_phash" not in vi_cols3:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN video_phash VARCHAR(16)"))
+
 
 def _migrate_ai_settings(eng):
     """
