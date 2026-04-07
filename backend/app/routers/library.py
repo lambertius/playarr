@@ -1127,7 +1127,7 @@ def clean_stale_entries(body: CleanStaleRequest, db: Session = Depends(get_db)):
 
     results = []
     for vid in body.video_ids:
-        item = db.query(VideoItem).get(vid)
+        item = db.get(VideoItem, vid)
         if not item:
             results.append({"id": vid, "status": "skipped", "reason": "Not found"})
             continue
@@ -1138,23 +1138,28 @@ def clean_stale_entries(body: CleanStaleRequest, db: Session = Depends(get_db)):
             results.append({"id": vid, "status": "skipped", "reason": "File still exists in library"})
             continue
 
-        _cleanup_orphaned_child_rows(db, [vid])
-        _delete_video_cached_assets(db, [vid])
+        try:
+            _cleanup_orphaned_child_rows(db, [vid])
+            _delete_video_cached_assets(db, [vid])
 
-        artist_names = {item.artist} if item.artist else set()
-        album_keys = {(item.artist, item.album)} if item.artist and item.album else set()
-        artist_entity_ids = {item.artist_entity_id} if item.artist_entity_id else set()
-        album_entity_ids = {item.album_entity_id} if item.album_entity_id else set()
-        track_ids = {item.track_id} if item.track_id else set()
+            artist_names = {item.artist} if item.artist else set()
+            album_keys = {(item.artist, item.album)} if item.artist and item.album else set()
+            artist_entity_ids = {item.artist_entity_id} if item.artist_entity_id else set()
+            album_entity_ids = {item.album_entity_id} if item.album_entity_id else set()
+            track_ids = {item.track_id} if item.track_id else set()
 
-        db.delete(item)
-        db.flush()
+            db.delete(item)
+            db.flush()
 
-        _cleanup_orphaned_entity_folders(
-            db, artist_names, album_keys, artist_entity_ids, album_entity_ids, track_ids,
-        )
+            _cleanup_orphaned_entity_folders(
+                db, artist_names, album_keys, artist_entity_ids, album_entity_ids, track_ids,
+            )
 
-        results.append({"id": vid, "status": "removed"})
+            results.append({"id": vid, "status": "removed"})
+        except Exception as e:
+            logger.error(f"Failed to clean video {vid}: {e}", exc_info=True)
+            db.rollback()
+            results.append({"id": vid, "status": "error", "reason": str(e)})
 
     db.commit()
     return {"results": results, "removed": sum(1 for r in results if r["status"] == "removed")}

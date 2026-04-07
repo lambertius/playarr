@@ -261,6 +261,17 @@ def _apply_schema_upgrades(eng):
             if "video_phash" not in vi_cols3:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN video_phash VARCHAR(16)"))
 
+    # ── TrackEntity — audio fingerprint / MB track ID columns ──
+    if "tracks" in existing_tables:
+        tr_cols = {c["name"] for c in insp.get_columns("tracks")}
+        with eng.begin() as conn:
+            if "mb_track_id" not in tr_cols:
+                conn.execute(text("ALTER TABLE tracks ADD COLUMN mb_track_id VARCHAR(36)"))
+            if "acoustid_id" not in tr_cols:
+                conn.execute(text("ALTER TABLE tracks ADD COLUMN acoustid_id VARCHAR(36)"))
+            if "audio_fingerprint" not in tr_cols:
+                conn.execute(text("ALTER TABLE tracks ADD COLUMN audio_fingerprint TEXT"))
+
 
 def _migrate_ai_settings(eng):
     """
