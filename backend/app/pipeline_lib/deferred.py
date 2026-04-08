@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import List
 
 from app.pipeline_lib.workspace import ImportWorkspace
-from app.pipeline_lib.db_apply import _apply_lock
+from app.db_lock import _apply_lock
 from app.worker import GLOBAL_DEFERRED_SLOTS
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def _retry_delay(attempt: int) -> float:
     return base + random.uniform(0, base * 0.5)
 
 
-_DEFERRED_TIMEOUT = 300
+_DEFERRED_TIMEOUT = 1800
 
 # Global semaphore: limits concurrent deferred-task threads across ALL
 # pipeline types.  Imported from worker.py so pipeline_url, pipeline_lib,
@@ -127,45 +127,63 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
             # flags (scenes_analyzed, thumbnail_selected) are persisted to
             # disk.  Without this, a library clear + re-scan loses the data
             # because the original XML was written before deferred tasks ran.
-            try:
-                from app.database import SessionLocal as _FinalXMLSession
-                from app.models import VideoItem as _FinalXMLVideo
-                from app.services.playarr_xml import write_playarr_xml as _final_write_xml
-                _fdb = _FinalXMLSession()
+            # Uses retry loop to handle DB lock contention from parallel
+            # coordinator threads finishing simultaneously.
+            for _final_attempt in range(_MAX_DB_RETRIES + 1):
                 try:
-                    _fv = _fdb.query(_FinalXMLVideo).get(video_id)
-                    if _fv and _fv.folder_path and os.path.isdir(_fv.folder_path):
-                        _final_write_xml(_fv, _fdb)
+                    from app.database import SessionLocal as _FinalXMLSession
+                    from app.models import VideoItem as _FinalXMLVideo
+                    from app.services.playarr_xml import write_playarr_xml as _final_write_xml
+                    _fdb = _FinalXMLSession()
+                    try:
+                        _fv = _fdb.query(_FinalXMLVideo).get(video_id)
+                        if _fv and _fv.folder_path and os.path.isdir(_fv.folder_path):
+                            try:
+                                _final_write_xml(_fv, _fdb)
+                            except Exception as _xw_exc:
+                                logger.warning(f"XML sidecar write failed for video {video_id}: {_xw_exc}")
 
-                    # Auto-clear review flags when the underlying issue
-                    # has been resolved by the deferred tasks that just ran.
-                    if _fv and _fv.review_status == "needs_human_review":
-                        _rc = _fv.review_category
-                        _ps = _fv.processing_state or {}
-                        _flag_ok = lambda s: _ps.get(s, {}).get("completed", False)
-                        _rr = _fv.review_reason or ""
-                        _clear = False
-                        if _rc in ("ai_partial", "ai_pending"):
-                            # Clear when every flag mentioned in the reason is now done
-                            _need_ai = "AI metadata" in _rr
-                            _need_scenes = "scene analysis" in _rr
-                            _clear = (not _need_ai or _flag_ok("ai_enriched")) and (not _need_scenes or _flag_ok("scenes_analyzed"))
-                            if not (_need_ai or _need_scenes):
-                                _clear = _flag_ok("ai_enriched")
-                        elif _rc == "normalization":
-                            _clear = _flag_ok("audio_normalized")
-                        elif _rc == "scanned":
-                            _clear = _flag_ok("metadata_scraped") or _flag_ok("metadata_resolved")
-                        if _clear:
-                            _fv.review_status = "none"
-                            _fv.review_reason = None
-                            _fv.review_category = None
+                        # Auto-clear review flags when the underlying issue
+                        # has been resolved by the deferred tasks that just ran.
+                        _did_clear = False
+                        if _fv and _fv.review_status == "needs_human_review":
+                            _rc = _fv.review_category
+                            _ps = _fv.processing_state or {}
+                            _flag_ok = lambda s: _ps.get(s, {}).get("completed", False)
+                            _rr = _fv.review_reason or ""
+                            _clear = False
+                            if _rc in ("ai_partial", "ai_pending"):
+                                _need_ai = "AI metadata" in _rr
+                                _need_scenes = "scene analysis" in _rr
+                                _clear = (not _need_ai or _flag_ok("ai_enriched")) and (not _need_scenes or _flag_ok("scenes_analyzed"))
+                                if not (_need_ai or _need_scenes):
+                                    _clear = _flag_ok("ai_enriched")
+                            elif _rc == "normalization":
+                                _clear = _flag_ok("audio_normalized")
+                            elif _rc == "scanned":
+                                _clear = _flag_ok("metadata_scraped") or _flag_ok("metadata_resolved")
+                            if _clear:
+                                _fv.review_status = "none"
+                                _fv.review_reason = None
+                                _fv.review_category = None
+                                _did_clear = True
+                        with _apply_lock:
                             _fdb.commit()
+                        if _did_clear:
                             ws.log("Review flag cleared — underlying issue resolved")
-                finally:
-                    _fdb.close()
-            except Exception as _xml_exc:
-                logger.warning(f"Deferred XML sidecar rewrite failed for video {video_id}: {_xml_exc}")
+                        break  # success
+                    except Exception as _fc_exc:
+                        _fdb.rollback()
+                        if "database is locked" in str(_fc_exc) and _final_attempt < _MAX_DB_RETRIES:
+                            time.sleep(_retry_delay(_final_attempt))
+                        else:
+                            logger.warning(f"Deferred XML/review-clear failed for video {video_id}: {_fc_exc}")
+                            break
+                    finally:
+                        _fdb.close()
+                except Exception as _xml_exc:
+                    logger.warning(f"Deferred XML/review-clear failed for video {video_id}: {_xml_exc}")
+                    break
 
             _update_child_step(ws.job_id, "Import complete")
             ws.sync_logs_to_db()
@@ -195,7 +213,8 @@ def _update_child_step(job_id: int, step: str, _max_retries: int = 5):
             job = db.query(ProcessingJob).get(job_id)
             if job:
                 job.current_step = step
-                db.commit()
+                with _apply_lock:
+                    db.commit()
             return
         except Exception as e:
             db.rollback()
@@ -283,7 +302,8 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
             analyze_scenes(db, video_id)
             _mark_processing_state(db, video_id, "scenes_analyzed", method="scene_analysis")
             _mark_processing_state(db, video_id, "thumbnail_selected", method="scene_analysis")
-            db.commit()
+            with _apply_lock:
+                db.commit()
 
             # Persist scene thumbnails to the video folder so they survive
             # a library clear + re-scan cycle (fallback discovery).
@@ -1502,7 +1522,8 @@ def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
                         except Exception as e:
                             ws.log(f"File re-organize: {e}", level="warning")
 
-                db.commit()
+                with _apply_lock:
+                    db.commit()
                 return
             except ImportError:
                 return
@@ -1523,7 +1544,8 @@ def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
                             if item and (item.review_status or "none") == "none":
                                 item.review_status = "needs_human_review"
                                 item.review_reason = f"AI enrichment failed: {e}"
-                                db2.commit()
+                                with _apply_lock:
+                                    db2.commit()
                         finally:
                             db2.close()
                     except Exception:
@@ -1542,7 +1564,8 @@ def _deferred_matching(video_id: int, ws: ImportWorkspace) -> None:
         try:
             from app.pipeline_lib.matching.resolver import resolve_video
             resolve_video(db, video_id)
-            db.commit()
+            with _apply_lock:
+                db.commit()
             return
         except ImportError:
             return
@@ -1589,7 +1612,8 @@ def _deferred_orphan_cleanup(video_id: int, ws: ImportWorkspace) -> None:
                 ws.log(f"Removing orphan ArtistEntity: {orphan.canonical_name}")
                 db.delete(orphan)
 
-            db.commit()
+            with _apply_lock:
+                db.commit()
             return
         except Exception as e:
             db.rollback()

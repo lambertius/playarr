@@ -40,19 +40,47 @@ def _retry_delay(attempt: int) -> float:
     return base + random.uniform(0, base * 0.5)
 
 
-# Max wall-clock time (seconds) for all Phase 2 deferred tasks.  If any
-# task hangs beyond this, the coordinator logs a timeout and proceeds to
-# finalise the job â€” preventing permanent "Finalizing" UI hangs.
-_DEFERRED_TIMEOUT = 300
+# Max wall-clock time (seconds) for all Phase 2 deferred tasks.  Increased
+# from 300 to 1800 (30 min) to accommodate large batches where tasks
+# compete for the global semaphore and the serialised write queue.
+# If any task hangs beyond this, the coordinator logs a timeout and
+# proceeds to finalise the job.
+_DEFERRED_TIMEOUT = 1800
 
 # Global semaphore: limits concurrent deferred-task threads across ALL
 # pipeline types.  Imported from worker.py so pipeline_url, pipeline_lib,
-# and pipeline share a single pool â€” prevents SQLite write storms when
-# multiple individual downloads overlap in their deferred phases.
-# (was per-module Semaphore(6); now shared Semaphore(3) in worker.py)
+# and pipeline share a single pool.  Now that DB writes are serialised
+# through the write queue, this primarily limits I/O load (ffmpeg, network).
+# (was per-module Semaphore(6); shared Semaphore(3); raised to 6 in v1.9.8)
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+# -- Active coordinator tracking -------------------------------------------
+# Thread-safe set of video IDs whose deferred coordinators are still alive.
+# The finalizing watchdog uses this to avoid force-unsticking jobs whose
+# coordinator is genuinely still processing (just waiting for the write queue
+# or semaphore slots in a large batch).
+_active_coordinators: set[int] = set()
+_coord_lock = threading.Lock()
+
+
+def _register_coordinator(video_id: int) -> None:
+    with _coord_lock:
+        _active_coordinators.add(video_id)
+
+
+def _unregister_coordinator(video_id: int) -> None:
+    with _coord_lock:
+        _active_coordinators.discard(video_id)
+
+
+def active_coordinator_count() -> int:
+    """Return the number of deferred coordinators still running."""
+    with _coord_lock:
+        return len(_active_coordinators)
+
+
 #  PUBLIC API
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
@@ -98,6 +126,7 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
     def _coordinator():
         completed_tasks = []
         failed_tasks = []
+        _register_coordinator(video_id)
         try:
             phase1 = [t for t in tasks if t in _PHASE1_TASKS]
             phase2 = [t for t in tasks if t not in _PHASE1_TASKS]
@@ -157,7 +186,11 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
             # flags (scenes_analyzed, thumbnail_selected) are persisted to
             # disk.  Without this, a library clear + re-scan loses the data
             # because the original XML was written before deferred tasks ran.
-            try:
+            #
+            # Both the XML write and review auto-clear go through db_write
+            # to avoid "database is locked" when many coordinators finish
+            # simultaneously.
+            def _final_xml_and_clear():
                 from app.database import SessionLocal as _FinalXMLSession
                 from app.models import VideoItem as _FinalXMLVideo
                 from app.services.playarr_xml import write_playarr_xml as _final_write_xml
@@ -165,10 +198,14 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
                 try:
                     _fv = _fdb.query(_FinalXMLVideo).get(video_id)
                     if _fv and _fv.folder_path and os.path.isdir(_fv.folder_path):
-                        _final_write_xml(_fv, _fdb)
+                        try:
+                            _final_write_xml(_fv, _fdb)
+                        except Exception as _xw_exc:
+                            logger.warning(f"XML sidecar write failed for video {video_id}: {_xw_exc}")
 
                     # Auto-clear review flags when the underlying issue
                     # has been resolved by the deferred tasks that just ran.
+                    _did_clear = False
                     if _fv and _fv.review_status == "needs_human_review":
                         _rc = _fv.review_category
                         _ps = _fv.processing_state or {}
@@ -189,12 +226,17 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
                             _fv.review_status = "none"
                             _fv.review_reason = None
                             _fv.review_category = None
-                            _fdb.commit()
-                            ws.log("Review flag cleared — underlying issue resolved")
+                            _did_clear = True
+                    _fdb.commit()
+                    if _did_clear:
+                        ws.log("Review flag cleared — underlying issue resolved")
                 finally:
                     _fdb.close()
+
+            try:
+                db_write(_final_xml_and_clear)
             except Exception as _xml_exc:
-                logger.warning(f"Deferred XML sidecar rewrite failed for video {video_id}: {_xml_exc}")
+                logger.warning(f"Deferred XML/review-clear failed for video {video_id}: {_xml_exc}")
 
             try:
                 if _update_progress:
@@ -209,6 +251,7 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
                 ws.cleanup_on_success()
             except Exception as e:
                 logger.error(f"Failed cleanup for job {ws.job_id}: {e}")
+            _unregister_coordinator(video_id)
 
     threading.Thread(
         target=_coordinator, daemon=True, name=f"deferred-{video_id}",
@@ -1018,7 +1061,7 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                 if download_image(_wiki_image_url, _wp_poster):
                     guarded_copy(_wp_poster, _wp_thumb)
                     _wp_vr = validate_file(_wp_poster) if os.path.isfile(_wp_poster) else None
-                    with _apply_lock:
+                    def _write_wiki_poster():
                         for _wp_type, _wp_path in [("poster", _wp_poster), ("thumb", _wp_thumb)]:
                             db.query(MediaAsset).filter(
                                 MediaAsset.video_id == video_id,
@@ -1036,6 +1079,7 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                                 last_validated_at=datetime.now(timezone.utc),
                             ))
                         db.commit()
+                    db_write(_write_wiki_poster)
                     # Rename pending -> final
                     for _wp_pend, _wp_final, _wp_atype in [
                         (_wp_poster, os.path.join(item.folder_path, f"{folder_name}-poster.jpg"), "poster"),
@@ -1045,12 +1089,13 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                             if os.path.isfile(_wp_final):
                                 os.remove(_wp_final)
                             os.rename(_wp_pend, _wp_final)
-                            with _apply_lock:
+                            db_write(lambda _a=_wp_atype, _f=_wp_final: (
                                 db.query(MediaAsset).filter(
                                     MediaAsset.video_id == video_id,
-                                    MediaAsset.asset_type == _wp_atype,
-                                ).update({"file_path": _wp_final})
-                                db.commit()
+                                    MediaAsset.asset_type == _a,
+                                ).update({"file_path": _f}),
+                                db.commit(),
+                            ))
                         except Exception:
                             pass
                     ws.log("Poster fallback: using Wikipedia single cover image")
@@ -1752,8 +1797,6 @@ def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
             ws.log(f"AI enrichment: {e}", level="warning")
             # Flag the video for human review so it's easy to find
             try:
-                from app.models import VideoItem
-                from sqlalchemy.orm.attributes import flag_modified
                 db2 = SessionLocal()
                 try:
                     item = db2.query(VideoItem).get(video_id)

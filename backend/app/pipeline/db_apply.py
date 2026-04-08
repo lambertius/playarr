@@ -11,17 +11,13 @@ so parallel Stage B workers never block each other.
 import logging
 import os
 import re
-import threading
 from datetime import datetime, timezone
 from typing import Optional
 
 from app.database import SessionLocal
+from app.db_lock import _apply_lock
 
 logger = logging.getLogger(__name__)
-
-# Serialises all DB apply phases — replaces the old broad _pipeline_lock.
-# Hold time target: < 2 seconds per import.
-_apply_lock = threading.Lock()
 
 
 _MAX_APPLY_RETRIES = 10

@@ -22,15 +22,15 @@ import { StatusBadge } from "@/components/Badges";
 /** Job types whose pipelines dispatch deferred post-processing tasks. */
 const DEFERRED_JOB_TYPES = new Set(["import_url", "rescan", "library_import_video", "playlist_import"]);
 
-/** True only when deferred tasks are actively running (updated within last 2 min). */
+/** True when deferred tasks are still running (step has not reached completion). */
 function isJobFinalizing(job: JobSummary): boolean {
   if (!DEFERRED_JOB_TYPES.has(job.job_type)) return false;
   if (job.status !== "complete" || !job.current_step) return false;
   const stepLower = job.current_step.toLowerCase();
   if (stepLower.endsWith("complete") || job.current_step.startsWith("All ") || job.current_step.startsWith("Pending review")) return false;
-  if (!job.updated_at) return false;
-  const updMs = new Date(job.updated_at.endsWith("Z") ? job.updated_at : job.updated_at + "Z").getTime();
-  return (Date.now() - updMs) < 120_000;
+  // No time window — show as active until deferred tasks set step to
+  // "Import complete".  The backend watchdog handles truly stuck jobs.
+  return true;
 }
 
 function formatSpeed(bytesPerSec: number): string {

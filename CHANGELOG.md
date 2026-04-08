@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.9.8] - 2026-04-08
+
+### Fixed
+- **Queue Display: Tracks Vanishing During Finalizing** — the frontend `isFinalizing()` check used a 2-minute `updated_at` window to detect active deferred processing; with the serialised write queue from v1.9.7, cosmetic DB updates queue up and `updated_at` goes stale, causing tracks to drop off the active tab; removed the time window — jobs now show as "Finalizing" until the step reaches "Import complete"
+- **Deferred Timeout Too Aggressive** — `_DEFERRED_TIMEOUT` was 300s (5 min) across all three pipelines; with the serialised write queue and limited semaphore slots, large batches easily exceed this; raised to 1800s (30 min) in `pipeline_url`, `pipeline`, and `pipeline_lib`
+- **Watchdog Force-Unsticking Queued Jobs** — the finalizing watchdog (`_FINALIZING_WATCHDOG_MAX_AGE = 600s`) would force-mark jobs as complete while they were still legitimately waiting for the write queue; raised to 2400s (40 min) and the watchdog now checks `active_coordinator_count()` and write queue `pending()` — skips its cycle entirely while the system is actively processing
+- **Deferred Semaphore Too Restrictive** — `GLOBAL_DEFERRED_SLOTS` was 3, causing excessive queueing now that DB serialisation is handled by the write queue; raised to 6 since the semaphore only needs to limit I/O load (ffmpeg, network), not DB contention
+
+### Added
+- **Deferred Coordinator Tracking** — thread-safe `_active_coordinators` set in `pipeline_url/deferred.py` with `active_coordinator_count()` API; the watchdog uses this to distinguish genuinely stuck jobs from jobs waiting in a busy queue
+
+## [1.9.7] - 2026-04-08
+
+### Fixed
+- **Unified DB Write Lock** — three pipelines (`pipeline_url`, `pipeline`, `pipeline_lib`) each had their own `threading.Lock()` for DB writes; when running concurrently (e.g. batch import + rescan + scrape), they could deadlock against each other on the same SQLite file; created a single shared `_apply_lock` in `app/db_lock.py` that all pipelines and the write queue now use
+- **Pipeline URL Deferred: Undefined `_apply_lock`** — `pipeline_url/deferred.py` referenced an undefined `_apply_lock` at the Wikipedia poster fallback code path, which would have caused a `NameError`; replaced with `db_write()` wrappers
+- **Raw DB Commits Not Serialised** — `pipeline/deferred.py` and `pipeline_lib/deferred.py` had multiple raw `db.commit()` calls outside any lock; all raw commits across both files now wrapped with `with _apply_lock:` to guarantee serialization
+
+## [1.9.6] - 2026-04-08
+
+### Fixed
+- **Deferred AI Enrichment Silently Failing** — `_deferred_ai_enrichment` in `pipeline_url/deferred.py` had a `from app.models import VideoItem` re-import inside its error-handling `except` block, which Python treated as a local variable assignment, shadowing the outer-scope import and causing `UnboundLocalError: local variable 'VideoItem' referenced before assignment` on every invocation; the error was caught silently and the task logged as "completed" despite never running AI enrichment or setting the `ai_enriched` processing flag — preventing review queue auto-clear
+- **Review Auto-Clear Killed by DB Lock on XML Sidecar Write** — the deferred coordinator's `finally` block ran both the XML sidecar rewrite and the review auto-clear inside a single `try` block; when batch-scraping many items, parallel coordinator threads caused `database is locked` errors on `_final_write_xml`, which aborted the entire block including the auto-clear; the `pipeline_url` variant now routes both operations through `db_write` (the serialized write queue), and the `pipeline`/`pipeline_lib` variants use a retry loop with exponential backoff; in all three, the XML write failure is now caught independently so auto-clear always proceeds
+
 ## [1.9.5] - 2026-04-08
 
 ### Fixed
