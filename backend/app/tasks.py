@@ -1669,7 +1669,8 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                          hint_uncensored: bool = False,
                          normalize: bool = False,
                          find_source_video: bool = False,
-                         from_disk: bool = False):
+                         from_disk: bool = False,
+                         scene_analysis: bool = True):
     """Rescan metadata for a single video item.
 
     Uses a two-phase architecture (same as the URL import pipeline):
@@ -2383,6 +2384,27 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                 except Exception as _cid_e:
                     _append_job_log(job_id, f"Content ID generation warning: {_cid_e}")
 
+                # Auto-clear review flags when rescan resolves the flagged issue
+                if video_item.review_status == "needs_human_review":
+                    _rc = video_item.review_category
+                    _ps_chk = video_item.processing_state or {}
+                    _flag_ok = lambda s: _ps_chk.get(s, {}).get("completed", False)
+                    _rr = video_item.review_reason or ""
+                    _clear = False
+                    if _rc in ("ai_partial", "ai_pending"):
+                        _need_ai = "AI metadata" in _rr
+                        _need_scenes = "scene analysis" in _rr
+                        _clear = (not _need_ai or _flag_ok("ai_enriched")) and (not _need_scenes or _flag_ok("scenes_analyzed"))
+                        if not (_need_ai or _need_scenes):
+                            _clear = _flag_ok("ai_enriched")
+                    elif _rc == "scanned":
+                        _clear = _flag_ok("metadata_scraped") or _flag_ok("metadata_resolved")
+                    if _clear:
+                        video_item.review_status = "none"
+                        video_item.review_reason = None
+                        video_item.review_category = None
+                        _append_job_log(job_id, "Review flag cleared — issue resolved by rescan")
+
                 db.commit()
             except Exception:
                 db.rollback()
@@ -2406,9 +2428,10 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
             from app.pipeline_url.deferred import dispatch_deferred
 
             deferred_tasks = ["preview", "matching", "kodi_export",
-                              "entity_artwork", "orphan_cleanup",
-                              "scene_analysis"]
-            if ai_auto:
+                              "entity_artwork", "orphan_cleanup"]
+            if scene_analysis:
+                deferred_tasks.append("scene_analysis")
+            if ai_auto or ai_only:
                 deferred_tasks.append("ai_enrichment")
 
             ws = ImportWorkspace(job_id)
@@ -4155,6 +4178,27 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             }
             video_item.processing_state = _ps
             _flag_mod(video_item, "processing_state")
+
+        # Auto-clear review flags when the scrape resolves the flagged issue
+        if video_item.review_status == "needs_human_review":
+            _rc = video_item.review_category
+            _ps_final = video_item.processing_state or {}
+            _flag_done = lambda s: _ps_final.get(s, {}).get("completed", False)
+            _rr = video_item.review_reason or ""
+            _clear = False
+            if _rc in ("ai_partial", "ai_pending"):
+                _need_ai = "AI metadata" in _rr
+                _need_scenes = "scene analysis" in _rr
+                _clear = (not _need_ai or _flag_done("ai_enriched")) and (not _need_scenes or _flag_done("scenes_analyzed"))
+                if not (_need_ai or _need_scenes):
+                    _clear = _flag_done("ai_enriched")
+            elif _rc == "scanned":
+                _clear = _flag_done("metadata_scraped") or _flag_done("metadata_resolved")
+            if _clear:
+                video_item.review_status = "none"
+                video_item.review_reason = None
+                video_item.review_category = None
+                _append_job_log(job_id, "Review flag cleared — issue resolved by scrape")
 
         # Recompute Playarr content IDs (metadata may have changed)
         try:

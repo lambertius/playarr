@@ -811,6 +811,7 @@ class BatchScrapeRequest(BaseModel):
     scrape_musicbrainz: bool = True
     ai_auto: bool = False
     ai_only: bool = False
+    scene_analysis: bool = True
     normalize: bool = False
 
 
@@ -861,6 +862,7 @@ def batch_scrape_from_review(
                       scrape_wikipedia=req.scrape_wikipedia,
                       scrape_musicbrainz=req.scrape_musicbrainz,
                       ai_auto=req.ai_auto, ai_only=req.ai_only,
+                      scene_analysis=req.scene_analysis,
                       normalize=req.normalize)
 
     job.status = JobStatus.analyzing
@@ -881,7 +883,9 @@ def scan_enrichment(
     """Scan library for videos with incomplete AI enrichment and flag them for review."""
     query = db.query(VideoItem).filter(VideoItem.file_path.isnot(None))
     if not rescan_all:
-        query = query.filter(VideoItem.review_status.in_(["none", "reviewed"]))
+        # Only flag items that haven't been explicitly reviewed/approved.
+        # "reviewed" means a human already approved — don't re-flag.
+        query = query.filter(VideoItem.review_status == "none")
 
     videos = query.all()
     flagged = 0
