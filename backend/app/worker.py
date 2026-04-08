@@ -124,12 +124,11 @@ _THROTTLED_TASKS = {"app.tasks.import_video_task", "app.tasks.rescan_metadata_ta
 
 # ── Shared deferred-task concurrency limiter ──────────────────────────────
 # Limits the total number of DB-writing deferred-task threads across ALL
-# pipeline types (pipeline_url, pipeline_lib, pipeline).  Previously each
-# module had its own Semaphore(6), allowing up to 18 concurrent DB writers.
-# With a single shared semaphore at 3 slots, SQLite write contention is
-# dramatically reduced — particularly when multiple individual downloads
-# overlap in their deferred enrichment phases.
-GLOBAL_DEFERRED_SLOTS = threading.Semaphore(3)
+# pipeline types (pipeline_url, pipeline_lib, pipeline).  Now that all DB
+# writes are serialised through the shared write queue / _apply_lock, the
+# semaphore only needs to limit I/O concurrency (ffmpeg, downloads, AI).
+# Raised from 3 to 6 to reduce queue wait times in large batches.
+GLOBAL_DEFERRED_SLOTS = threading.Semaphore(6)
 
 
 def dispatch_task(task, *args, **kwargs):

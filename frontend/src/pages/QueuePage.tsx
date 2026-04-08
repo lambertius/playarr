@@ -43,9 +43,9 @@ function isFinalizing(j: JobSummary) {
   if (j.status !== "complete" || !j.current_step) return false;
   const stepLower = j.current_step.toLowerCase();
   if (stepLower.endsWith("complete") || j.current_step.startsWith("All ") || j.current_step.startsWith("Pending review")) return false;
-  if (!j.updated_at) return false;
-  const updMs = new Date(j.updated_at.endsWith("Z") ? j.updated_at : j.updated_at + "Z").getTime();
-  return (Date.now() - updMs) < 120_000;
+  // No time window — show as active until deferred tasks set step to
+  // "Import complete".  The backend watchdog handles truly stuck jobs.
+  return true;
 }
 
 /* ── Pagination controls ── */

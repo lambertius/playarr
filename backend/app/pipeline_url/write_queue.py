@@ -51,6 +51,7 @@ class _DBWriteQueue:
 
     def _run(self) -> None:
         """Writer loop — processes one item at a time, forever."""
+        from app.db_lock import _apply_lock
         while True:
             item = self._q.get()
             if item is None:  # shutdown sentinel
@@ -58,7 +59,8 @@ class _DBWriteQueue:
                 break
             fn, future = item
             try:
-                result = fn()
+                with _apply_lock:
+                    result = fn()
                 if future is not None:
                     future.set_result(result)
             except Exception as exc:

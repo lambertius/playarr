@@ -534,13 +534,22 @@ def _purge_orphan_workspaces(engine):
 
 
 # Max age (seconds) before a "Finalizing" job is considered stuck.
-# Deferred timeout is 300s; allow generous margin.
-_FINALIZING_WATCHDOG_MAX_AGE = 600  # 10 minutes
+# Deferred timeout is 1800s; allow generous margin.  The watchdog also
+# checks whether deferred coordinators or the write queue are still active
+# before force-unsticking — so a large batch won't be prematurely killed.
+_FINALIZING_WATCHDOG_MAX_AGE = 2400  # 40 minutes
 _FINALIZING_WATCHDOG_INTERVAL = 120  # check every 2 minutes
 
 
 async def _finalizing_watchdog():
-    """Periodically unstick jobs whose deferred threads died silently."""
+    """Periodically unstick jobs whose deferred threads died silently.
+
+    Checks two conditions before unsticking:
+    1. No deferred coordinators are actively running
+    2. The write queue has no pending items
+    If either is true, the system is still processing and jobs should
+    not be force-unstuck — even if they look old.
+    """
     from sqlalchemy.orm import Session as SASession
     from app.models import ProcessingJob, JobStatus
 
@@ -550,6 +559,21 @@ async def _finalizing_watchdog():
     while True:
         await asyncio.sleep(_FINALIZING_WATCHDOG_INTERVAL)
         try:
+            # If deferred coordinators or the write queue are active, the
+            # system is genuinely busy — skip this watchdog cycle.
+            try:
+                from app.pipeline_url.deferred import active_coordinator_count
+                from app.pipeline_url.write_queue import pending as wq_pending
+                n_coords = active_coordinator_count()
+                n_pending = wq_pending()
+                if n_coords > 0 or n_pending > 0:
+                    logger.debug(
+                        "Watchdog: skipping cycle — %d coordinator(s) active, "
+                        "%d write(s) pending", n_coords, n_pending)
+                    continue
+            except Exception:
+                pass  # if imports fail, fall through to normal check
+
             # Use naive UTC to match the naive datetimes stored by SQLite
             cutoff = datetime.utcnow() - timedelta(seconds=_FINALIZING_WATCHDOG_MAX_AGE)
             with SASession(engine) as db:
