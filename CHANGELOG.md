@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.9.5] - 2026-04-08
+
+### Fixed
+- **Review Queue: Items Not Clearing After Scrape** — `scrape_metadata_task` set `ai_enriched` processing flag but never cleared the review status; added auto-clear logic to the Finalise section for `ai_pending`, `ai_partial`, and `scanned` categories
+- **Review Queue: Items Not Clearing After Rescan** — `rescan_metadata_task` wrote processing flags (`metadata_scraped`, `metadata_resolved`) but had no review auto-clear in its write phase; added matching auto-clear logic before deferred task dispatch
+- **Review Queue: AI Only Mode Skipped Deferred AI Enrichment** — selecting "AI Only" in the scrape modal ran AI in the main pipeline but did not dispatch the `ai_enrichment` deferred task, preventing the deferred auto-clear from firing; now dispatches AI enrichment for both `ai_auto` and `ai_only` modes
+- **Review Queue: Scan AI Enrichment Re-Flagged Approved Items** — the `scan-enrichment` endpoint targeted items with `review_status` of both `"none"` and `"reviewed"`, causing items a user explicitly approved to be re-flagged on the next scan; now only targets `"none"` status
+- **Review Queue: Deferred Auto-Clear Too Strict** — the auto-clear in all three deferred pipeline coordinators (`pipeline_lib`, `pipeline`, `pipeline_url`) required both `ai_enriched` AND `scenes_analyzed` unconditionally; now parses `review_reason` to check only the specific flags that were missing (e.g. "Missing scene analysis" only requires `scenes_analyzed`)
+
+### Added
+- **Review Queue: Scene Analysis in Scrape Modal** — added "Run scene analysis" checkbox (default: on) to the batch scrape options modal; the `scene_analysis` parameter flows through the API to `rescan_metadata_task` which conditionally includes it in the deferred task list
+- **Review Queue: Scanned Category Auto-Clear** — items with `review_category = "scanned"` now auto-clear when `metadata_scraped` or `metadata_resolved` processing flags are set, across all three deferred coordinators and both scrape/rescan task finalisers
+
 ## [1.9.4] - 2026-04-08
 
 ### Fixed

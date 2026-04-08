@@ -13,6 +13,7 @@ export interface ScrapeOptions {
   scrape_musicbrainz: boolean;
   ai_auto: boolean;
   ai_only: boolean;
+  scene_analysis: boolean;
   normalize: boolean;
 }
 
@@ -36,6 +37,7 @@ export function ScrapeOptionsModal({ open, onClose, onScrape, itemCount, isPendi
   const [_scrapeTmvdb, setScrapeTmvdb] = useState(false);
   const [aiAuto, setAiAuto] = useState(false);
   const [aiOnly, setAiOnly] = useState(false);
+  const [sceneAnalysis, setSceneAnalysis] = useState(true);
   const [normalize, setNormalize] = useState(false);
   const { data: settings } = useSettings();
 
@@ -56,6 +58,7 @@ export function ScrapeOptionsModal({ open, onClose, onScrape, itemCount, isPendi
       scrape_musicbrainz: scrapeMusicbrainz,
       ai_auto: aiAuto,
       ai_only: aiOnly,
+      scene_analysis: sceneAnalysis,
       normalize,
     });
   };
@@ -94,7 +97,19 @@ export function ScrapeOptionsModal({ open, onClose, onScrape, itemCount, isPendi
             <ToggleRow label="AI Only" description="Skip all external scrapers — rely solely on AI for metadata." checked={aiOnly} onChange={(v) => { setAiOnly(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setScrapeTmvdb(false); setAiAuto(false); } }} />
           </div>
 
-          {/* Normalize */}
+          {/* Post-processing */}
+          <label className="flex items-center gap-3 text-sm text-text-secondary cursor-pointer">
+            <input
+              type="checkbox"
+              checked={sceneAnalysis}
+              onChange={(e) => setSceneAnalysis(e.target.checked)}
+              className="h-4 w-4 rounded border-surface-border bg-surface text-accent focus:ring-accent"
+            />
+            Run scene analysis
+            <Tooltip content="Detect scene changes and extract thumbnail candidates from each video.">
+              <span><Info size={12} className="text-text-muted" /></span>
+            </Tooltip>
+          </label>
           <label className="flex items-center gap-3 text-sm text-text-secondary cursor-pointer">
             <input
               type="checkbox"

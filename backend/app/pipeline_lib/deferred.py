@@ -143,11 +143,19 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
                         _rc = _fv.review_category
                         _ps = _fv.processing_state or {}
                         _flag_ok = lambda s: _ps.get(s, {}).get("completed", False)
+                        _rr = _fv.review_reason or ""
                         _clear = False
                         if _rc in ("ai_partial", "ai_pending"):
-                            _clear = _flag_ok("ai_enriched") and _flag_ok("scenes_analyzed")
+                            # Clear when every flag mentioned in the reason is now done
+                            _need_ai = "AI metadata" in _rr
+                            _need_scenes = "scene analysis" in _rr
+                            _clear = (not _need_ai or _flag_ok("ai_enriched")) and (not _need_scenes or _flag_ok("scenes_analyzed"))
+                            if not (_need_ai or _need_scenes):
+                                _clear = _flag_ok("ai_enriched")
                         elif _rc == "normalization":
                             _clear = _flag_ok("audio_normalized")
+                        elif _rc == "scanned":
+                            _clear = _flag_ok("metadata_scraped") or _flag_ok("metadata_resolved")
                         if _clear:
                             _fv.review_status = "none"
                             _fv.review_reason = None

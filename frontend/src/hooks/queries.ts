@@ -675,7 +675,7 @@ export function useBatchDeleteReview() {
 export function useBatchScrapeReview() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ videoIds, options }: { videoIds: number[]; options?: { scrape_wikipedia?: boolean; scrape_musicbrainz?: boolean; ai_auto?: boolean; ai_only?: boolean; normalize?: boolean } }) => reviewApi.batchScrape(videoIds, options),
+    mutationFn: ({ videoIds, options }: { videoIds: number[]; options?: { scrape_wikipedia?: boolean; scrape_musicbrainz?: boolean; ai_auto?: boolean; ai_only?: boolean; scene_analysis?: boolean; normalize?: boolean } }) => reviewApi.batchScrape(videoIds, options),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["reviewQueue"] });
       qc.invalidateQueries({ queryKey: ["jobs"] });
