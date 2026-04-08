@@ -264,15 +264,22 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
 
 def _update_child_step(job_id: int, step: str = None, progress: int = None,
                        display_name: str = None, _max_retries: int = 7):
-    """Update a child job's current_step via the write queue (fire-and-forget)."""
+    """Update a child job's current_step via the write queue (fire-and-forget).
+
+    When step is "Import complete", this is the final write and also
+    guarantees the job's status is 'complete' — even if the earlier
+    _update_job(status=complete) was lost or failed silently.
+    """
     from app.database import CosmeticSessionLocal
-    from app.models import ProcessingJob
+    from app.models import ProcessingJob, JobStatus
 
     _step = step
     _progress = progress
     _display_name = display_name
+    _is_final = (step == "Import complete")
 
     def _write():
+        from datetime import datetime, timezone
         db = CosmeticSessionLocal()
         try:
             job = db.query(ProcessingJob).get(job_id)
@@ -283,6 +290,18 @@ def _update_child_step(job_id: int, step: str = None, progress: int = None,
                     job.progress_percent = _progress
                 if _display_name is not None:
                     job.display_name = _display_name
+                # Belt-and-suspenders: guarantee terminal state when
+                # setting the final "Import complete" step.  The earlier
+                # _update_job(status=complete) may have been lost in a
+                # contended write queue.
+                if _is_final:
+                    if job.status not in (JobStatus.complete, JobStatus.failed,
+                                         JobStatus.cancelled, JobStatus.skipped):
+                        job.status = JobStatus.complete
+                    if job.completed_at is None:
+                        job.completed_at = datetime.now(timezone.utc)
+                    if job.started_at is None:
+                        job.started_at = job.created_at or datetime.now(timezone.utc)
                 db.commit()
         finally:
             db.close()
