@@ -194,8 +194,7 @@ class ImportWorkspace:
 
         Called once by the deferred-task coordinator after all tasks
         finish.  Reads the accumulated per-job file log and writes it
-        to the DB in a single transaction, eliminating the per-message
-        DB write that was the primary source of write contention.
+        to the DB via the write queue, preventing contention.
         """
         try:
             from app.config import get_settings
@@ -209,19 +208,26 @@ class ImportWorkspace:
             if not log_text:
                 return
 
-            from app.database import CosmeticSessionLocal
-            from app.models import ProcessingJob
+            from app.pipeline_url.write_queue import db_write_soon
 
-            db = CosmeticSessionLocal()
-            try:
-                job = db.query(ProcessingJob).get(self.job_id)
-                if job:
-                    job.log_text = log_text
-                    db.commit()
-            except Exception:
-                db.rollback()
-            finally:
-                db.close()
+            _jid = self.job_id
+            _lt = log_text
+
+            def _write():
+                from app.database import CosmeticSessionLocal
+                from app.models import ProcessingJob
+                db = CosmeticSessionLocal()
+                try:
+                    job = db.query(ProcessingJob).get(_jid)
+                    if job:
+                        job.log_text = _lt
+                        db.commit()
+                except Exception:
+                    db.rollback()
+                finally:
+                    db.close()
+
+            db_write_soon(_write)
         except Exception:
             pass  # logging sync must never crash the pipeline
 

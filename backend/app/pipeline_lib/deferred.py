@@ -199,40 +199,47 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _update_child_step(job_id: int, step: str, _max_retries: int = 5):
-    """Update a child job's current_step to reflect deferred progress.
+    """Update a child job's current_step via the write queue.
 
-    Retries with exponential backoff on SQLite "database is locked" errors.
+    When step is "Import complete", this is the final write and also
+    guarantees the job's status is 'complete' — even if the earlier
+    _update_job(status=complete) was lost or failed silently.
     """
-    import random as _rand
-    import time as _time
     from app.database import CosmeticSessionLocal
-    from app.models import ProcessingJob
-    for _attempt in range(_max_retries):
+    from app.models import ProcessingJob, JobStatus
+    from app.pipeline_url.write_queue import db_write, db_write_soon
+
+    _step = step
+    _is_final = (step == "Import complete")
+
+    def _write():
         db = CosmeticSessionLocal()
         try:
             job = db.query(ProcessingJob).get(job_id)
             if job:
-                job.current_step = step
-                with _apply_lock:
-                    db.commit()
-            return
-        except Exception as e:
-            db.rollback()
-            if "database is locked" in str(e) and _attempt < _max_retries - 1:
-                delay = 1 + (2 ** _attempt) + _rand.uniform(0, 1)
-                logger.warning(
-                    f"Job {job_id}: DB locked updating step='{step}', "
-                    f"retry {_attempt + 1}/{_max_retries} in {delay:.1f}s"
-                )
-                _time.sleep(delay)
-            else:
-                logger.error(
-                    f"_update_child_step failed for job {job_id} "
-                    f"(step={step}) after {_attempt + 1} attempts: {e}"
-                )
-                return
+                job.current_step = _step
+                # Belt-and-suspenders: guarantee terminal state when
+                # setting the final "Import complete" step.
+                if _is_final:
+                    if job.status not in (JobStatus.complete, JobStatus.failed,
+                                         JobStatus.cancelled, JobStatus.skipped):
+                        job.status = JobStatus.complete
+                    if job.completed_at is None:
+                        job.completed_at = datetime.now(timezone.utc)
+                    if job.started_at is None:
+                        job.started_at = job.created_at or datetime.now(timezone.utc)
+                db.commit()
         finally:
             db.close()
+
+    # "Import complete" is the final step — block to guarantee it lands
+    if _is_final:
+        try:
+            db_write(_write)
+        except Exception as e:
+            logger.error(f"_update_child_step FAILED for job {job_id} (step={step}): {e}")
+    else:
+        db_write_soon(_write)
 
 
 def _run_safe(fn, video_id: int, ws: ImportWorkspace, task_name: str):

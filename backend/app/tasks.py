@@ -2628,11 +2628,13 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
                 return
             for sid in sub_job_ids:
                 row = rc.execute(
-                    "SELECT status, display_name FROM processing_jobs WHERE id=?",
+                    "SELECT status, display_name, current_step, progress_percent"
+                    " FROM processing_jobs WHERE id=?",
                     (sid,),
                 ).fetchone()
                 if row:
-                    child_data[sid] = (row[0], row[1] or f"Job {sid}")
+                    child_data[sid] = (row[0], row[1] or f"Job {sid}",
+                                       row[2], row[3])
         except Exception as exc:
             logger.warning(f"[Batch {parent_job_id}] read failed: {exc}")
             time.sleep(poll_interval)
@@ -2681,7 +2683,16 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
         for sid in sub_job_ids:
             if sid not in child_data:
                 continue
-            st, name = child_data[sid]
+            st, name, c_step, c_pct = child_data[sid]
+            # Detect "silently completed" children: status is still queued
+            # or in-progress but the deferred coordinator has finished
+            # (current_step="Import complete").  This happens when the
+            # earlier _update_job(status=complete) was lost in the write
+            # queue.  Treat as complete so the batch doesn't hang.
+            if (st not in ("complete", "failed", "cancelled", "skipped")
+                    and c_step and c_step.lower().endswith("complete")
+                    and c_pct is not None and c_pct >= 100):
+                st = "complete"
             if st == "complete":
                 done += 1
                 if sid not in logged_complete:
