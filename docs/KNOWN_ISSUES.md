@@ -28,7 +28,7 @@ Three parallel pipeline implementations exist:
 
 **Severity:** Medium
 
-Test coverage is incomplete. The `backend/tests/` directory contains ~7 test files covering basic functionality, but many subsystems (AI, entity resolution, deferred tasks, matching) lack tests.
+Test coverage is incomplete. The `backend/tests/` directory contains ~9 test files covering basic functionality, but many subsystems (entity resolution, matching) lack tests.
 
 **Impact:** Regressions may go undetected.
 

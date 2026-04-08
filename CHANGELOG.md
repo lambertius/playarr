@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.4] - 2026-04-08
+
+### Fixed
+- **Multi-Artist Display** — tracks with multiple artists (e.g. "Zedd; Hayley Williams") now display each artist as a separate clickable link in the Metadata panel instead of a single combined link; the Edit Track IDs modal shows per-artist MusicBrainz ID fields instead of one flat field
+- **XML Sidecar Persistence on Library Rescan** — clearing the library and rescanning could lose scene analysis data and entity artwork because the XML sidecar was written before deferred tasks (scene analysis, entity artwork) completed; all three pipeline variants now rewrite the XML sidecar after deferred tasks finish, and scene analysis thumbnails are copied to the video folder for portability
+- **Review Queue: Items Not Clearing After Batch Scrape** — review queue items flagged for missing enrichment (scene analysis, AI metadata) were not auto-cleared when a batch scrape resolved the underlying issue; deferred task coordinators now check processing flags on completion and clear the review flag when the issue is resolved
+- **Review Queue: Misleading Enrichment Message** — the review reason "Partial AI Enrichment — missing: scene analysis" incorrectly implied AI was required for scene analysis; messages now use a simpler format (e.g. "Missing scene analysis", "Missing AI metadata, scene analysis")
+
 ## [1.9.3] - 2026-04-07
 
 ### Fixed

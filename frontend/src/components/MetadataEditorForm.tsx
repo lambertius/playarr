@@ -221,16 +221,30 @@ export function MetadataEditorForm({ video }: MetadataEditorFormProps) {
           <div className="contents">
             <dt className="text-text-muted">Artist</dt>
             <dd>
-              {video.artist ? (
-                <Link
-                  to={`/library?artist=${encodeURIComponent(video.artist)}`}
-                  className="text-accent hover:underline"
-                >
-                  {video.artist}
-                </Link>
-              ) : (
-                <span className="text-text-primary">—</span>
-              )}
+              {(() => {
+                const artists =
+                  video.artist_ids && video.artist_ids.length > 0
+                    ? video.artist_ids.map((a) => a.name)
+                    : video.artist
+                      ? video.artist.split(/;\s*/)
+                      : [];
+                if (artists.length === 0) return <span className="text-text-primary">—</span>;
+                return (
+                  <span className="flex flex-wrap gap-x-1">
+                    {artists.map((name, i) => (
+                      <span key={name}>
+                        <Link
+                          to={`/library?artist=${encodeURIComponent(name)}`}
+                          className="text-accent hover:underline"
+                        >
+                          {name}
+                        </Link>
+                        {i < artists.length - 1 && <span className="text-text-muted">;</span>}
+                      </span>
+                    ))}
+                  </span>
+                );
+              })()}
             </dd>
           </div>
           <div className="contents">
