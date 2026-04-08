@@ -5261,10 +5261,7 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                         _missing.append("scene analysis")
                     video_item.review_status = "needs_human_review"
                     video_item.review_category = _enrich_cat
-                    video_item.review_reason = (
-                        f"{'Partial' if _enrich_cat == 'ai_partial' else 'No'} AI enrichment"
-                        f" — missing: {', '.join(_missing)}"
-                    )
+                    video_item.review_reason = f"Missing {', '.join(_missing)}"
 
                 db.commit()
                 new_count += 1

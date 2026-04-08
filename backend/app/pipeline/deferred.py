@@ -120,6 +120,41 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
         finally:
+            # Rewrite XML sidecar after ALL deferred tasks so that
+            # scene_analysis, entity cached artwork, and processing-state
+            # flags are persisted to disk.
+            try:
+                from app.database import SessionLocal as _FinalXMLSession
+                from app.models import VideoItem as _FinalXMLVideo
+                from app.services.playarr_xml import write_playarr_xml as _final_write_xml
+                _fdb = _FinalXMLSession()
+                try:
+                    _fv = _fdb.query(_FinalXMLVideo).get(video_id)
+                    if _fv and _fv.folder_path and os.path.isdir(_fv.folder_path):
+                        _final_write_xml(_fv, _fdb)
+
+                    # Auto-clear review flags when the underlying issue
+                    # has been resolved by the deferred tasks that just ran.
+                    if _fv and _fv.review_status == "needs_human_review":
+                        _rc = _fv.review_category
+                        _ps = _fv.processing_state or {}
+                        _flag_ok = lambda s: _ps.get(s, {}).get("completed", False)
+                        _clear = False
+                        if _rc in ("ai_partial", "ai_pending"):
+                            _clear = _flag_ok("ai_enriched") and _flag_ok("scenes_analyzed")
+                        elif _rc == "normalization":
+                            _clear = _flag_ok("audio_normalized")
+                        if _clear:
+                            _fv.review_status = "none"
+                            _fv.review_reason = None
+                            _fv.review_category = None
+                            _fdb.commit()
+                            ws.log("Review flag cleared — underlying issue resolved")
+                finally:
+                    _fdb.close()
+            except Exception as _xml_exc:
+                logger.warning(f"Deferred XML sidecar rewrite failed for video {video_id}: {_xml_exc}")
+
             _update_child_step(ws.job_id, "Import complete")
             ws.sync_logs_to_db()
             ws.cleanup_on_success()

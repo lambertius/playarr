@@ -630,7 +630,6 @@ function EditTrackIDsPopup({
   const updateMutation = useUpdateVideo(videoId);
 
   const [fields, setFields] = useState({
-    mb_artist_id: "",
     mb_recording_id: "",
     mb_release_id: "",
     mb_release_group_id: "",
@@ -638,13 +637,14 @@ function EditTrackIDsPopup({
     playarr_video_id: "",
     playarr_track_id: "",
   });
+  const [artistIds, setArtistIds] = useState<{ name: string; mb_artist_id: string }[]>([]);
+  const [originalArtistIds, setOriginalArtistIds] = useState<{ name: string; mb_artist_id: string }[]>([]);
   const [provenance, setProvenance] = useState<Record<string, string>>({});
   const [original, setOriginal] = useState(fields);
 
   useEffect(() => {
     libraryApi.get(videoId).then((video) => {
       const f = {
-        mb_artist_id: video.mb_artist_id || "",
         mb_recording_id: video.mb_recording_id || "",
         mb_release_id: video.mb_release_id || "",
         mb_release_group_id: video.mb_release_group_id || "",
@@ -654,13 +654,24 @@ function EditTrackIDsPopup({
       };
       setFields(f);
       setOriginal(f);
+      // Build artist IDs from artist_ids array, falling back to single mb_artist_id + artist name
+      const aids: { name: string; mb_artist_id: string }[] =
+        video.artist_ids && video.artist_ids.length > 0
+          ? video.artist_ids.map((a) => ({ name: a.name, mb_artist_id: a.mb_artist_id || "" }))
+          : video.artist
+            ? video.artist.split(/;\s*/).map((name, i) => ({
+                name,
+                mb_artist_id: i === 0 ? (video.mb_artist_id || "") : "",
+              }))
+            : [{ name: "", mb_artist_id: video.mb_artist_id || "" }];
+      setArtistIds(aids);
+      setOriginalArtistIds(aids.map((a) => ({ ...a })));
       setProvenance(video.field_provenance || {});
       setLoading(false);
     });
   }, [videoId]);
 
   const fieldDefs: { key: keyof typeof fields; label: string; group: string; placeholder: string }[] = [
-    { key: "mb_artist_id", label: "Artist ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
     { key: "mb_recording_id", label: "Recording ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
     { key: "mb_release_id", label: "Release ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
     { key: "mb_release_group_id", label: "Release Group ID", group: "MusicBrainz", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
@@ -669,15 +680,33 @@ function EditTrackIDsPopup({
     { key: "playarr_track_id", label: "Track ID", group: "Playarr", placeholder: "PTR-xxxxxxxxxxxx" },
   ];
 
-  const hasChanges = Object.keys(fields).some(
-    (k) => fields[k as keyof typeof fields] !== original[k as keyof typeof fields],
-  );
+  const hasChanges =
+    Object.keys(fields).some(
+      (k) => fields[k as keyof typeof fields] !== original[k as keyof typeof fields],
+    ) ||
+    JSON.stringify(artistIds) !== JSON.stringify(originalArtistIds);
 
   const handleSave = () => {
-    const update: Record<string, string | null> = {};
+    const update: Record<string, any> = {};
     for (const k of Object.keys(fields) as (keyof typeof fields)[]) {
       if (fields[k] !== original[k]) {
         update[k] = fields[k].trim() || null;
+      }
+    }
+    // If artist IDs changed, update both artist_ids and mb_artist_id (primary)
+    if (JSON.stringify(artistIds) !== JSON.stringify(originalArtistIds)) {
+      update.artist_ids = artistIds
+        .filter((a) => a.name.trim())
+        .map((a) => ({ name: a.name.trim(), mb_artist_id: a.mb_artist_id.trim() || undefined }));
+      // Also sync mb_artist_id to primary artist
+      const primary = artistIds[0];
+      if (primary) {
+        update.mb_artist_id = primary.mb_artist_id.trim() || null;
+      }
+      // Sync the combined artist display name
+      const names = artistIds.filter((a) => a.name.trim()).map((a) => a.name.trim());
+      if (names.length > 0) {
+        update.artist = names.join("; ");
       }
     }
     setSaving(true);
@@ -734,6 +763,32 @@ function EditTrackIDsPopup({
                 {group}
               </h4>
               <div className="space-y-2">
+                {/* Artist IDs section (MusicBrainz group only) */}
+                {group === "MusicBrainz" && artistIds.map((aid, idx) => (
+                  <div key={idx} className="space-y-1.5">
+                    <div className="flex items-center justify-between mb-0.5">
+                      <label className="text-xs text-text-secondary">
+                        {artistIds.length > 1 ? `Artist ${idx + 1} ID` : "Artist ID"}
+                      </label>
+                      {idx === 0 && provenanceLabel("mb_artist_id")}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-text-muted whitespace-nowrap min-w-[60px]">{aid.name || `Artist ${idx + 1}`}</span>
+                      <input
+                        type="text"
+                        value={aid.mb_artist_id}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setArtistIds((prev) => prev.map((a, i) => i === idx ? { ...a, mb_artist_id: val } : a));
+                        }}
+                        placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                        className={`input-field w-full text-xs font-mono ${
+                          aid.mb_artist_id !== (originalArtistIds[idx]?.mb_artist_id || "") ? "!border-accent/60" : ""
+                        }`}
+                      />
+                    </div>
+                  </div>
+                ))}
                 {fieldDefs
                   .filter((f) => f.group === group)
                   .map((f) => (

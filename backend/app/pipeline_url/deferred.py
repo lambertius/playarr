@@ -152,6 +152,43 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
         finally:
+            # Rewrite XML sidecar after ALL deferred tasks so that
+            # scene_analysis, entity cached artwork, and processing-state
+            # flags (scenes_analyzed, thumbnail_selected) are persisted to
+            # disk.  Without this, a library clear + re-scan loses the data
+            # because the original XML was written before deferred tasks ran.
+            try:
+                from app.database import SessionLocal as _FinalXMLSession
+                from app.models import VideoItem as _FinalXMLVideo
+                from app.services.playarr_xml import write_playarr_xml as _final_write_xml
+                _fdb = _FinalXMLSession()
+                try:
+                    _fv = _fdb.query(_FinalXMLVideo).get(video_id)
+                    if _fv and _fv.folder_path and os.path.isdir(_fv.folder_path):
+                        _final_write_xml(_fv, _fdb)
+
+                    # Auto-clear review flags when the underlying issue
+                    # has been resolved by the deferred tasks that just ran.
+                    if _fv and _fv.review_status == "needs_human_review":
+                        _rc = _fv.review_category
+                        _ps = _fv.processing_state or {}
+                        _flag_ok = lambda s: _ps.get(s, {}).get("completed", False)
+                        _clear = False
+                        if _rc in ("ai_partial", "ai_pending"):
+                            _clear = _flag_ok("ai_enriched") and _flag_ok("scenes_analyzed")
+                        elif _rc == "normalization":
+                            _clear = _flag_ok("audio_normalized")
+                        if _clear:
+                            _fv.review_status = "none"
+                            _fv.review_reason = None
+                            _fv.review_category = None
+                            _fdb.commit()
+                            ws.log("Review flag cleared — underlying issue resolved")
+                finally:
+                    _fdb.close()
+            except Exception as _xml_exc:
+                logger.warning(f"Deferred XML sidecar rewrite failed for video {video_id}: {_xml_exc}")
+
             try:
                 if _update_progress:
                     _update_child_step(ws.job_id, "Import complete", progress=100)
@@ -284,6 +321,27 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
             _mark_processing_state(db, video_id, "scenes_analyzed", method="scene_analysis")
             _mark_processing_state(db, video_id, "thumbnail_selected", method="scene_analysis")
             db.commit()
+
+            # Persist scene thumbnails to the video folder so they survive
+            # a library clear + re-scan cycle (fallback discovery).
+            try:
+                import os as _os
+                from app.models import VideoItem
+                from app.ai.models import AIThumbnail
+                import shutil as _shutil
+
+                video = db.query(VideoItem).get(video_id)
+                if video and video.folder_path and _os.path.isdir(video.folder_path):
+                    thumbs = db.query(AIThumbnail).filter(
+                        AIThumbnail.video_id == video_id,
+                    ).all()
+                    for t in thumbs:
+                        if t.file_path and _os.path.isfile(t.file_path):
+                            dest = _os.path.join(video.folder_path, _os.path.basename(t.file_path))
+                            if not _os.path.isfile(dest):
+                                _shutil.copy2(t.file_path, dest)
+            except Exception as exc:
+                ws.log(f"Scene analysis persist-to-disk: {exc}", level="warning")
         finally:
             db.close()
 

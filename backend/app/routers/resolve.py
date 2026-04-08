@@ -893,7 +893,6 @@ def scan_enrichment(
         if ai_done and scenes_done:
             continue  # fully enriched — skip
         category = "ai_partial" if (ai_done or scenes_done) else "ai_pending"
-        label = "Partial AI enrichment" if category == "ai_partial" else "No AI enrichment"
         missing = []
         if not ai_done:
             missing.append("AI metadata")
@@ -901,7 +900,7 @@ def scan_enrichment(
             missing.append("scene analysis")
         v.review_status = "needs_human_review"
         v.review_category = category
-        v.review_reason = f"{label} — missing: {', '.join(missing)}"
+        v.review_reason = f"Missing {', '.join(missing)}"
         flagged += 1
 
     db.commit()

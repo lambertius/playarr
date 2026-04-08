@@ -468,6 +468,11 @@
 | POST | `/{video_id}/set-version` | Change version type (cover/live/etc.) |
 | POST | `/batch/approve` | Batch approve |
 | POST | `/batch/dismiss` | Batch dismiss |
+| POST | `/batch/apply-rename` | Batch apply naming convention renames |
+| POST | `/batch/delete` | Batch delete videos from review queue |
+| POST | `/batch/scrape` | Batch scrape metadata for review items |
+| POST | `/scan-enrichment` | Scan library for incomplete enrichment |
+| POST | `/scan-renames` | Scan library for naming convention mismatches |
 
 ### 5.10 Search (`/api/search`)
 
@@ -647,8 +652,12 @@ Videos are flagged for review when:
 - Duplicate detected
 - Import metadata quality is low
 - AI mismatch score exceeds threshold
+- Enrichment incomplete (missing scene analysis or AI metadata)
+- Audio normalization failed
 
 Review actions: approve, dismiss, change version type.
+
+**Auto-clearing:** When deferred tasks (scene analysis, AI enrichment, normalization) complete successfully and resolve the flagged issue, the review flag is automatically cleared. Only enrichment and normalization categories are auto-cleared; categories requiring human judgement (duplicates, renames, version detection) are never auto-cleared.
 
 ---
 
