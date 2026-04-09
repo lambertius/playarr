@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.9.11] - 2026-04-09
+
+### Added
+- **Genre Consolidation: Autofill Search** — typing in a genre consolidation tile input now shows autocomplete suggestions matching existing genres, with video counts and already-consolidated indicators; powered by new `/genre-search` endpoint with debounced (200ms) queries
+- **Genre Consolidation: Add/Remove Genres from Tiles** — each active consolidation tile has a `+` button to add genres via autofill search and per-alias "Remove" buttons to unconsolidate individual genres
+- **Genre Consolidation: Create New Tiles** — "New Tile" button with inline name input to create empty consolidation tiles from the Genre Consolidation tab
+- **Genre Consolidation: Tile Blacklist/Whitelist** — eye toggle on each tile to blacklist or whitelist the entire tile (master + all aliases) in one operation; blacklisted tiles remain visible with reduced opacity, red background, and "Blacklisted" badge
+- **Genre Manager: Consolidated Genre Display** — alias genres are hidden from the Genre Manager; master genres with aliases show a Layers icon with alias count badge
+
+### Fixed
+- **Genre Autofill: Manual Edit Input** — the manual edit input for suggested consolidations was a plain text field with no autocomplete; replaced with the autofill component in controlled mode
+- **Genre Autofill: Dropdown Readability** — autofill dropdown had a semi-transparent background causing text overlap with content behind it; changed to solid opaque background
+
 ## [1.9.8] - 2026-04-08
 
 ### Fixed

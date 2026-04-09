@@ -206,6 +206,9 @@ def _apply_schema_upgrades(eng):
         if "blacklisted" not in genre_cols:
             with eng.begin() as conn:
                 conn.execute(text("ALTER TABLE genres ADD COLUMN blacklisted BOOLEAN DEFAULT 0"))
+        if "master_genre_id" not in genre_cols:
+            with eng.begin() as conn:
+                conn.execute(text("ALTER TABLE genres ADD COLUMN master_genre_id INTEGER REFERENCES genres(id)"))
 
     # Field-level provenance columns — track which provider sourced each metadata field
     _provenance_tables = {

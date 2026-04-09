@@ -1018,6 +1018,8 @@ class GenreBlacklistItem(BaseModel):
     name: str
     blacklisted: bool
     video_count: int
+    master_genre_id: Optional[int] = None
+    alias_count: int = 0
 
 
 class GenreBlacklistUpdate(BaseModel):
@@ -1037,14 +1039,27 @@ def list_genre_blacklist(db: Session = Depends(get_db)):
             Genre.name,
             Genre.blacklisted,
             func.count(video_genres.c.video_id),
+            Genre.master_genre_id,
         )
         .outerjoin(video_genres, Genre.id == video_genres.c.genre_id)
-        .group_by(Genre.id, Genre.name, Genre.blacklisted)
+        .group_by(Genre.id, Genre.name, Genre.blacklisted, Genre.master_genre_id)
         .order_by(Genre.name)
         .all()
     )
+
+    # Count aliases per master genre
+    alias_counts: dict[int, int] = {}
+    for r in results:
+        mid = r[4]
+        if mid is not None:
+            alias_counts[mid] = alias_counts.get(mid, 0) + 1
+
     return [
-        GenreBlacklistItem(id=r[0], name=r[1], blacklisted=bool(r[2]), video_count=r[3])
+        GenreBlacklistItem(
+            id=r[0], name=r[1], blacklisted=bool(r[2]), video_count=r[3],
+            master_genre_id=r[4],
+            alias_count=alias_counts.get(r[0], 0),
+        )
         for r in results
     ]
 
@@ -1082,4 +1097,4 @@ def create_genre(body: GenreCreateRequest, db: Session = Depends(get_db)):
     db.add(genre)
     db.commit()
     db.refresh(genre)
-    return GenreBlacklistItem(id=genre.id, name=genre.name, blacklisted=False, video_count=0)
+    return GenreBlacklistItem(id=genre.id, name=genre.name, blacklisted=False, video_count=0, master_genre_id=None, alias_count=0)

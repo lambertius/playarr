@@ -487,6 +487,13 @@ class Genre(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False, index=True)
     blacklisted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    master_genre_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("genres.id", ondelete="SET NULL"), nullable=True
+    )
+
+    master_genre: Mapped[Optional["Genre"]] = relationship(
+        "Genre", remote_side="Genre.id", foreign_keys=[master_genre_id],
+    )
 
     video_items: Mapped[List["VideoItem"]] = relationship(
         secondary=video_genres, back_populates="genres"
