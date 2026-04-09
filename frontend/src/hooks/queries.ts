@@ -1337,3 +1337,100 @@ export function useConsolidateArtist() {
     },
   });
 }
+
+export function useGenreConsolidations() {
+  return useQuery({ queryKey: ["genreConsolidations"], queryFn: metadataManagerApi.genreConsolidations });
+}
+
+export function useGenreSuggestions() {
+  return useQuery({ queryKey: ["genreSuggestions"], queryFn: metadataManagerApi.genreSuggestions });
+}
+
+export function useConsolidateGenres() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { alias_genre_ids: number[]; master_genre_id: number }) =>
+      metadataManagerApi.consolidateGenres(data.alias_genre_ids, data.master_genre_id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["genreConsolidations"] });
+      qc.invalidateQueries({ queryKey: ["genreSuggestions"] });
+      qc.invalidateQueries({ queryKey: qk.genreBlacklist });
+      qc.invalidateQueries({ queryKey: ["genres"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}
+
+export function useConsolidateGenresManual() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { alias_genre_ids: number[]; master_genre_name: string }) =>
+      metadataManagerApi.consolidateGenresManual(data.alias_genre_ids, data.master_genre_name),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["genreConsolidations"] });
+      qc.invalidateQueries({ queryKey: ["genreSuggestions"] });
+      qc.invalidateQueries({ queryKey: qk.genreBlacklist });
+      qc.invalidateQueries({ queryKey: ["genres"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}
+
+export function useUnconsolidateGenre() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { genre_id: number }) =>
+      metadataManagerApi.unconsolidateGenre(data.genre_id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["genreConsolidations"] });
+      qc.invalidateQueries({ queryKey: ["genreSuggestions"] });
+      qc.invalidateQueries({ queryKey: qk.genreBlacklist });
+      qc.invalidateQueries({ queryKey: ["genres"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}
+
+export function useAddGenreToTile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { genre_id: number; master_genre_id: number }) =>
+      metadataManagerApi.addGenreToTile(data.genre_id, data.master_genre_id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["genreConsolidations"] });
+      qc.invalidateQueries({ queryKey: ["genreSuggestions"] });
+      qc.invalidateQueries({ queryKey: qk.genreBlacklist });
+      qc.invalidateQueries({ queryKey: ["genres"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}
+
+export function useBlacklistTile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { master_genre_id: number; blacklisted: boolean }) =>
+      metadataManagerApi.blacklistTile(data.master_genre_id, data.blacklisted),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["genreConsolidations"] });
+      qc.invalidateQueries({ queryKey: qk.genreBlacklist });
+      qc.invalidateQueries({ queryKey: ["genres"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}
+
+export function useCreateTile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { alias_genre_ids: number[]; master_genre_name: string }) =>
+      metadataManagerApi.createTile(data.alias_genre_ids, data.master_genre_name),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["genreConsolidations"] });
+      qc.invalidateQueries({ queryKey: ["genreSuggestions"] });
+      qc.invalidateQueries({ queryKey: qk.genreBlacklist });
+      qc.invalidateQueries({ queryKey: ["genres"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}

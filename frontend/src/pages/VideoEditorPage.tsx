@@ -4,7 +4,7 @@ import {
   Scissors, ScanLine, Play, Pause, Trash2, Square, CheckSquare,
   Loader2, Settings2, MonitorPlay, Film, X, Eye, EyeOff, Ban, ExternalLink,
   Volume2, VolumeX, ZoomIn, ZoomOut, Timer, SkipBack, SkipForward, Link2,
-  ChevronUp, ChevronDown,
+  ChevronUp, ChevronDown, ArrowUpDown,
 } from "lucide-react";
 import { useEditorQueue, useDetectLetterbox, useScanLetterbox, useEditorScanResults, useEditorEncodeStatus, useVideoEditorEncode, useVideoEditorBatchEncode, useSetExcludeFromScan } from "@/hooks/queries";
 import { playbackApi } from "@/lib/api";
@@ -152,6 +152,14 @@ export function VideoEditorPage() {
   const [isScanning, setIsScanning] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
+
+  // Queue display: sorting and pagination
+  type SortField = "artist" | "album" | "title" | "created_at" | "editor_order";
+  type SortDir = "asc" | "desc";
+  const [sortBy, setSortBy] = useState<SortField>("editor_order");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [pageSize, setPageSize] = useState<number>(10);
+  const [currentPage, setCurrentPage] = useState(1);
 
   // Encode job tracking: list of { videoId, jobId } — persisted so it survives page navigation
   const [encodeJobs, setEncodeJobs] = useState<{ videoId: number; jobId: number }[]>(loadEncodeJobs);
@@ -506,7 +514,7 @@ export function VideoEditorPage() {
   const handleScanLibrary = useCallback(async (includeExcluded: boolean = false) => {
     setIsScanning(true);
     try {
-      const result = await scanLetterbox.mutateAsync({ limit: 200, includeExcluded });
+      const result = await scanLetterbox.mutateAsync({ limit: 2000, includeExcluded });
       if (result.status === "scanning" && result.job_id) {
         setScanJobId(result.job_id);
         toast({ type: "info", title: "Letterbox scan started..." });
@@ -589,6 +597,41 @@ export function VideoEditorPage() {
 
   // Set of video IDs currently encoding
   const encodingVideoIds = useMemo(() => new Set(encodeJobs.map(j => j.videoId)), [encodeJobs]);
+
+  // Sorted + paginated queue items
+  const sortedQueueItems = useMemo(() => {
+    if (!queueItems) return [];
+    const items = [...queueItems];
+    if (sortBy === "editor_order") return items; // preserve insertion order
+    items.sort((a, b) => {
+      let cmp = 0;
+      switch (sortBy) {
+        case "artist":
+          cmp = (a.artist ?? "").localeCompare(b.artist ?? "", undefined, { sensitivity: "base" });
+          break;
+        case "album":
+          cmp = (a.album ?? "").localeCompare(b.album ?? "", undefined, { sensitivity: "base" });
+          break;
+        case "title":
+          cmp = (a.title ?? "").localeCompare(b.title ?? "", undefined, { sensitivity: "base" });
+          break;
+        case "created_at":
+          cmp = (a.created_at ?? "").localeCompare(b.created_at ?? "");
+          break;
+      }
+      return sortDir === "desc" ? -cmp : cmp;
+    });
+    return items;
+  }, [queueItems, sortBy, sortDir]);
+
+  const totalPages = pageSize === 0 ? 1 : Math.max(1, Math.ceil(sortedQueueItems.length / pageSize));
+  const clampedPage = Math.min(currentPage, totalPages);
+  const paginatedItems = pageSize === 0
+    ? sortedQueueItems
+    : sortedQueueItems.slice((clampedPage - 1) * pageSize, clampedPage * pageSize);
+
+  // Reset to page 1 when sort or pageSize changes
+  useEffect(() => { setCurrentPage(1); }, [sortBy, sortDir, pageSize]);
 
   // ── Detect letterbox on single item ─────────────────────
   const handleDetectSingle = useCallback(async (videoId: number) => {
@@ -897,6 +940,44 @@ export function VideoEditorPage() {
           </div>
         )}
 
+        {/* Sort & Page Size Controls */}
+        {queueIds.length > 0 && (
+          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-surface-border bg-surface/50 text-[11px]">
+            <ArrowUpDown size={12} className="text-text-muted flex-shrink-0" />
+            <select
+              value={sortBy}
+              onChange={e => setSortBy(e.target.value as SortField)}
+              className="input-sm text-[11px] py-0.5 px-1 bg-surface"
+            >
+              <option value="editor_order">Queue Order</option>
+              <option value="artist">Artist</option>
+              <option value="album">Album</option>
+              <option value="title">Title</option>
+              <option value="created_at">Date Added (Library)</option>
+            </select>
+            <button
+              className="btn-ghost btn-xs text-text-muted hover:text-text-primary px-1"
+              onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")}
+              title={sortDir === "asc" ? "Ascending" : "Descending"}
+            >
+              {sortDir === "asc" ? "A→Z" : "Z→A"}
+            </button>
+            <div className="flex-1" />
+            <span className="text-text-muted">Show</span>
+            <select
+              value={pageSize}
+              onChange={e => setPageSize(Number(e.target.value))}
+              className="input-sm text-[11px] py-0.5 px-1 bg-surface w-16"
+            >
+              <option value={10}>10</option>
+              <option value={20}>20</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={0}>All</option>
+            </select>
+          </div>
+        )}
+
         {/* Queue List */}
         <div className="flex-1 overflow-y-auto">
           {queueLoading && queueIds.length > 0 && (
@@ -959,7 +1040,7 @@ export function VideoEditorPage() {
             </div>
           )}
 
-          {queueItems?.map(item => (
+          {paginatedItems.map(item => (
             <QueueRow
               key={item.video_id}
               item={item}
@@ -977,6 +1058,30 @@ export function VideoEditorPage() {
               excludePending={excludeFromScan.isPending}
             />
           ))}
+
+          {/* Pagination controls */}
+          {pageSize > 0 && sortedQueueItems.length > pageSize && (
+            <div className="flex items-center justify-center gap-2 py-2 border-t border-surface-border text-xs text-text-muted">
+              <button
+                className="btn-ghost btn-xs"
+                disabled={clampedPage <= 1}
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+              >
+                ‹ Prev
+              </button>
+              <span className="tabular-nums">
+                {clampedPage} / {totalPages}
+              </span>
+              <button
+                className="btn-ghost btn-xs"
+                disabled={clampedPage >= totalPages}
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+              >
+                Next ›
+              </button>
+              <span className="text-text-muted ml-1">({sortedQueueItems.length} total)</span>
+            </div>
+          )}
         </div>
       </div>
 

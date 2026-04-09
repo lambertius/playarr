@@ -598,13 +598,17 @@ def consolidate_artist(body: ArtistConsolidateRequest, db: Session = Depends(get
     For multi-artist entries (containing ";"), only the primary artist portion
     is replaced so featured collaborations are preserved.
     Also updates the ArtistEntity canonical_name if it exists.
+    Persists changes to XML sidecars for library clear/rescan durability.
     """
+    from app.services.playarr_xml import write_playarr_xml
+
     videos = (
         db.query(VideoItem)
         .filter(VideoItem.mb_artist_id == body.mb_artist_id)
         .all()
     )
     updated = 0
+    updated_videos = []
     for video in videos:
         parts = [p.strip() for p in video.artist.split(";")] if video.artist else []
         if len(parts) > 1:
@@ -616,6 +620,7 @@ def consolidate_artist(body: ArtistConsolidateRequest, db: Session = Depends(get
         if video.artist != new_name:
             video.artist = new_name
             updated += 1
+            updated_videos.append(video)
 
     # Update the ArtistEntity canonical_name as well
     artist_ent = (
@@ -627,6 +632,14 @@ def consolidate_artist(body: ArtistConsolidateRequest, db: Session = Depends(get
         artist_ent.canonical_name = body.canonical_name
 
     db.commit()
+
+    # Persist to XML sidecars so the choice survives library clear + rescan
+    for video in updated_videos:
+        try:
+            write_playarr_xml(video, db)
+        except Exception as e:
+            logger.warning(f"XML sidecar write failed for video {video.id}: {e}")
+
     return {"updated": updated, "mb_artist_id": body.mb_artist_id, "canonical_name": body.canonical_name}
 
 
@@ -695,3 +708,397 @@ def get_mbid_stats(db: Session = Depends(get_db)):
         with_playarr_video_id=with_pvid,
         with_playarr_track_id=with_ptid,
     )
+
+
+# ---------------------------------------------------------------------------
+# Genre Consolidation — map variant genres to a master genre
+# ---------------------------------------------------------------------------
+
+class GenreConflict(BaseModel):
+    master_genre: str
+    master_genre_id: int
+    aliases: list  # list of {id, name, video_count}
+    total_videos: int
+    blacklisted: bool = False
+
+
+class GenreConsolidateRequest(BaseModel):
+    alias_genre_ids: List[int]
+    master_genre_id: int
+
+
+class GenreUnconsolidateRequest(BaseModel):
+    genre_id: int
+
+
+class GenreConsolidateManualRequest(BaseModel):
+    alias_genre_ids: List[int]
+    master_genre_name: str
+
+
+class GenreAddToTileRequest(BaseModel):
+    genre_id: int
+    master_genre_id: int
+
+
+class GenreBlacklistTileRequest(BaseModel):
+    master_genre_id: int
+    blacklisted: bool
+
+
+class GenreSuggestion(BaseModel):
+    master_name: str
+    master_id: int
+    aliases: list  # list of {id, name, video_count}
+
+
+@router.get("/genre-consolidations", response_model=List[GenreConflict])
+def list_genre_consolidations(db: Session = Depends(get_db)):
+    """List all active genre consolidations (genres mapped to a master)."""
+    from app.models import Genre, video_genres
+    from sqlalchemy import func
+
+    # Find all genres that have a master_genre_id set
+    aliases = (
+        db.query(Genre)
+        .filter(Genre.master_genre_id.isnot(None))
+        .all()
+    )
+    if not aliases:
+        return []
+
+    # Group by master_genre_id
+    from collections import defaultdict
+    groups: dict[int, list] = defaultdict(list)
+    for alias in aliases:
+        groups[alias.master_genre_id].append(alias)
+
+    results = []
+    for master_id, alias_list in groups.items():
+        master = db.query(Genre).get(master_id)
+        if not master:
+            continue
+        alias_out = []
+        total = 0
+        for a in alias_list:
+            cnt = (
+                db.query(func.count(video_genres.c.video_id))
+                .filter(video_genres.c.genre_id == a.id)
+                .scalar() or 0
+            )
+            alias_out.append({"id": a.id, "name": a.name, "video_count": cnt})
+            total += cnt
+        # Include master's own count
+        master_cnt = (
+            db.query(func.count(video_genres.c.video_id))
+            .filter(video_genres.c.genre_id == master.id)
+            .scalar() or 0
+        )
+        total += master_cnt
+        # A tile is blacklisted if the master genre is blacklisted
+        results.append(GenreConflict(
+            master_genre=master.name,
+            master_genre_id=master.id,
+            aliases=alias_out,
+            total_videos=total,
+            blacklisted=bool(master.blacklisted),
+        ))
+
+    results.sort(key=lambda c: c.total_videos, reverse=True)
+    return results
+
+
+@router.post("/genre-consolidate")
+def consolidate_genres(body: GenreConsolidateRequest, db: Session = Depends(get_db)):
+    """
+    Map one or more genre variants to a master genre.
+    The alias genres remain in the DB but their master_genre_id points
+    to the canonical genre. Display logic uses the master name instead.
+    """
+    from app.models import Genre
+
+    master = db.query(Genre).get(body.master_genre_id)
+    if not master:
+        raise HTTPException(404, "Master genre not found")
+
+    # Don't allow a genre to be its own master
+    alias_ids = [gid for gid in body.alias_genre_ids if gid != master.id]
+    updated = 0
+    for gid in alias_ids:
+        genre = db.query(Genre).get(gid)
+        if genre:
+            genre.master_genre_id = master.id
+            updated += 1
+
+    db.commit()
+    return {"updated": updated, "master_genre_id": master.id, "master_name": master.name}
+
+
+@router.post("/genre-consolidate-manual")
+def consolidate_genres_manual(body: GenreConsolidateManualRequest, db: Session = Depends(get_db)):
+    """
+    Map genre variants to a master genre by name. Creates the master
+    genre if it doesn't exist yet.
+    """
+    from app.models import Genre
+
+    name = body.master_genre_name.strip()
+    if not name:
+        raise HTTPException(400, "Master genre name cannot be empty")
+
+    # Get or create the master genre
+    master = db.query(Genre).filter(Genre.name == name).first()
+    if not master:
+        master = Genre(name=name, blacklisted=False)
+        db.add(master)
+        db.flush()
+
+    alias_ids = [gid for gid in body.alias_genre_ids if gid != master.id]
+    updated = 0
+    for gid in alias_ids:
+        genre = db.query(Genre).get(gid)
+        if genre:
+            genre.master_genre_id = master.id
+            updated += 1
+
+    db.commit()
+    return {"updated": updated, "master_genre_id": master.id, "master_name": master.name}
+
+
+@router.post("/genre-unconsolidate")
+def unconsolidate_genre(body: GenreUnconsolidateRequest, db: Session = Depends(get_db)):
+    """Remove a genre from its master mapping, restoring it as independent."""
+    from app.models import Genre
+
+    genre = db.query(Genre).get(body.genre_id)
+    if not genre:
+        raise HTTPException(404, "Genre not found")
+    genre.master_genre_id = None
+    db.commit()
+    return {"genre_id": genre.id, "name": genre.name}
+
+
+@router.get("/genre-suggestions", response_model=List[GenreSuggestion])
+def suggest_genre_consolidations(db: Session = Depends(get_db)):
+    """
+    Auto-detect genre variants that should be consolidated.
+    Uses regex normalization and fuzzy matching to group similar genres.
+    """
+    import re
+    from app.models import Genre, video_genres
+    from sqlalchemy import func
+
+    genres = (
+        db.query(
+            Genre.id, Genre.name,
+            func.count(video_genres.c.video_id).label("cnt"),
+        )
+        .outerjoin(video_genres, Genre.id == video_genres.c.genre_id)
+        .filter(Genre.master_genre_id.is_(None))
+        .group_by(Genre.id, Genre.name)
+        .all()
+    )
+
+    if not genres:
+        return []
+
+    def _normalize(name: str) -> str:
+        """Normalize a genre name for comparison."""
+        s = name.lower().strip()
+        # Remove punctuation: dots, dashes, underscores, apostrophes
+        s = re.sub(r"[.\-_'\"]+", " ", s)
+        # Collapse whitespace
+        s = re.sub(r"\s+", " ", s).strip()
+        # Common abbreviation expansions
+        s = re.sub(r"\balt\b\.?", "alternative", s)
+        s = re.sub(r"\belec\b\.?", "electronic", s)
+        s = re.sub(r"\bexp\b\.?", "experimental", s)
+        s = re.sub(r"\bprog\b\.?", "progressive", s)
+        s = re.sub(r"\br&b\b", "rnb", s)
+        s = re.sub(r"\br ?n ?b\b", "rnb", s)
+        s = re.sub(r"\bhip ?hop\b", "hiphop", s)
+        s = re.sub(r"\blo ?fi\b", "lofi", s)
+        s = re.sub(r"\bsynth ?pop\b", "synthpop", s)
+        s = re.sub(r"\bsynth ?wave\b", "synthwave", s)
+        s = re.sub(r"\bpost ?punk\b", "postpunk", s)
+        s = re.sub(r"\bpost ?rock\b", "postrock", s)
+        s = re.sub(r"\bpost ?grunge\b", "postgrunge", s)
+        s = re.sub(r"\bthrash ?metal\b", "thrashmetal", s)
+        s = re.sub(r"\bdeath ?metal\b", "deathmetal", s)
+        s = re.sub(r"\bblack ?metal\b", "blackmetal", s)
+        s = re.sub(r"\bheavy ?metal\b", "heavymetal", s)
+        s = re.sub(r"\bnu ?metal\b", "numetal", s)
+        s = re.sub(r"\bindie ?rock\b", "indierock", s)
+        s = re.sub(r"\bindie ?pop\b", "indiepop", s)
+        s = re.sub(r"\bgart? ?rock\b", "garagerock", s)
+        s = re.sub(r"\bdream ?pop\b", "dreampop", s)
+        s = re.sub(r"\bshoe ?gaze\b", "shoegaze", s)
+        # Remove trailing/leading "music"
+        s = re.sub(r"\bmusic\b", "", s).strip()
+        # Remove spaces for final comparison
+        s = s.replace(" ", "")
+        return s
+
+    # Group by normalized key
+    from collections import defaultdict
+    norm_groups: dict[str, list] = defaultdict(list)
+    for gid, gname, cnt in genres:
+        key = _normalize(gname)
+        norm_groups[key].append({"id": gid, "name": gname, "video_count": cnt})
+
+    suggestions = []
+    for key, entries in norm_groups.items():
+        if len(entries) <= 1:
+            continue
+        # Pick the entry with the most videos as the suggested master
+        entries.sort(key=lambda e: e["video_count"], reverse=True)
+        master = entries[0]
+        aliases = entries[1:]
+        suggestions.append(GenreSuggestion(
+            master_name=master["name"],
+            master_id=master["id"],
+            aliases=aliases,
+        ))
+
+    suggestions.sort(key=lambda s: sum(a["video_count"] for a in s.aliases), reverse=True)
+    return suggestions
+
+
+@router.get("/genre-map")
+def get_genre_map(db: Session = Depends(get_db)):
+    """Return a mapping of alias genre names → master genre names.
+    Used by the frontend to display consolidated genre names."""
+    from app.models import Genre
+
+    aliases = (
+        db.query(Genre)
+        .filter(Genre.master_genre_id.isnot(None))
+        .all()
+    )
+    mapping = {}
+    for alias in aliases:
+        master = db.query(Genre).get(alias.master_genre_id)
+        if master:
+            mapping[alias.name] = master.name
+    return mapping
+
+
+@router.get("/genre-search")
+def search_genres(q: str = "", exclude_tile: Optional[int] = None, db: Session = Depends(get_db)):
+    """Search genres by name substring for autofill. Returns up to 15 matches.
+    Excludes genres already in the specified consolidation tile."""
+    from app.models import Genre, video_genres
+    from sqlalchemy import func
+
+    if not q or len(q) < 1:
+        return []
+
+    query = (
+        db.query(
+            Genre.id, Genre.name, Genre.master_genre_id,
+            func.count(video_genres.c.video_id).label("cnt"),
+        )
+        .outerjoin(video_genres, Genre.id == video_genres.c.genre_id)
+        .filter(Genre.name.ilike(f"%{q}%"))
+        .group_by(Genre.id, Genre.name, Genre.master_genre_id)
+        .order_by(Genre.name)
+        .limit(15)
+        .all()
+    )
+
+    results = []
+    for gid, gname, master_gid, cnt in query:
+        # Skip genres already assigned to the tile being edited
+        if exclude_tile is not None and master_gid == exclude_tile:
+            continue
+        # Skip genres that ARE masters of other tiles (they are tile headers, not addable)
+        if exclude_tile is not None and gid == exclude_tile:
+            continue
+        results.append({
+            "id": gid,
+            "name": gname,
+            "video_count": cnt,
+            "already_consolidated": master_gid is not None,
+        })
+    return results
+
+
+@router.post("/genre-add-to-tile")
+def add_genre_to_tile(body: GenreAddToTileRequest, db: Session = Depends(get_db)):
+    """Add a genre as an alias to an existing consolidation tile."""
+    from app.models import Genre
+
+    master = db.query(Genre).get(body.master_genre_id)
+    if not master:
+        raise HTTPException(404, "Master genre not found")
+
+    genre = db.query(Genre).get(body.genre_id)
+    if not genre:
+        raise HTTPException(404, "Genre not found")
+
+    if genre.id == master.id:
+        raise HTTPException(400, "Cannot add master genre as its own alias")
+
+    # If genre is currently a master of other genres, re-point those to the new master
+    sub_aliases = db.query(Genre).filter(Genre.master_genre_id == genre.id).all()
+    for sa in sub_aliases:
+        sa.master_genre_id = master.id
+
+    genre.master_genre_id = master.id
+    db.commit()
+    return {"genre_id": genre.id, "name": genre.name, "master_genre_id": master.id, "master_name": master.name}
+
+
+@router.post("/genre-blacklist-tile")
+def blacklist_genre_tile(body: GenreBlacklistTileRequest, db: Session = Depends(get_db)):
+    """Blacklist or whitelist an entire consolidation tile (master + all aliases)."""
+    from app.models import Genre
+
+    master = db.query(Genre).get(body.master_genre_id)
+    if not master:
+        raise HTTPException(404, "Master genre not found")
+
+    # Update master
+    master.blacklisted = body.blacklisted
+    updated = 1
+
+    # Update all aliases
+    aliases = db.query(Genre).filter(Genre.master_genre_id == master.id).all()
+    for alias in aliases:
+        alias.blacklisted = body.blacklisted
+        updated += 1
+
+    db.commit()
+    return {"updated": updated, "master_genre_id": master.id, "blacklisted": body.blacklisted}
+
+
+@router.post("/genre-create-tile")
+def create_genre_tile(body: GenreConsolidateManualRequest, db: Session = Depends(get_db)):
+    """Create a new consolidation tile with a master name and optional aliases."""
+    from app.models import Genre
+
+    name = body.master_genre_name.strip()
+    if not name:
+        raise HTTPException(400, "Master genre name cannot be empty")
+
+    # Get or create the master genre
+    master = db.query(Genre).filter(Genre.name == name).first()
+    if not master:
+        master = Genre(name=name, blacklisted=False)
+        db.add(master)
+        db.flush()
+
+    # Ensure master is not itself an alias
+    if master.master_genre_id is not None:
+        master.master_genre_id = None
+
+    alias_ids = [gid for gid in body.alias_genre_ids if gid != master.id]
+    updated = 0
+    for gid in alias_ids:
+        genre = db.query(Genre).get(gid)
+        if genre:
+            genre.master_genre_id = master.id
+            updated += 1
+
+    db.commit()
+    return {"updated": updated, "master_genre_id": master.id, "master_name": master.name}

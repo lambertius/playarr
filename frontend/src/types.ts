@@ -431,6 +431,26 @@ export interface GenreBlacklistItem {
   name: string;
   blacklisted: boolean;
   video_count: number;
+  master_genre_id: number | null;
+  alias_count: number;
+}
+export interface GenreConflict {
+  master_genre: string;
+  master_genre_id: number;
+  aliases: { id: number; name: string; video_count: number }[];
+  total_videos: number;
+  blacklisted: boolean;
+}
+export interface GenreSearchResult {
+  id: number;
+  name: string;
+  video_count: number;
+  already_consolidated: boolean;
+}
+export interface GenreSuggestion {
+  master_name: string;
+  master_id: number;
+  aliases: { id: number; name: string; video_count: number }[];
 }
 export interface AlbumBucket {
   album: string | null;
@@ -1321,6 +1341,7 @@ export interface EditorQueueItem {
   video_id: number;
   artist: string;
   title: string;
+  album?: string | null;
   file_path?: string | null;
   resolution_label?: string | null;
   width?: number | null;
@@ -1343,6 +1364,7 @@ export interface EditorQueueItem {
   bar_right: number;
   has_archive: boolean;
   exclude_from_scan: boolean;
+  created_at?: string | null;
 }
 
 export interface CropPreviewRequest {

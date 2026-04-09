@@ -233,6 +233,7 @@ class EditorQueueItem(BaseModel):
     video_id: int
     artist: str
     title: str
+    album: Optional[str] = None
     file_path: Optional[str] = None
     resolution_label: Optional[str] = None
     width: Optional[int] = None
@@ -256,6 +257,7 @@ class EditorQueueItem(BaseModel):
     bar_right: int = 0
     has_archive: bool = False
     exclude_from_scan: bool = False
+    created_at: Optional[str] = None  # ISO timestamp — when video was added to library
 
 
 class AddToEditorRequest(BaseModel):
@@ -390,7 +392,9 @@ def get_editor_queue(
             video_id=v.id,
             artist=v.artist,
             title=v.title,
+            album=v.album,
             file_path=v.file_path,
+            created_at=v.created_at.isoformat() if v.created_at else None,
             resolution_label=v.resolution_label,
             width=qs.width if qs else None,
             height=qs.height if qs else None,

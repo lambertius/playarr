@@ -436,16 +436,59 @@ def scan_library_for_letterboxing(
     """
     from app.models import VideoItem, QualitySignature
 
-    query = (
+    # First, collect all previously-detected letterboxed videos (no limit)
+    prev_query = (
+        db.query(VideoItem)
+        .join(QualitySignature, VideoItem.id == QualitySignature.video_id)
+        .filter(
+            VideoItem.file_path.isnot(None),
+            QualitySignature.letterbox_scanned == True,
+            QualitySignature.letterbox_detected == True,
+        )
+    )
+    if not include_excluded:
+        prev_query = prev_query.filter(VideoItem.exclude_from_editor_scan == False)
+
+    results = []
+    for video in prev_query.all():
+        qs = video.quality_signature
+        if not qs:
+            continue
+        if force_rescan:
+            continue  # will be re-detected below
+        results.append({
+            "video_id": video.id,
+            "artist": video.artist,
+            "title": video.title,
+            "file_path": video.file_path,
+            "detected": True,
+            "original_w": qs.width,
+            "original_h": qs.height,
+            "crop_w": qs.letterbox_crop_w,
+            "crop_h": qs.letterbox_crop_h,
+            "crop_x": qs.letterbox_crop_x,
+            "crop_y": qs.letterbox_crop_y,
+            "bar_top": qs.letterbox_bar_top or 0,
+            "bar_bottom": qs.letterbox_bar_bottom or 0,
+            "bar_left": qs.letterbox_bar_left or 0,
+            "bar_right": qs.letterbox_bar_right or 0,
+        })
+
+    # Now scan unscanned videos (or all if force_rescan), applying limit to new detections
+    scan_query = (
         db.query(VideoItem)
         .join(QualitySignature, VideoItem.id == QualitySignature.video_id, isouter=True)
         .filter(VideoItem.file_path.isnot(None))
     )
     if not include_excluded:
-        query = query.filter(VideoItem.exclude_from_editor_scan == False)
-    videos = query.limit(limit).all()
+        scan_query = scan_query.filter(VideoItem.exclude_from_editor_scan == False)
+    if not force_rescan:
+        scan_query = scan_query.filter(
+            (QualitySignature.letterbox_scanned == None) | (QualitySignature.letterbox_scanned == False)
+        )
 
-    results = []
+    videos = scan_query.all()
+    newly_detected = 0
     for video in videos:
         if not video.file_path or not os.path.isfile(video.file_path):
             continue
@@ -453,28 +496,6 @@ def scan_library_for_letterboxing(
         qs = video.quality_signature
         if not qs:
             continue
-
-        # Already scanned — return stored result if letterboxing was found
-        if qs.letterbox_scanned and not force_rescan:
-            if qs.letterbox_detected:
-                results.append({
-                    "video_id": video.id,
-                    "artist": video.artist,
-                    "title": video.title,
-                    "file_path": video.file_path,
-                    "detected": True,
-                    "original_w": qs.width,
-                    "original_h": qs.height,
-                    "crop_w": qs.letterbox_crop_w,
-                    "crop_h": qs.letterbox_crop_h,
-                    "crop_x": qs.letterbox_crop_x,
-                    "crop_y": qs.letterbox_crop_y,
-                    "bar_top": qs.letterbox_bar_top or 0,
-                    "bar_bottom": qs.letterbox_bar_bottom or 0,
-                    "bar_left": qs.letterbox_bar_left or 0,
-                    "bar_right": qs.letterbox_bar_right or 0,
-                })
-            continue  # skip re-detection either way
 
         try:
             info = detect_letterbox(video.file_path)
@@ -500,6 +521,7 @@ def scan_library_for_letterboxing(
                     "file_path": video.file_path,
                     **info,
                 })
+                newly_detected += 1
         except Exception as e:
             logger.warning(f"Letterbox scan failed for video {video.id}: {e}")
             continue

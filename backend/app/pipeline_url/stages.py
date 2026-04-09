@@ -1322,7 +1322,7 @@ def _ensure_terminal(job_id: int) -> None:
     from app.database import CosmeticSessionLocal
     from app.models import ProcessingJob, JobStatus
 
-    _TERMINAL = {"complete", "failed", "cancelled", "skipped"}
+    _TERMINAL = {"complete", "failed", "cancelled", "skipped", "finalizing"}
 
     def _write():
         db = CosmeticSessionLocal()

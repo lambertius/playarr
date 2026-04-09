@@ -249,6 +249,21 @@ def _is_genre_blacklisted(db: Session, genre_name: str) -> bool:
     return bool(genre and genre.blacklisted)
 
 
+def _get_genre_display_map(db: Session) -> dict:
+    """Return a dict mapping alias genre names → master genre names."""
+    rows = (
+        db.query(Genre.name, Genre.master_genre_id)
+        .filter(Genre.master_genre_id.isnot(None))
+        .all()
+    )
+    if not rows:
+        return {}
+    master_ids = {r[1] for r in rows}
+    masters = db.query(Genre.id, Genre.name).filter(Genre.id.in_(master_ids)).all()
+    master_names = {m[0]: m[1] for m in masters}
+    return {r[0]: master_names[r[1]] for r in rows if r[1] in master_names}
+
+
 def _apply_facet_filters(query, *, version_type=None, artist=None,
                          year_from=None, year_to=None,
                          song_rating=None, video_rating=None,
@@ -516,10 +531,23 @@ def list_genres(
         .order_by(Genre.name)
         .all()
     )
-    return [
-        {"genre": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
-        for r in results
-    ]
+    # Apply genre consolidation: merge alias counts into master genre
+    genre_map = _get_genre_display_map(db)
+    merged: dict[str, dict] = {}
+    for r in results:
+        raw_name = r[0]
+        display_name = genre_map.get(raw_name, raw_name)
+        vid_ids = [int(x) for x in r[2].split(",")] if r[2] else []
+        if display_name in merged:
+            merged[display_name]["count"] += r[1]
+            merged[display_name]["video_ids"].extend(vid_ids)
+        else:
+            merged[display_name] = {"genre": display_name, "count": r[1], "video_ids": vid_ids}
+    # Deduplicate video_ids
+    for entry in merged.values():
+        entry["video_ids"] = list(set(entry["video_ids"]))
+        entry["count"] = len(entry["video_ids"])
+    return sorted(merged.values(), key=lambda e: e["genre"])
 
 
 @router.get("/albums", response_model=List[dict])
@@ -1327,8 +1355,19 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
 
     # Build response with canonical track data
     response = VideoItemOut.model_validate(item)
-    # Filter out blacklisted genres from the response
-    response.genres = [g for g in response.genres if not _is_genre_blacklisted(db, g.name)]
+    # Filter out blacklisted genres and apply genre consolidation
+    genre_map = _get_genre_display_map(db)
+    filtered_genres = []
+    seen_names = set()
+    for g in response.genres:
+        if _is_genre_blacklisted(db, g.name):
+            continue
+        display_name = genre_map.get(g.name, g.name)
+        if display_name not in seen_names:
+            seen_names.add(display_name)
+            g.name = display_name
+            filtered_genres.append(g)
+    response.genres = filtered_genres
     response.canonical_track_id = item.track_id
     response.processing_state = item.processing_state
     response.exclude_from_editor_scan = item.exclude_from_editor_scan
@@ -1351,7 +1390,11 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
             album=track.album.title if track.album else None,
             album_id=track.album_id,
             year=track.year,
-            genres=[{"id": g.id, "name": g.name} for g in track.genres if g.name not in blacklisted_names],
+            genres=[
+                {"id": g.id, "name": genre_map.get(g.name, g.name)}
+                for g in track.genres
+                if g.name not in blacklisted_names
+            ],
             mb_recording_id=track.mb_recording_id,
             mb_release_id=track.mb_release_id,
             mb_artist_id=track.mb_artist_id,

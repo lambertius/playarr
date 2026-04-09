@@ -4,7 +4,7 @@ import type {
   JobSummary, JobLog, JobTelemetry, TelemetrySnapshot, MetadataSnapshot,
   AppSetting, SettingUpdate,
   NormalizationRecord, ArtistBucket, YearBucket, GenreBucket, AlbumBucket, RatingBucket,
-  GenreBlacklistItem,
+  GenreBlacklistItem, GenreConflict, GenreSuggestion, GenreSearchResult,
   ImportRequest, NormalizeRequest, BatchRescanRequest, BatchActionResponse,
   BatchDeleteRequest, BatchDeleteResponse,
   LibraryParams, JobsParams, AppStats, FacetFilterParams,
@@ -759,5 +759,49 @@ export const metadataManagerApi = {
   consolidateArtist: (mb_artist_id: string, canonical_name: string) =>
     api.post<{ updated: number; mb_artist_id: string; canonical_name: string }>(
       "/metadata/artist-consolidate", { mb_artist_id, canonical_name },
+    ).then(r => r.data),
+
+  genreConsolidations: () =>
+    api.get<GenreConflict[]>("/metadata/genre-consolidations").then(r => r.data),
+
+  genreSuggestions: () =>
+    api.get<GenreSuggestion[]>("/metadata/genre-suggestions").then(r => r.data),
+
+  consolidateGenres: (alias_genre_ids: number[], master_genre_id: number) =>
+    api.post<{ updated: number; master_genre_id: number; master_name: string }>(
+      "/metadata/genre-consolidate", { alias_genre_ids, master_genre_id },
+    ).then(r => r.data),
+
+  consolidateGenresManual: (alias_genre_ids: number[], master_genre_name: string) =>
+    api.post<{ updated: number; master_genre_id: number; master_name: string }>(
+      "/metadata/genre-consolidate-manual", { alias_genre_ids, master_genre_name },
+    ).then(r => r.data),
+
+  unconsolidateGenre: (genre_id: number) =>
+    api.post<{ genre_id: number; name: string }>(
+      "/metadata/genre-unconsolidate", { genre_id },
+    ).then(r => r.data),
+
+  genreMap: () =>
+    api.get<Record<string, string>>("/metadata/genre-map").then(r => r.data),
+
+  genreSearch: (q: string, excludeTile?: number) =>
+    api.get<GenreSearchResult[]>("/metadata/genre-search", {
+      params: { q, exclude_tile: excludeTile },
+    }).then(r => r.data),
+
+  addGenreToTile: (genre_id: number, master_genre_id: number) =>
+    api.post<{ genre_id: number; name: string; master_genre_id: number; master_name: string }>(
+      "/metadata/genre-add-to-tile", { genre_id, master_genre_id },
+    ).then(r => r.data),
+
+  blacklistTile: (master_genre_id: number, blacklisted: boolean) =>
+    api.post<{ updated: number; master_genre_id: number; blacklisted: boolean }>(
+      "/metadata/genre-blacklist-tile", { master_genre_id, blacklisted },
+    ).then(r => r.data),
+
+  createTile: (alias_genre_ids: number[], master_genre_name: string) =>
+    api.post<{ updated: number; master_genre_id: number; master_name: string }>(
+      "/metadata/genre-create-tile", { alias_genre_ids, master_genre_name },
     ).then(r => r.data),
 };
