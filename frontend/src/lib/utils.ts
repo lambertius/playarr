@@ -51,7 +51,7 @@ export function timeAgo(dateStr: string): string {
 /** Active job status check. */
 const ACTIVE_JOB_STATUSES = new Set([
   "queued", "downloading", "downloaded", "remuxing", "analyzing",
-  "normalizing", "tagging", "writing_nfo", "asset_fetch",
+  "normalizing", "tagging", "writing_nfo", "asset_fetch", "finalizing",
 ]);
 
 export function isActiveJob(status: string): boolean {

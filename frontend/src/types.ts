@@ -13,6 +13,7 @@ export type JobStatus =
   | "tagging"
   | "writing_nfo"
   | "asset_fetch"
+  | "finalizing"
   | "complete"
   | "failed"
   | "cancelled"

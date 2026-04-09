@@ -1,11 +1,11 @@
 """
-Playarr Background Tasks â€” Celery task definitions.
+Playarr Background Tasks — Celery task definitions.
 
 Job Pipeline State Machine:
-    queued â†’ downloading â†’ downloaded â†’ remuxing â†’ analyzing â†’
-    normalizing â†’ tagging â†’ writing_nfo â†’ asset_fetch â†’ complete
+    queued → downloading → downloaded → remuxing → analyzing →
+    normalizing → tagging → writing_nfo → asset_fetch → complete
 
-Failure at any step â†’ failed (with error details + retry logic)
+Failure at any step → failed (with error details + retry logic)
 
 Each task is idempotent: safe to re-run. Partial state is tracked
 via ProcessingJob records so cleanup/resume is possible.
@@ -87,10 +87,10 @@ logger = logging.getLogger(__name__)
 # the RESERVED lock (busy_timeout 30s) and every job stalls.
 #
 # The lock is acquired ONLY around the DB-write phases (entity creation,
-# VideoItem save, source records, commit).  All non-DB work â€” downloads,
+# VideoItem save, source records, commit).  All non-DB work — downloads,
 # ffprobe analysis, metadata resolution (MusicBrainz / Wikipedia / AI),
 # audio normalization, file organization, NFO writing, poster download,
-# entity resolution Phase 1 (network) â€” runs WITHOUT the lock so multiple
+# entity resolution Phase 1 (network) — runs WITHOUT the lock so multiple
 # pipeline threads can overlap their I/O-heavy phases.
 _pipeline_lock = threading.Lock()
 
@@ -113,7 +113,7 @@ def _update_job(job_id: int, _retries: int = 10, **kwargs):
     _is_terminal = False
     _status = kwargs.get("status")
     if _status is not None and hasattr(_status, "value"):
-        _is_terminal = _status.value in ("failed", "complete", "cancelled", "skipped")
+        _is_terminal = _status.value in ("failed", "complete", "cancelled", "skipped", "finalizing")
 
     _kw = dict(kwargs)  # snapshot for closure
 
@@ -170,7 +170,7 @@ def _update_job_raw_fallback(job_id: int, **kwargs):
         if col not in _ALLOWED:
             continue
         if col == "status" and hasattr(val, "value"):
-            val = val.value  # JobStatus enum â†’ string
+            val = val.value  # JobStatus enum → string
         if isinstance(val, datetime):
             val = val.isoformat()
         sets.append(f"{col}=?")
@@ -214,7 +214,7 @@ def _update_job_raw_fallback(job_id: int, **kwargs):
                     wc.close()
                 except Exception:
                     pass
-    logger.error(f"_update_job(job={job_id}) raw fallback also failed â€” status update lost")
+    logger.error(f"_update_job(job={job_id}) raw fallback also failed — status update lost")
 
 
 def _append_job_log(job_id: int, message: str, _retries: int = 10):
@@ -524,7 +524,7 @@ def _validate_video_entity_artwork(db, video_item, job_id: int):
 
     Purges corrupt cached assets (HTML-as-jpg, zero-byte, etc.) so they
     are not carried forward into rescans, reimports, or entity re-resolution.
-    This is a targeted validation â€” only checks assets linked to this video's
+    This is a targeted validation — only checks assets linked to this video's
     artist and album entities, not the entire cache.
     """
     from app.metadata.models import CachedAsset
@@ -588,7 +588,7 @@ def import_video_task(self, job_id: int, url: str, artist_override: str = None,
                       format_spec: str = None):
     """
     Full import pipeline for a video URL.
-    Delegates to the staged pipeline (workspace â†’ mutation plan â†’ serial apply).
+    Delegates to the staged pipeline (workspace → mutation plan → serial apply).
     """
     from app.pipeline_url.stages import run_url_import_pipeline
 
@@ -615,7 +615,7 @@ def import_video_task(self, job_id: int, url: str, artist_override: str = None,
 
 
 # ---------------------------------------------------------------------------
-# Batch import task â€” parallel downloads, serial DB writes
+# Batch import task — parallel downloads, serial DB writes
 # ---------------------------------------------------------------------------
 
 MAX_PARALLEL_DOWNLOADS = 4
@@ -698,7 +698,7 @@ def batch_import_task(self, parent_job_id: int, child_specs: list):
 
 
 # ---------------------------------------------------------------------------
-# Redownload video task â€” replaces the video file ONLY, no metadata changes
+# Redownload video task — replaces the video file ONLY, no metadata changes
 # ---------------------------------------------------------------------------
 
 @celery_app.task(bind=True, max_retries=2)
@@ -755,7 +755,7 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
 
         def progress_cb(pct, msg, metrics=None):
             try:
-                scaled = 10 + int(pct * 0.4)  # 10%â€“50%
+                scaled = 10 + int(pct * 0.4)  # 10%–50%
                 _update_job(job_id, progress_percent=scaled, current_step=f"Downloading ({pct}%)")
                 if metrics:
                     telemetry_store.update_download(
@@ -1125,7 +1125,7 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
                 _db.close()
 
         db_write(_apply_redownload_commit)
-        _append_job_log(job_id, f"Redownload complete â€” {resolution_label}")
+        _append_job_log(job_id, f"Redownload complete — {resolution_label}")
         telemetry_store.remove(job_id)
 
         # Clean up temp dir
@@ -1674,8 +1674,8 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
     """Rescan metadata for a single video item.
 
     Uses a two-phase architecture (same as the URL import pipeline):
-      Phase A â€” read context + network I/O (no long-lived DB session)
-      Phase B â€” single locked write phase (all mutations applied atomically)
+      Phase A — read context + network I/O (no long-lived DB session)
+      Phase B — single locked write phase (all mutations applied atomically)
     This prevents SQLite write-contention when multiple rescans run in parallel.
     """
     _update_job(job_id, status=JobStatus.tagging, started_at=datetime.now(timezone.utc),
@@ -1685,7 +1685,7 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
         _check_cancelled(job_id)
 
         # ==================================================================
-        # PHASE A â€” Read context & network I/O (no long-held DB session)
+        # PHASE A — Read context & network I/O (no long-held DB session)
         # ==================================================================
 
         # --- A1: Load video context into plain Python values ---
@@ -1933,7 +1933,7 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
         import re as _re
         source_links = {}
         try:
-            # Wikipedia link â€” classify by page type
+            # Wikipedia link — classify by page type
             wiki_url = metadata.get("source_url")
             if wiki_url and "wikipedia.org" in wiki_url:
                 page_id = _re.sub(r"^https?://en\.wikipedia\.org/wiki/", "", wiki_url)
@@ -2415,11 +2415,11 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
         # Job status update (uses own session via _update_job)
         _set_pipeline_step(job_id, "Resolving entities", "success")
         _set_pipeline_step(job_id, "Applying to database", "success")
-        _update_job(job_id, status=JobStatus.complete, progress_percent=90,
-                    current_step="Finalizing", completed_at=datetime.now(timezone.utc))
-        _append_job_log(job_id, "Rescan complete â€” dispatching deferred tasks")
+        _update_job(job_id, status=JobStatus.finalizing, progress_percent=90,
+                    current_step="Finalizing")
+        _append_job_log(job_id, "Rescan complete — dispatching deferred tasks")
 
-        # â”€â”€ Stage D: Deferred tasks (AI enrichment, artwork, scenes, etc.) â”€â”€
+        # ── Stage D: Deferred tasks (AI enrichment, artwork, scenes, etc.) ──
         # Mirrors the import pipeline's advanced-mode deferred task list.
         # dispatch_deferred runs in a daemon thread and sets current_step
         # to "Import complete" when finished.
@@ -2478,7 +2478,7 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
 
 
 # ---------------------------------------------------------------------------
-# Batch job completion â€” poll sub-jobs until all finish
+# Batch job completion — poll sub-jobs until all finish
 # ---------------------------------------------------------------------------
 
 @celery_app.task(bind=True)
@@ -2488,14 +2488,14 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
     Key design: READ and WRITE phases use SEPARATE sqlite3 connections so
     that reads (which never block in WAL mode) cannot be stalled by write
     contention from child pipeline threads.  Write failures are silently
-    tolerated â€” progress will be retried on the next iteration.
+    tolerated — progress will be retried on the next iteration.
     """
     import json as _json
     import time
     import sqlite3 as _sqlite3
 
-    STUCK_THRESHOLD = 300  # 5 minutes with no status change â†’ assume stuck
-    FORCE_FAIL_THRESHOLD = 600  # 10 minutes stuck â†’ force-fail the child
+    STUCK_THRESHOLD = 300  # 5 minutes with no status change → assume stuck
+    FORCE_FAIL_THRESHOLD = 600  # 10 minutes stuck → force-fail the child
 
     from app.config import get_settings as _gs
     _db_url = _gs().database_url
@@ -2578,7 +2578,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
 
         db_write_soon(_write)
 
-    # â”€â”€ Pre-flight: if parent is already terminal, skip entirely â”€â”€
+    # ── Pre-flight: if parent is already terminal, skip entirely ──
     # With --pool=solo, batch_import_task finishes before this task starts.
     # Writing "0/N complete" AFTER the parent is already done would clobber
     # the final step.  Check BEFORE any writes to avoid the race.
@@ -2593,9 +2593,9 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
         if _pre_status and _pre_status[0] in ("complete", "failed", "cancelled", "skipped"):
             logger.info(
                 f"[Batch {parent_job_id}] Parent already {_pre_status[0]} "
-                f"before watcher started â€” skipping"
+                f"before watcher started — skipping"
             )
-            _flog(f"Parent already {_pre_status[0]} â€” watcher exiting")
+            _flog(f"Parent already {_pre_status[0]} — watcher exiting")
             return
     except Exception:
         pass  # If pre-flight read fails, proceed normally
@@ -2607,7 +2607,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
         idle_elapsed = time.monotonic() - last_progress_time
         if idle_elapsed >= max_idle:
             break
-        # â”€â”€ PHASE 1: READ child statuses (separate connection, WAL = never blocks) â”€â”€
+        # ── PHASE 1: READ child statuses (separate connection, WAL = never blocks) ──
         child_data: dict[int, tuple[str, str]] = {}
         parent_cancelled = False
         rc = None
@@ -2647,7 +2647,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
                 except Exception:
                     pass
 
-        # â”€â”€ Handle parent cancellation â”€â”€
+        # ── Handle parent cancellation ──
         if parent_cancelled:
             from app.pipeline_url.write_queue import db_write
             def _cancel_children():
@@ -2671,7 +2671,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
             _flog("Playlist cancelled by user")
             return
 
-        # â”€â”€ PHASE 2: Process results in memory â”€â”€
+        # ── PHASE 2: Process results in memory ──
         now_mono = time.monotonic()
         prev_done_count = len(logged_complete)
         done = 0
@@ -2697,7 +2697,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
                 done += 1
                 if sid not in logged_complete:
                     logged_complete.add(sid)
-                    _flog(f"âœ“ {name}")
+                    _flog(f"✓ {name}")
                     pipeline_steps.append({
                         "step": f"Video #{len(logged_complete)}: {name}",
                         "status": "success",
@@ -2707,21 +2707,25 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
                 cancelled += 1
                 if sid not in logged_complete:
                     logged_complete.add(sid)
-                    _flog(f"âœ— {name} (cancelled)")
+                    _flog(f"✗ {name} (cancelled)")
             elif st == "failed":
                 done += 1
                 failed += 1
                 if sid not in logged_complete:
                     logged_complete.add(sid)
-                    _flog(f"âœ— {name} (failed)")
+                    _flog(f"✗ {name} (failed)")
                     pipeline_steps.append({"step": name, "status": "failed"})
             elif st == "skipped":
                 done += 1
                 if sid not in logged_complete:
                     logged_complete.add(sid)
-                    _flog(f"â€“ {name} (skipped)")
+                    _flog(f"– {name} (skipped)")
             elif st == "queued":
                 queued += 1
+            elif st == "finalizing":
+                # Deferred tasks are running — don't apply stuck
+                # detection here; _finalizing_watchdog handles stalls.
+                in_progress += 1
             else:
                 in_progress += 1
                 prev = last_seen_status.get(sid)
@@ -2732,7 +2736,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
                     # AND register cancellation so the pipeline thread stops
                     logger.error(
                         f"[Batch {parent_job_id}] Child {sid} stuck "
-                        f"in '{st}' >{FORCE_FAIL_THRESHOLD}s â€” force-failing"
+                        f"in '{st}' >{FORCE_FAIL_THRESHOLD}s — force-failing"
                     )
                     request_cancel(sid)  # signal the running thread to abort
                     try:
@@ -2748,7 +2752,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
                                 ):
                                     _stuck_job.status = JobStatus.failed
                                     _stuck_job.error_message = (
-                                        _stuck_job.error_message or "Pipeline hung â€” force-failed by batch monitor"
+                                        _stuck_job.error_message or "Pipeline hung — force-failed by batch monitor"
                                     )
                                     _stuck_job.completed_at = datetime.now(timezone.utc)
                                     _force_db.commit()
@@ -2779,7 +2783,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
         step_msg = " \u00b7 ".join(parts)
         pct = int((done / max(total, 1)) * 100)
 
-        # â”€â”€ PHASE 3: WRITE parent progress (best-effort, separate connection) â”€â”€
+        # ── PHASE 3: WRITE parent progress (best-effort, separate connection) ──
         _db_write(pct, step_msg)
 
         if done >= total:
@@ -2788,7 +2792,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
         time.sleep(poll_interval)
 
     # --- Final status ---
-    # Use direct sqlite3 for the terminal write â€” the ORM-based _update_job
+    # Use direct sqlite3 for the terminal write — the ORM-based _update_job
     # can silently fail under heavy SQLite contention from concurrent pipeline
     # threads, leaving the parent stuck in "analyzing" forever.
     succeeded = total - failed - cancelled
@@ -2833,7 +2837,7 @@ def complete_batch_job_task(self, parent_job_id: int, sub_job_ids: list):
 
     _final_log = _read_log_text()  # re-read after flog writes
 
-    # Terminal write via write queue â€” must succeed
+    # Terminal write via write queue — must succeed
     from app.pipeline_url.write_queue import db_write
     def _write_final():
         _wc = _sqlite3.connect(_db_path, timeout=30)
@@ -3009,7 +3013,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
         # Track album-specific MusicBrainz IDs for artwork pipeline
         _local_mb_album_release_id: str | None = None
         _local_mb_album_release_group_id: str | None = None
-        # Album name resolved by the AI unified pipeline â€” preserved so later
+        # Album name resolved by the AI unified pipeline — preserved so later
         # modes (MusicBrainz scrape) cannot override it for artwork lookup.
         # This keeps the artwork pathway aligned with the scraper test.
         _ai_resolved_album: str | None = None
@@ -3018,9 +3022,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
         _pipeline_artist_art_url: str | None = None  # Artist art URL from unified pipeline artwork candidates
         _pipeline_album_art_url: str | None = None  # Album art URL from unified pipeline artwork candidates
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # Apply user-provided version type hints
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         if hint_cover or hint_live or hint_alternate or hint_uncensored:
             if hint_cover:
                 video_item.version_type = "cover"
@@ -3035,9 +3039,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             _append_job_log(job_id, f"Version type set: {video_item.version_type}"
                             + (f" ({hint_alternate_label})" if hint_alternate_label else ""))
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # MODE: AI Auto Analyse (full import-style unified pipeline)
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         if ai_auto_analyse:
             _check_cancelled(job_id)
             _update_job(job_id, current_step="Running AI auto-analyse pipeline", progress_percent=10)
@@ -3146,7 +3150,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                             _append_job_log(job_id, f"Version type from AI: {_vtype}"
                                             + (f" ({_vlabel})" if _vlabel else ""))
                         elif _vtype == "normal" and video_item.version_type:
-                            # AI says normal but DB has a version type â€” leave it alone
+                            # AI says normal but DB has a version type — leave it alone
                             pass
 
                 # Update MusicBrainz IDs
@@ -3238,9 +3242,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
 
             progress = 40
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # MODE: AI Only (enrich with AI, no external scrapers)
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         if ai_only:
             _check_cancelled(job_id)
             _update_job(job_id, current_step="Running AI-only enrichment", progress_percent=max(progress, 10))
@@ -3268,9 +3272,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
 
             progress = max(progress, 30)
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # MODE: Scrape MusicBrainz
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         if scrape_musicbrainz:
             _check_cancelled(job_id)
             _update_job(job_id, current_step="Scraping MusicBrainz", progress_percent=max(progress, 20))
@@ -3345,9 +3349,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             _set_pipeline_step(job_id, "Scraping MusicBrainz", "success")
             progress = max(progress, 50)
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # MODE: Scrape Wikipedia
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         wiki = {}
         mismatch_reason = None
 
@@ -3369,7 +3373,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 _update_job(job_id, current_step="Scraping Wikipedia page", progress_percent=max(progress, 50))
                 wiki = scrape_wikipedia_page(wiki_url)
 
-                _append_job_log(job_id, f"Scraped â€” album: {wiki.get('album')}, year: {wiki.get('year')}, "
+                _append_job_log(job_id, f"Scraped — album: {wiki.get('album')}, year: {wiki.get('year')}, "
                                 f"genres: {wiki.get('genres')}, has_plot: {bool(wiki.get('plot'))}, "
                                 f"has_image: {bool(wiki.get('image_url'))}")
 
@@ -3377,7 +3381,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 mismatch_reason = detect_article_mismatch(wiki, video_item.artist, video_item.title)
                 if mismatch_reason:
                     _append_job_log(job_id,
-                        f"âš  Article mismatch: {mismatch_reason}. Metadata will NOT be applied.")
+                        f"⚠ Article mismatch: {mismatch_reason}. Metadata will NOT be applied.")
                 else:
                     # Cover song protection: when the infobox artist differs
                     # from the expected artist, the article describes a song
@@ -3528,9 +3532,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             progress = max(progress, 65)
             _set_pipeline_step(job_id, "Scraping Wikipedia", "success")
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # Artist / Album artwork pipeline (source-scoped per mode)
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         if scrape_wikipedia or scrape_musicbrainz or ai_auto_analyse:
             _check_cancelled(job_id)
 
@@ -3542,7 +3546,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             else:
                 _art_source = "all"
 
-            # Use AI-resolved album for artwork when available â€” this matches
+            # Use AI-resolved album for artwork when available — this matches
             # the scraper test pathway which uses the unified pipeline's album.
             # Fall back to proposed (may include MusicBrainz scrape override)
             # then to the database value.
@@ -3550,12 +3554,12 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
 
             _update_job(job_id, current_step=f"Fetching artist/album artwork ({_art_source})", progress_percent=max(progress, 70))
             # Match the scraper test: pass the full artist name, do NOT
-            # apply parse_multi_artist here â€” the artist scraper applies it
+            # apply parse_multi_artist here — the artist scraper applies it
             # internally for artist artwork, and the album scraper uses the
             # full name (same as the scraper test's resolved_artist_name).
             _art_artist = _ai_resolved_artist or proposed.get("artist") or video_item.artist
 
-            # â”€â”€ Wikipedia cross-link: follow single page â†’ album page â”€â”€
+            # ── Wikipedia cross-link: follow single page → album page ──
             # Mirrors the scraper test: follow the single's Wikipedia infobox
             # "from the album" link to discover the correct album page and
             # its artwork.  This is necessary because MusicBrainz may resolve
@@ -3592,7 +3596,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
 
                     _linked_album_url = _single_links.get("album_url")
                     if _linked_album_url and _art_xlink_ok:
-                        _append_job_log(job_id, f"Wikipedia cross-link: album page â†’ {_linked_album_url}")
+                        _append_job_log(job_id, f"Wikipedia cross-link: album page → {_linked_album_url}")
                         _album_wiki_page = _scrape_wiki_page(_linked_album_url)
                         if _album_wiki_page and _album_wiki_page.get("image_url"):
                             _crosslink_album_image_url = _album_wiki_page["image_url"]
@@ -3611,12 +3615,12 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                     source=_art_source,
                 )
 
-                # â”€â”€ Wikipedia cross-link override â”€â”€
+                # ── Wikipedia cross-link override ──
                 # The cross-link follows the single's Wikipedia infobox to
                 # discover the actual album the track appeared on.  When the
                 # cross-link resolves a DIFFERENT album than the one MusicBrainz
                 # found (e.g. "The Punisher: The Album" vs "Disclaimer II"),
-                # the cross-link is more specific and always wins â€” regardless
+                # the cross-link is more specific and always wins — regardless
                 # of whether the MusicBrainz name-search found CAA art, because
                 # that CAA art would be for the wrong album.
                 # When the albums match, the existing art is kept (CAA quality).
@@ -3630,7 +3634,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                     if _albums_differ or "coverartarchive.org" not in _existing_album_url:
                         # Use the cross-linked album name for the artwork folder
                         _reason = f"different album: {_cl_album} vs {_art_album}" if _albums_differ else "overrides Wikipedia name-search"
-                        _append_job_log(job_id, f"Applying Wikipedia cross-link album art ({_reason}) â†’ album: {_cl_album}")
+                        _append_job_log(job_id, f"Applying Wikipedia cross-link album art ({_reason}) → album: {_cl_album}")
                         from app.services.artwork_manager import ensure_album_artwork as _ensure_crosslink
                         _cl_override = _ensure_crosslink(
                             artist=_art_artist,
@@ -3648,7 +3652,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                                 _art_album = _crosslink_album_name
                                 _append_job_log(job_id, f"Album name updated to cross-link: {_crosslink_album_name}")
                     else:
-                        _append_job_log(job_id, f"Same album â€” CoverArtArchive art takes priority over cross-link")
+                        _append_job_log(job_id, f"Same album — CoverArtArchive art takes priority over cross-link")
 
                 
                 # ── Pipeline artist art fallback ──
@@ -3691,7 +3695,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                         _append_job_log(job_id, f"Album poster saved (pipeline fallback): {_pal_override['poster_path']}")
 
                 from app.services.artwork_service import validate_file as _vf_art
-                # When no parent album was found the release is a single â€”
+                # When no parent album was found the release is a single —
                 # its cover art belongs on the video poster, not album art.
                 # In wiki-only mode MB IDs won't be set, so also check whether
                 # an album name was resolved (from Wikipedia or proposed metadata).
@@ -3709,7 +3713,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                     ).delete(synchronize_session="fetch")
                 for _art_key, _art_asset_type in [("artist_poster", "artist_thumb"), ("album_poster", "album_thumb")]:
                     if _art_asset_type == "album_thumb" and not _has_parent_album:
-                        continue  # single cover â†’ poster only, handled below
+                        continue  # single cover → poster only, handled below
                     _art_path = art_result.get(_art_key)
                     if not _art_path:
                         continue
@@ -3766,9 +3770,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                     db.add(MediaAsset(video_id=video_id, asset_type=_art_asset_type, **_art_fields))
                     updated_fields.append(f"{_art_asset_type.split('_')[0]}_artwork")
 
-                # Video poster from entity artwork â€” policy aligned with
+                # Video poster from entity artwork — policy aligned with
                 # import logic (step 8c.7):
-                #   1. Single cover from CoverArtArchive â†’ video poster
+                #   1. Single cover from CoverArtArchive → video poster
                 #      (guarded: skip when mb_release_id matches album release)
                 #   2. Album cover is NOT used as video poster when a parent
                 #      album exists (generic album art is a downgrade from the
@@ -3776,7 +3780,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 #   3. When NO parent album, the artwork pipeline cover IS the
                 #      single/release cover and can serve as video poster
                 # Wikipedia scrape already sets its own poster from the
-                # infobox image (earlier block) â€” don't overwrite it.
+                # infobox image (earlier block) — don't overwrite it.
                 _wiki_already_set_poster = scrape_wikipedia and "poster" in updated_fields
                 _video_poster_url = None
                 _video_poster_source = None
@@ -3917,17 +3921,17 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 _append_job_log(job_id, f"Artist/album artwork error (non-fatal): {e}")
                 logger.warning(f"Artist/album artwork failed for video {video_id}: {e}")
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # Common: Mark artwork as fetched in processing state
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         _artwork_fields = {"poster", "artist_artwork", "album_artwork"}
         if _artwork_fields & set(updated_fields):
             _set_processing_flag(db, video_item, "artwork_fetched", method="scrape")
             _safe_commit(db)
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # Common: Create AIMetadataResult for user review
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         if not ai_only:
             _update_job(job_id, current_step="Storing proposed changes for review", progress_percent=85)
             _set_pipeline_step(job_id, "Storing proposed changes", "in_progress")
@@ -3992,7 +3996,7 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                     _append_job_log(job_id, f"YouTube matching warning: {_yt_err}")
                     _set_pipeline_step(job_id, "YouTube matching", "warning")
 
-            # Ensure all core fields are populated â€” use current values as
+            # Ensure all core fields are populated — use current values as
             # fallback so the comparison table always shows every field.
             _core_defaults = {
                 "artist": video_item.artist,
@@ -4167,9 +4171,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
 
             _safe_commit(db)
 
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         # Common: Finalise
-        # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        # ══════════════════════════════════════════════════════════════
         _check_cancelled(job_id)
         _save_metadata_snapshot(db, video_item, "metadata_scrape_complete")
 
@@ -4395,7 +4399,7 @@ def _collect_mb_source_proposals(db, video_item, video_id, source_log, *, mb_alb
             })
             source_log.append(f"MusicBrainz album source: {_mb_alb_url}")
         elif _ex.source_video_id != _mb_alb_rg_id:
-            # Existing album source has a different release-group ID â€” propose update
+            # Existing album source has a different release-group ID — propose update
             proposals.append({
                 "provider": "musicbrainz",
                 "source_type": "album",
@@ -4404,7 +4408,7 @@ def _collect_mb_source_proposals(db, video_item, video_id, source_log, *, mb_alb
                 "provenance": "scraped",
                 "_replaces_source_id": _ex.id,
             })
-            source_log.append(f"MusicBrainz album source updated: {_ex.source_video_id} â†’ {_mb_alb_rg_id}")
+            source_log.append(f"MusicBrainz album source updated: {_ex.source_video_id} → {_mb_alb_rg_id}")
 
     return proposals
 
@@ -4522,7 +4526,7 @@ def _collect_wiki_source_proposals(db, video_item, video_id, source_log, _re,
                 if _xlink_ok and _wiki_alb_url != _infobox_alb_url:
                     source_log.append(
                         f"Album wiki cross-verified from single infobox: "
-                        f"{_wiki_alb_url} â†’ {_infobox_alb_url}")
+                        f"{_wiki_alb_url} → {_infobox_alb_url}")
                 if _xlink_ok:
                     _wiki_alb_url = _infobox_alb_url
 
@@ -5835,7 +5839,7 @@ def library_import_task(self, job_id: int):
 
         _append_job_log(job_id, f"Created {len(sub_job_ids)} child jobs")
 
-        # Dispatch child tasks â€” Celery workers handle concurrency natively.
+        # Dispatch child tasks — Celery workers handle concurrency natively.
         # In thread mode, use a ThreadPoolExecutor so children can overlap
         # their I/O-heavy phases (ffprobe, file copy, metadata resolution)
         # while the pipeline lock serialises only the short DB-write phases.

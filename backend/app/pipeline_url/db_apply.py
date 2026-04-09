@@ -304,14 +304,15 @@ def _execute_plan(plan: dict) -> int:
         job = db.query(ProcessingJob).get(job_id)
         if job:
             job.video_id = video_item.id
-            job.status = JobStatus.complete
             if _has_deferred:
+                job.status = JobStatus.finalizing
                 job.current_step = "Finalizing"
                 job.progress_percent = 90
             else:
+                job.status = JobStatus.complete
                 job.current_step = "Import complete"
                 job.progress_percent = 100
-            job.completed_at = datetime.now(timezone.utc)
+                job.completed_at = datetime.now(timezone.utc)
             steps = list(job.pipeline_steps or [])
             steps.append({"step": "Import complete", "status": "success"})
             job.pipeline_steps = steps

@@ -59,6 +59,7 @@ class JobStatus(str, enum.Enum):
     tagging = "tagging"
     writing_nfo = "writing_nfo"
     asset_fetch = "asset_fetch"
+    finalizing = "finalizing"
     complete = "complete"
     failed = "failed"
     cancelled = "cancelled"

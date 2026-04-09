@@ -1886,7 +1886,7 @@ def _coarse_update(job_id: int, status_enum=None, step: str = None,
     is_terminal = (
         status_enum is not None
         and hasattr(status_enum, "value")
-        and status_enum.value in ("failed", "complete", "cancelled", "skipped")
+        and status_enum.value in ("failed", "complete", "cancelled", "skipped", "finalizing")
     )
     max_attempts = 10 if is_terminal else 3
 
