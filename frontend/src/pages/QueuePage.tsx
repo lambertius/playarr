@@ -35,19 +35,6 @@ function getSourceType(job: JobSummary): SourceFilter {
   return "download";
 }
 
-/** Job types whose pipelines dispatch deferred post-processing tasks. */
-const DEFERRED_JOB_TYPES = new Set(["import_url", "rescan", "library_import_video", "playlist_import"]);
-
-function isFinalizing(j: JobSummary) {
-  if (!DEFERRED_JOB_TYPES.has(j.job_type)) return false;
-  if (j.status !== "complete" || !j.current_step) return false;
-  const stepLower = j.current_step.toLowerCase();
-  if (stepLower.endsWith("complete") || j.current_step.startsWith("All ") || j.current_step.startsWith("Pending review")) return false;
-  // No time window — show as active until deferred tasks set step to
-  // "Import complete".  The backend watchdog handles truly stuck jobs.
-  return true;
-}
-
 /* ── Pagination controls ── */
 function Pagination({
   page, totalPages, pageSize, total,
@@ -186,7 +173,7 @@ export function QueuePage() {
       );
     }
 
-    let active = pool.filter((j) => isActiveJob(j.status) || isFinalizing(j));
+    let active = pool.filter((j) => isActiveJob(j.status));
     const allActiveCount = active.length;
     // Apply status filter for active-tab sub-filtering (e.g. "downloading" only)
     if (statusFilter === "downloading") {
@@ -198,7 +185,7 @@ export function QueuePage() {
       const bQueued = b.status === "queued" ? 1 : 0;
       return aQueued - bQueued;
     });
-    const history = pool.filter((j) => !isActiveJob(j.status) && !isFinalizing(j));
+    const history = pool.filter((j) => !isActiveJob(j.status));
     return { activeJobs: active, allActiveCount, historyJobs: history };
   }, [jobs, sourceFilter, searchQuery, statusFilter]);
 
@@ -228,7 +215,7 @@ export function QueuePage() {
       else if (j.status === "failed") c.failed++;
       else if (j.status === "cancelled") c.cancelled++;
       else if (j.status === "skipped") c.skipped++;
-      else if (isFinalizing(j)) c.finalizing++;
+      else if (j.status === "finalizing") c.finalizing++;
       else if (j.status === "complete") c.complete++;
       else if (isActiveJob(j.status)) c.processing++;
     }
@@ -480,7 +467,7 @@ export function QueuePage() {
         setExpandedJobId(expandedJobId === job.id ? null : job.id)
       }
       onRetry={job.status === "failed" || job.status === "cancelled" ? () => handleRetry(job.id) : undefined}
-      onCancel={isActiveJob(job.status) || isFinalizing(job) ? () => handleCancel(job) : undefined}
+      onCancel={isActiveJob(job.status) ? () => handleCancel(job) : undefined}
       selected={selectedIds.has(job.id)}
       onSelect={toggleSelect}
     />

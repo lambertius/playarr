@@ -19,20 +19,6 @@ import { StatusBadge } from "@/components/Badges";
 
 // ─── Helpers ──────────────────────────────────────────────
 
-/** Job types whose pipelines dispatch deferred post-processing tasks. */
-const DEFERRED_JOB_TYPES = new Set(["import_url", "rescan", "library_import_video", "playlist_import"]);
-
-/** True when deferred tasks are still running (step has not reached completion). */
-function isJobFinalizing(job: JobSummary): boolean {
-  if (!DEFERRED_JOB_TYPES.has(job.job_type)) return false;
-  if (job.status !== "complete" || !job.current_step) return false;
-  const stepLower = job.current_step.toLowerCase();
-  if (stepLower.endsWith("complete") || job.current_step.startsWith("All ") || job.current_step.startsWith("Pending review")) return false;
-  // No time window — show as active until deferred tasks set step to
-  // "Import complete".  The backend watchdog handles truly stuck jobs.
-  return true;
-}
-
 function formatSpeed(bytesPerSec: number): string {
   if (bytesPerSec <= 0) return "0 B/s";
   if (bytesPerSec < 1024) return `${bytesPerSec.toFixed(0)} B/s`;
@@ -112,8 +98,7 @@ export function JobStageBadge({ step, className }: JobStageBadgeProps) {
 // ─── Elapsed Timer ────────────────────────────────────────
 
 function JobElapsed({ job }: { job: JobSummary }) {
-  const isFinalizing = isJobFinalizing(job);
-  const active = isActiveJob(job.status) || isFinalizing;
+  const active = isActiveJob(job.status);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -125,7 +110,7 @@ function JobElapsed({ job }: { job: JobSummary }) {
   const start = job.started_at ? new Date(job.started_at.endsWith("Z") ? job.started_at : job.started_at + "Z").getTime() : null;
   if (!start) return null;
 
-  const end = (job.completed_at && !isFinalizing)
+  const end = (job.completed_at && !active)
     ? new Date(job.completed_at.endsWith("Z") ? job.completed_at : job.completed_at + "Z").getTime()
     : now;
   const seconds = Math.max(0, Math.floor((end - start) / 1000));
@@ -149,7 +134,7 @@ export function JobProgressBars({ job, telemetry }: JobProgressBarsProps) {
   const overallPct = job.progress_percent;
   const dlPct = telemetry?.download?.percent ?? 0;
   const isDownloading = job.status === "downloading";
-  const isFinalizing = isJobFinalizing(job);
+  const isFinalizing = job.status === "finalizing";
 
   return (
     <div className="space-y-1.5 w-full">
@@ -671,9 +656,8 @@ export function JobCard({
 }: JobCardProps) {
   const active = isActiveJob(job.status);
   const isInterrupted = job.status === "failed" && !!job.error_message && job.error_message.includes("Server restarted");
-  const isFinalizing = isJobFinalizing(job);
   const canRetry = job.status === "failed" || job.status === "cancelled";
-  const canCancel = active || isFinalizing;
+  const canCancel = active;
 
   return (
     <div

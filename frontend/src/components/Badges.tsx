@@ -60,10 +60,8 @@ const statusConfig: Record<JobStatus, { label: string; className: string }> = {
   failed:       { label: "Failed",       className: "badge-red" },
   cancelled:    { label: "Cancelled",    className: "badge-yellow" },
   skipped:      { label: "Skipped",      className: "bg-orange-500/15 text-orange-400" },
+  finalizing:   { label: "Finalising",   className: "bg-amber-500/15 text-amber-400" },
 };
-
-/** Job types whose pipelines dispatch deferred post-processing tasks. */
-const DEFERRED_JOB_TYPES = new Set(["import_url", "rescan", "library_import_video", "playlist_import"]);
 
 interface StatusBadgeProps {
   status: JobStatus;
@@ -75,21 +73,7 @@ interface StatusBadgeProps {
   updatedAt?: string | null;
 }
 
-export function StatusBadge({ status, className, jobType, currentStep, errorMessage, updatedAt }: StatusBadgeProps) {
-  // Only import/rescan pipelines have deferred tasks that warrant a "Finalising" state.
-  // All other complete jobs show "Complete" regardless of current_step value.
-  if (status === "complete" && jobType && DEFERRED_JOB_TYPES.has(jobType) && currentStep) {
-    const stepLower = currentStep.toLowerCase();
-    const isTerminal = stepLower.endsWith("complete") || currentStep.startsWith("All ") || currentStep.startsWith("Pending review");
-    if (!isTerminal && updatedAt) {
-      const toMs = (ts: string) => new Date(ts.endsWith("Z") ? ts : ts + "Z").getTime();
-      const updAgeMs = Date.now() - toMs(updatedAt);
-      // Deferred tasks are still actively running (updated within last 2 minutes)
-      if (updAgeMs < 120_000) {
-        return <span className={cn("bg-amber-500/15 text-amber-400", className)}>Finalising</span>;
-      }
-    }
-  }
+export function StatusBadge({ status, className, errorMessage }: StatusBadgeProps) {
   const isInterrupted = status === "failed" && !!errorMessage && errorMessage.includes("Server restarted");
   if (isInterrupted) {
     return <span className={cn("bg-amber-500/15 text-amber-400", className)}>Interrupted</span>;

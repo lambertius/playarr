@@ -577,19 +577,29 @@ async def _finalizing_watchdog():
             # Use naive UTC to match the naive datetimes stored by SQLite
             cutoff = datetime.utcnow() - timedelta(seconds=_FINALIZING_WATCHDOG_MAX_AGE)
             with SASession(engine) as db:
+                from sqlalchemy import or_, and_
                 stuck = db.query(ProcessingJob).filter(
-                    ProcessingJob.status == JobStatus.complete,
+                    or_(
+                        # Primary: jobs stuck in finalizing status
+                        ProcessingJob.status == JobStatus.finalizing,
+                        # Legacy: jobs with complete status but non-terminal step
+                        and_(
+                            ProcessingJob.status == JobStatus.complete,
+                            ProcessingJob.current_step != "Import complete",
+                            ProcessingJob.current_step.isnot(None),
+                        ),
+                    ),
                     ProcessingJob.job_type.in_(["import", "rescan", "batch_rescan", "batch_import", "library_import"]),
-                    ProcessingJob.current_step != "Import complete",
-                    ProcessingJob.current_step.isnot(None),
-                    ProcessingJob.completed_at < cutoff,
+                    ProcessingJob.updated_at < cutoff,
                 ).all()
                 if stuck:
                     for job in stuck:
-                        logger.info("Watchdog: unsticking job #%d (step=%s, completed_at=%s)",
-                                    job.id, job.current_step, job.completed_at)
+                        logger.info("Watchdog: unsticking job #%d (status=%s, step=%s, updated_at=%s)",
+                                    job.id, job.status, job.current_step, job.updated_at)
+                        job.status = JobStatus.complete
                         job.current_step = "Import complete"
                         job.progress_percent = 100
+                        job.completed_at = job.completed_at or datetime.utcnow()
                     db.commit()
                     logger.info(f"Watchdog: fixed {len(stuck)} job(s) stuck in Finalizing state")
         except Exception:
