@@ -261,6 +261,9 @@ export const playbackApi = {
   recordHistory: (videoId: number, durationWatched: number) =>
     api.post(`/playback/history/${videoId}`, null, { params: { duration_watched: durationWatched } }).then(r => r.data),
 
+  killStreams: () =>
+    api.post("/playback/kill-streams").then(r => r.data),
+
   uploadArtwork: (videoId: number, assetType: string, file: File) => {
     const form = new FormData();
     form.append("file", file);

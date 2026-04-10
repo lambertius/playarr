@@ -9,7 +9,7 @@
 ; Output: Output\PlayarrSetup.exe
 
 #define MyAppName "Playarr"
-#define MyAppVersion "1.9.11"
+#define MyAppVersion "1.9.12"
 #define MyAppPublisher "Playarr Contributors"
 #define MyAppURL "https://github.com/lambertius/playarr"
 #define MyAppExeName "Playarr.exe"
@@ -92,6 +92,7 @@ var
   ResultCode: Integer;
 begin
   Exec('taskkill', '/F /IM Playarr.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM ffmpeg.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := True;
 end;
 
@@ -100,6 +101,7 @@ var
   ResultCode: Integer;
 begin
   Exec('taskkill', '/F /IM Playarr.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM ffmpeg.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := True;
 end;
 

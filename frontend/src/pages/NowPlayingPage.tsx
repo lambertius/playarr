@@ -125,6 +125,7 @@ const ArtworkBackground = memo(function ArtworkBackground() {
   }, []);
 
   // Swap a random cell periodically with crossfade.
+  // Pauses when the tab is hidden to avoid wasted CPU/GPU work.
   useEffect(() => {
     if (artworkPool.length === 0) return;
     let alive = true;
@@ -133,6 +134,7 @@ const ArtworkBackground = memo(function ArtworkBackground() {
 
     // Decay penalties over time
     const decayInterval = setInterval(() => {
+      if (document.hidden) return;  // skip decay when tab hidden
       const map = penaltyMapRef.current;
       for (const [url, val] of map) {
         const next = val * 0.92; // decay ~8% per tick
@@ -155,7 +157,8 @@ const ArtworkBackground = memo(function ArtworkBackground() {
 
       outerTimeout = setTimeout(() => {
         if (!alive) return;
-        if (!artChangeEnabledRef.current) { scheduleSwap(); return; }
+        // Skip swap work when tab is hidden or animation disabled
+        if (document.hidden || !artChangeEnabledRef.current) { scheduleSwap(); return; }
         const count = cellCountRef.current;
         const pool = poolRef.current;
         if (pool.length === 0 || count === 0) { scheduleSwap(); return; }
@@ -259,12 +262,14 @@ const ArtworkBackground = memo(function ArtworkBackground() {
                   <img
                     src={cell.url}
                     alt=""
+                    decoding="async"
                     className="absolute inset-0 w-full h-full object-cover"
                   />
                   {cell.nextUrl && (
                     <img
                       src={cell.nextUrl}
                       alt=""
+                      decoding="async"
                       className="absolute inset-0 w-full h-full object-cover"
                       style={{ animation: `artwork-fade-in ${fadeDuration}s ease-in-out forwards` }}
                     />
@@ -283,19 +288,21 @@ const ArtworkBackground = memo(function ArtworkBackground() {
                   <img
                     src={cell.url}
                     alt=""
+                    decoding="async"
                     className="absolute inset-0 w-full h-full object-cover"
                     style={{ opacity: 1, animation: `artwork-flip-hide ${fadeDuration}s step-end forwards` }}
                   />
                   <img
                     src={cell.nextUrl}
                     alt=""
+                    decoding="async"
                     className="absolute inset-0 w-full h-full object-cover"
                     style={{ opacity: 0, animation: `artwork-flip-show ${fadeDuration}s step-end forwards` }}
                   />
                 </div>
               )}
               {cell.transition === "flip" && !cell.nextUrl && (
-                <img src={cell.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                <img src={cell.url} alt="" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
               )}
               {/* Spin transition: tile spins 360°, art swaps at midpoint */}
               {cell.transition === "spin" && cell.nextUrl && (
@@ -306,19 +313,21 @@ const ArtworkBackground = memo(function ArtworkBackground() {
                   <img
                     src={cell.url}
                     alt=""
+                    decoding="async"
                     className="absolute inset-0 w-full h-full object-cover"
                     style={{ opacity: 1, animation: `artwork-spin-hide ${fadeDuration}s step-end forwards` }}
                   />
                   <img
                     src={cell.nextUrl}
                     alt=""
+                    decoding="async"
                     className="absolute inset-0 w-full h-full object-cover"
                     style={{ opacity: 0, animation: `artwork-spin-show ${fadeDuration}s step-end forwards` }}
                   />
                 </div>
               )}
               {cell.transition === "spin" && !cell.nextUrl && (
-                <img src={cell.url} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                <img src={cell.url} alt="" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
               )}
             </div>
           ) : null,
@@ -398,8 +407,10 @@ export function NowPlayingPage() {
     if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
     if (overlayFadeTimerRef.current) clearTimeout(overlayFadeTimerRef.current);
 
-    // Fetch the full video detail
+    // Fetch the full video detail — abort on rapid track changes
+    let cancelled = false;
     libraryApi.get(track.videoId).then((detail) => {
+      if (cancelled) return;  // stale response from previous track
       setOverlayDetail(detail);
       setOverlayFading(false);
       setOverlayVisible(true);
@@ -418,6 +429,7 @@ export function NowPlayingPage() {
     }).catch(() => {});
 
     return () => {
+      cancelled = true;
       if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
       if (overlayFadeTimerRef.current) clearTimeout(overlayFadeTimerRef.current);
     };

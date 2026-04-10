@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.9.12] - 2026-04-10
+
+### Fixed
+- **Playback: Orphaned FFmpeg Streams** — stream generator `finally` blocks used `process.wait()` which waited for FFmpeg to finish naturally; rapid track changes accumulated zombie processes; changed to `process.kill()` for immediate cleanup on client disconnect
+- **Playback: Background Animation Jitter** — artwork grid swapped 36-72 images with synchronous decoding on the main thread; added `decoding="async"` to all grid images and paused swap work when the tab is hidden
+- **Playback: Artwork DB Query Overhead** — every poster/artwork/thumb request ran a fresh DB query even on cache hits; added in-memory artwork cache with 120s TTL to eliminate repeated queries from the background animation grid
+- **Playback: Stale Overlay Metadata** — track change did not cancel in-flight metadata fetch requests; added abort guard to prevent stale API responses from updating state
+- **Video Editor: Encode Jobs Stalling on Cancel** — `_run_encode_job` never checked `is_cancelled()`, so FFmpeg encoding continued after cancel; added cancellation check in progress callback and `process.kill()` on callback error
+- **Video Editor: Retry Not Working** — `retry_job()` had no handler for `video_editor_encode` job type; added handler that reads params from `job.input_params` and spawns a new encode thread
+- **Video Editor: Persistent Encoding Bar** — frontend only cleared encode state on "complete" or "failed", not "cancelled"; added cancelled status handling and stopped polling on terminal statuses
+- **Video Editor: Missing Progress Logs** — `log_text` was only written on successful encode; now written for failed and cancelled jobs too
+- **Video Editor: DB Write Throttle** — FFmpeg progress callback wrote to DB on every output line (~10/sec); throttled to 1-second intervals
+
+### Added
+- **Playback: Kill Streams Endpoint** — new `POST /api/playback/kill-streams` endpoint that terminates all active FFmpeg streaming processes; called by the frontend on track change to proactively kill orphaned processes
+- **Startup: Zombie FFmpeg Cleanup** — on Windows, `taskkill /F /IM ffmpeg.exe` runs at startup and during installer setup/uninstall to clear any orphaned processes from a previous crash
+
 ## [1.9.11] - 2026-04-09
 
 ### Added

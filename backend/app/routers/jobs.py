@@ -924,6 +924,7 @@ def get_job_log(job_id: int, db: Session = Depends(get_db)):
 @router.post("/{job_id}/retry", response_model=JobOut)
 def retry_job(job_id: int, db: Session = Depends(get_db)):
     """Retry a failed or cancelled job."""
+    import os
     job = db.query(ProcessingJob).get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -932,6 +933,9 @@ def retry_job(job_id: int, db: Session = Depends(get_db)):
 
     job.status = JobStatus.queued
     job.error_message = None
+    job.progress_percent = 0
+    job.current_step = None
+    job.log_text = None
     job.retry_count += 1
     db.commit()
 
@@ -961,6 +965,30 @@ def retry_job(job_id: int, db: Session = Depends(get_db)):
     elif job.job_type == "redownload" and job.video_id:
         format_spec = (job.input_params or {}).get("format_spec")
         dispatch_task(redownload_video_task, job_id=job.id, video_id=job.video_id, format_spec=format_spec)
+    elif job.job_type == "video_editor_encode" and job.video_id:
+        # Re-dispatch encode in a background thread
+        import threading
+        from app.routers.video_editor import _run_encode_job
+        video = db.query(VideoItem).get(job.video_id)
+        if not video or not video.file_path or not os.path.isfile(video.file_path):
+            job.status = JobStatus.failed
+            job.error_message = "Video file not found on disk — cannot retry"
+            db.commit()
+        else:
+            params = job.input_params or {}
+            t = threading.Thread(
+                target=_run_encode_job,
+                args=(job.id, video.id, video.file_path,
+                      params.get("crop"), params.get("target_dar"),
+                      params.get("crf", 18), params.get("preset", "medium"),
+                      params.get("audio_passthrough", True)),
+                kwargs={"trim_start": params.get("trim_start"),
+                        "trim_end": params.get("trim_end"),
+                        "audio_codec": params.get("audio_codec"),
+                        "audio_bitrate": params.get("audio_bitrate")},
+                daemon=True,
+            )
+            t.start()
     elif job.job_type == "playlist_import" and job.input_url:
         # Re-submit as a new playlist import (retry the parent)
         job.status = JobStatus.failed

@@ -30,6 +30,47 @@ logger = logging.getLogger(__name__)
 # poster fetches from exhausting the DB connection pool when browsing
 # large library pages (48–192 cards per page).
 
+# In-memory artwork path cache: (video_id, asset_type) → (file_path, file_hash, mtime)
+# Avoids a DB query for every image request from the background animation grid.
+_artwork_cache: dict[tuple[int, str], tuple[str, str | None, float]] = {}
+_artwork_cache_lock = threading.Lock()
+_ARTWORK_CACHE_TTL = 120  # seconds
+
+import time as _time
+
+def _lookup_artwork_cached(db, video_id: int, asset_type: str):
+    """Return (file_path, file_hash) from cache or DB.  Returns None if not found."""
+    import time as _t
+    key = (video_id, asset_type)
+    now = _t.monotonic()
+    with _artwork_cache_lock:
+        entry = _artwork_cache.get(key)
+        if entry and (now - entry[2]) < _ARTWORK_CACHE_TTL:
+            fp, fh, _ = entry
+            if os.path.isfile(fp):
+                return fp, fh
+            else:
+                del _artwork_cache[key]
+
+    # Cache miss — query DB
+    asset = (
+        db.query(MediaAsset)
+        .filter(
+            MediaAsset.video_id == video_id,
+            MediaAsset.asset_type == asset_type,
+            MediaAsset.status == "valid",
+        )
+        .first()
+    )
+    if not asset or not os.path.isfile(asset.file_path):
+        return None
+    fh = asset.file_hash
+    fp = asset.file_path
+    with _artwork_cache_lock:
+        _artwork_cache[key] = (fp, fh, now)
+    return fp, fh
+
+
 def _cached_file_response(asset, request: Request) -> Response:
     """Return a FileResponse with cache headers + ETag for a MediaAsset."""
     etag = f'"{asset.file_hash}"' if getattr(asset, "file_hash", None) else None
@@ -44,6 +85,19 @@ def _cached_file_response(asset, request: Request) -> Response:
     if etag:
         headers["ETag"] = etag
     return FileResponse(asset.file_path, headers=headers)
+
+
+def _cached_file_response_from_cache(file_path: str, file_hash: str | None, request: Request) -> Response:
+    """Return a FileResponse from cached path+hash, skipping DB entirely."""
+    etag = f'"{file_hash}"' if file_hash else None
+    if etag:
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match.strip() == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+    headers = {"Cache-Control": "public, max-age=86400"}
+    if etag:
+        headers["ETag"] = etag
+    return FileResponse(file_path, headers=headers)
 
 
 # ── Active streaming process registry ──────────────────────
@@ -316,19 +370,10 @@ async def get_asset(asset_id: int, request: Request, db: Session = Depends(get_d
 @router.get("/poster/{video_id}")
 async def get_poster(video_id: int, request: Request, db: Session = Depends(get_db)):
     """Get the poster image for a video. Only serves valid assets."""
-    asset = (
-        db.query(MediaAsset)
-        .filter(
-            MediaAsset.video_id == video_id,
-            MediaAsset.asset_type == "poster",
-            MediaAsset.status == "valid",
-        )
-        .first()
-    )
-    if not asset or not os.path.isfile(asset.file_path):
+    cached = _lookup_artwork_cached(db, video_id, "poster")
+    if not cached:
         raise HTTPException(status_code=404, detail="Poster not found")
-
-    return _cached_file_response(asset, request)
+    return _cached_file_response_from_cache(cached[0], cached[1], request)
 
 
 @router.get("/artwork/{video_id}/{asset_type}")
@@ -337,36 +382,19 @@ async def get_artwork(video_id: int, asset_type: str, request: Request, db: Sess
     allowed_types = {"artist_thumb", "album_thumb"}
     if asset_type not in allowed_types:
         raise HTTPException(status_code=400, detail=f"asset_type must be one of {allowed_types}")
-    asset = (
-        db.query(MediaAsset)
-        .filter(
-            MediaAsset.video_id == video_id,
-            MediaAsset.asset_type == asset_type,
-            MediaAsset.status == "valid",
-        )
-        .first()
-    )
-    if not asset or not os.path.isfile(asset.file_path):
+    cached = _lookup_artwork_cached(db, video_id, asset_type)
+    if not cached:
         raise HTTPException(status_code=404, detail=f"{asset_type} not found")
-    return _cached_file_response(asset, request)
+    return _cached_file_response_from_cache(cached[0], cached[1], request)
 
 
 @router.get("/thumb/{video_id}")
 async def get_video_thumb(video_id: int, request: Request, db: Session = Depends(get_db)):
     """Get the video player thumbnail (selected scene analysis frame). Only serves valid assets."""
-    asset = (
-        db.query(MediaAsset)
-        .filter(
-            MediaAsset.video_id == video_id,
-            MediaAsset.asset_type == "video_thumb",
-            MediaAsset.status == "valid",
-        )
-        .first()
-    )
-    if not asset or not os.path.isfile(asset.file_path):
+    cached = _lookup_artwork_cached(db, video_id, "video_thumb")
+    if not cached:
         raise HTTPException(status_code=404, detail="Video thumbnail not found")
-
-    return _cached_file_response(asset, request)
+    return _cached_file_response_from_cache(cached[0], cached[1], request)
 
 
 @router.put("/artwork/{video_id}/{asset_type}")
@@ -506,6 +534,20 @@ async def delete_artwork(
     return {"detail": "Artwork deleted", "asset_type": asset_type}
 
 
+@router.post("/kill-streams")
+async def kill_all_streams():
+    """Kill all active streaming FFmpeg processes.
+
+    Called by the frontend on track change to ensure old streams don't linger.
+    """
+    total = 0
+    with _streams_lock:
+        keys = list(_active_streams.keys())
+    for key in keys:
+        total += kill_streams_for_file(key)
+    return {"killed": total}
+
+
 @router.post("/history/{video_id}")
 def record_playback(
     video_id: int,
@@ -570,12 +612,30 @@ def _stream_remuxed(
                 yield chunk
         finally:
             _unregister_stream(file_path, process)
-            process.stdout.close()
-            process.wait()
-            if process.returncode and process.returncode != 0:
-                stderr = process.stderr.read().decode(errors="replace")
-                logger.warning(f"Remux exited {process.returncode}: {stderr[:500]}")
-            process.stderr.close()
+            # Force-kill immediately on disconnect to prevent orphaned processes
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
+            try:
+                if process.returncode and process.returncode not in (0, -9, -15, 4294967295):
+                    stderr = process.stderr.read().decode(errors="replace")
+                    if stderr.strip():
+                        logger.warning(f"Remux exited {process.returncode}: {stderr[:500]}")
+            except Exception:
+                pass
+            try:
+                process.stderr.close()
+            except OSError:
+                pass
 
     return StreamingResponse(
         _generate(),
@@ -628,12 +688,30 @@ def _stream_transcoded(file_path: str, audio_bitrate: str = "256k") -> Streaming
                 yield chunk
         finally:
             _unregister_stream(file_path, process)
-            process.stdout.close()
-            process.wait()
-            if process.returncode and process.returncode != 0:
-                stderr = process.stderr.read().decode(errors="replace")
-                logger.warning(f"Transcode exited {process.returncode}: {stderr[:500]}")
-            process.stderr.close()
+            # Force-kill immediately on disconnect to prevent orphaned processes
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
+            try:
+                if process.returncode and process.returncode not in (0, -9, -15, 4294967295):
+                    stderr = process.stderr.read().decode(errors="replace")
+                    if stderr.strip():
+                        logger.warning(f"Transcode exited {process.returncode}: {stderr[:500]}")
+            except Exception:
+                pass
+            try:
+                process.stderr.close()
+            except OSError:
+                pass
 
     return StreamingResponse(
         _generate(),

@@ -367,18 +367,28 @@ def encode_video(
 
     # Read progress from stdout
     out_time_us = 0
-    while True:
-        line = process.stdout.readline()
-        if not line and process.poll() is not None:
-            break
-        if line.startswith("out_time_us="):
-            try:
-                out_time_us = int(line.split("=")[1].strip())
-                if effective_duration and progress_callback:
-                    pct = min(100.0, (out_time_us / 1_000_000) / effective_duration * 100)
-                    progress_callback(pct)
-            except (ValueError, IndexError):
-                pass
+    try:
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line.startswith("out_time_us="):
+                try:
+                    out_time_us = int(line.split("=")[1].strip())
+                    if effective_duration and progress_callback:
+                        pct = min(100.0, (out_time_us / 1_000_000) / effective_duration * 100)
+                        progress_callback(pct)
+                except (ValueError, IndexError):
+                    pass
+    except Exception:
+        # Kill FFmpeg on callback error (e.g. cancellation)
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except Exception:
+            process.kill()
+        stderr_tmp.close()
+        raise
 
     rc = process.wait()
     elapsed = time.time() - start_time

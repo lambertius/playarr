@@ -592,6 +592,9 @@ export function VideoEditorPage() {
     } else if (status === "failed") {
       toast({ type: "error", title: `Encode failed: ${encodeStatus.data.error ?? "Unknown error"}` });
       setEncodeJobs(prev => prev.filter(j => j.jobId !== activeEncodeJob.jobId));
+    } else if (status === "cancelled") {
+      toast({ type: "warning", title: `Encode cancelled: ${encodeStatus.data.error ?? "Cancelled by user"}` });
+      setEncodeJobs(prev => prev.filter(j => j.jobId !== activeEncodeJob.jobId));
     }
   }, [encodeStatus.data, activeEncodeJob, queueItems, toast, refetchQueue, removeFromQueue]);
 

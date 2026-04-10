@@ -572,8 +572,11 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
     """Execute a single encode job (designed to run in a background thread)."""
     from app.services.video_editor import encode_video
     from app.services.media_analyzer import extract_quality_signature
+    from app.worker import is_cancelled
+    import time as _time
 
     sdb = SessionLocal()
+    temp_output = None
     try:
         j = sdb.query(ProcessingJob).get(job_id)
         j.status = JobStatus.remuxing
@@ -586,7 +589,16 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
         temp_output = f"{base}_edited.mp4"
         final_path = f"{base}.mp4" if ext.lower() != ".mp4" else input_path
 
+        _last_db_update = [0.0]  # throttle DB writes to once per second
+
         def _progress(pct):
+            # Check cancellation — raises to abort FFmpeg
+            if is_cancelled(job_id):
+                raise RuntimeError("Cancelled by user")
+            now = _time.monotonic()
+            if now - _last_db_update[0] < 1.0 and int(pct) < 100:
+                return  # throttle: skip DB write
+            _last_db_update[0] = now
             j2 = sdb.query(ProcessingJob).get(job_id)
             j2.progress_percent = int(pct)
             j2.current_step = f"Encoding... {int(pct)}%"
@@ -714,15 +726,25 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
 
     except Exception as e:
         logger.error(f"Encode job {job_id} failed: {e}", exc_info=True)
+        # Clean up partial temp file
+        if temp_output:
+            try:
+                if os.path.isfile(temp_output):
+                    os.remove(temp_output)
+                    logger.info(f"Cleaned up partial encode file: {temp_output}")
+            except OSError:
+                pass
         # Use a fresh session to guarantee the failure status is persisted,
         # even if the original session is in a bad state after a rollback.
         sdb.close()
         sdb = SessionLocal()
         try:
             j = sdb.query(ProcessingJob).get(job_id)
-            j.status = JobStatus.failed
+            is_cancel = "cancelled by user" in str(e).lower()
+            j.status = JobStatus.cancelled if is_cancel else JobStatus.failed
             j.error_message = str(e)[:2000]
             j.completed_at = datetime.now(timezone.utc)
+            j.log_text = f"Encode {'cancelled' if is_cancel else 'failed'} after {j.progress_percent or 0}% progress\n\nError: {str(e)[:1000]}"
             sdb.commit()
         except Exception:
             logger.error(f"Failed to mark encode job {job_id} as failed", exc_info=True)
