@@ -370,6 +370,27 @@ def _setup_file_logging():
     logger.info(f"File logging enabled: {log_file}")
 
 
+def _kill_zombie_ffmpeg():
+    """Kill any orphaned ffmpeg processes left over from a previous crash.
+
+    On Windows, a hard restart can leave ffmpeg.exe streaming or encoding
+    processes alive.  These zombies consume CPU and hold file locks.
+    """
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["taskkill", "/F", "/IM", "ffmpeg.exe"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # taskkill returns 0 on success, 128 if no matching processes
+        if result.returncode == 0:
+            logger.info("Startup: killed orphaned ffmpeg.exe process(es)")
+        else:
+            logger.debug("Startup: no orphaned ffmpeg.exe processes found")
+    except Exception as e:
+        logger.debug(f"Startup ffmpeg cleanup skipped: {e}")
+
+
 def _cleanup_stale_jobs():
     """Mark orphaned in-progress jobs as failed on startup.
 
@@ -1006,6 +1027,9 @@ async def lifespan(app: FastAPI):
     # Stamp the current application version into the DB and check for
     # forward-compatibility (newer DB accessed by older app).
     _stamp_db_version(engine)
+
+    # Kill zombie ffmpeg processes left over from a previous crash/restart
+    _kill_zombie_ffmpeg()
 
     # Mark orphaned in-progress jobs as failed (their threads died on restart)
     _cleanup_stale_jobs()

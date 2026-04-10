@@ -36,6 +36,10 @@ export function AudioManager() {
       return;
     }
     if (videoId !== prevVideoIdRef.current) {
+      // Kill any lingering FFmpeg streaming processes from the previous track
+      if (prevVideoIdRef.current !== null) {
+        playbackApi.killStreams().catch(() => {});
+      }
       el.src = playbackApi.streamUrl(videoId);
       el.load();
       prevVideoIdRef.current = videoId;

@@ -373,9 +373,12 @@
 |--------|------|---------|
 | GET | `/stream/{video_id}` | Stream video (Range header support, auto-remux MKV→fMP4, audio transcode if needed) |
 | GET | `/preview/{video_id}` | Hover preview clip (short looping video) |
-| GET | `/poster/{video_id}` | Poster image |
+| GET | `/poster/{video_id}` | Poster image (in-memory cache, 120s TTL) |
+| GET | `/artwork/{video_id}` | Artist/album artwork (in-memory cache, 120s TTL) |
+| GET | `/thumb/{video_id}` | Video thumbnail |
 | GET | `/artwork-ids` | List of video IDs that have real artwork |
 | POST | `/history` | Record playback history entry |
+| POST | `/kill-streams` | Kill all active FFmpeg streaming processes (called on track change) |
 
 ### 5.4 Settings (`/api/settings`)
 

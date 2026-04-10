@@ -1099,7 +1099,7 @@ export function useEditorEncodeStatus(jobId: number | null) {
     enabled: jobId != null && jobId > 0,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status === "complete" || status === "failed" ? false : 2000;
+      return status === "complete" || status === "failed" || status === "cancelled" ? false : 2000;
     },
   });
 }
