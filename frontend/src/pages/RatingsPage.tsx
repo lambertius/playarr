@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Star, Film, Music, PartyPopper, ListPlus, Trash2, RefreshCw } from "lucide-react";
 import { useSongRatings, useVideoRatings, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks/queries";
 import { playbackApi } from "@/lib/api";
@@ -109,8 +109,11 @@ function RatingColumn({
 
 export function RatingsPage() {
   const [filters, setFilters] = useState<FacetFilterParams>({});
-  const songRatings = useSongRatings(filters);
-  const videoRatings = useVideoRatings(filters);
+  const [searchParams] = useSearchParams();
+  const searchTerm = searchParams.get("search") ?? "";
+  const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
+  const songRatings = useSongRatings(mergedFilters);
+  const videoRatings = useVideoRatings(mergedFilters);
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
   const navigate = useNavigate();
@@ -205,7 +208,7 @@ export function RatingsPage() {
           {sortDir === "desc" ? "High→Low" : "Low→High"}
         </button>
         <button
-          onClick={() => launchParty(filters)}
+          onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
           className="btn-sm text-xs font-semibold px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 text-white hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 transition-all shadow-lg shadow-purple-500/25 flex items-center gap-1.5"
         >

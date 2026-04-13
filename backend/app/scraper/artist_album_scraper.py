@@ -137,14 +137,14 @@ def search_artist_wikipedia(artist: str) -> Optional[str]:
     return search_wikipedia_artist(artist)
 
 
-def scrape_artist_artwork(artist: str) -> Dict[str, Any]:
+def scrape_artist_artwork(artist: str, *, wiki_url: Optional[str] = None) -> Dict[str, Any]:
     """
     Scrape Wikipedia for an artist image and basic info.
 
     Returns dict:
-        image_url: str | None   Ã¢â‚¬â€ URL of artist photo/logo
-        fanart_url: str | None  Ã¢â‚¬â€ secondary image if available
-        bio: str | None         Ã¢â‚¬â€ first paragraph of biography
+        image_url: str | None   — URL of artist photo/logo
+        fanart_url: str | None  — secondary image if available
+        bio: str | None         — first paragraph of biography
         genres: list[str]
     """
     result: Dict[str, Any] = {
@@ -154,7 +154,7 @@ def scrape_artist_artwork(artist: str) -> Dict[str, Any]:
         "genres": [],
     }
 
-    url = search_artist_wikipedia(artist)
+    url = wiki_url or search_artist_wikipedia(artist)
     if not url:
         return result
 
@@ -624,7 +624,7 @@ def _strip_edition_suffix(album: str) -> Optional[str]:
     return cleaned if cleaned and cleaned.lower() != album.lower() else None
 
 
-def get_artist_artwork_wikipedia(artist: str, mb_artist_id: Optional[str] = None) -> Dict[str, Any]:
+def get_artist_artwork_wikipedia(artist: str, mb_artist_id: Optional[str] = None, *, wiki_url: Optional[str] = None) -> Dict[str, Any]:
     """Get artist artwork from Wikipedia only (no MusicBrainz)."""
     result: Dict[str, Any] = {
         "image_url": None, "fanart_url": None, "bio": None,
@@ -637,7 +637,7 @@ def get_artist_artwork_wikipedia(artist: str, mb_artist_id: Optional[str] = None
     primary, _ = parse_multi_artist(artist)
     if primary != artist:
         artist = primary
-    wiki = scrape_artist_artwork(artist)
+    wiki = scrape_artist_artwork(artist, wiki_url=wiki_url)
     result["image_url"] = wiki.get("image_url")
     result["fanart_url"] = wiki.get("fanart_url")
     result["bio"] = wiki.get("bio")
@@ -670,7 +670,7 @@ def get_artist_artwork_musicbrainz(artist: str, mb_artist_id: Optional[str] = No
     return result
 
 
-def get_artist_artwork(artist: str, mb_artist_id: Optional[str] = None) -> Dict[str, Any]:
+def get_artist_artwork(artist: str, mb_artist_id: Optional[str] = None, *, wiki_url: Optional[str] = None) -> Dict[str, Any]:
     """
     Get artist artwork and metadata using MusicBrainz first, Wikipedia as fallback.
 
@@ -707,7 +707,7 @@ def get_artist_artwork(artist: str, mb_artist_id: Optional[str] = None) -> Dict[
         logger.info(f"Using MusicBrainz image for artist: {artist}")
 
     # Wikipedia (bio, genres, and image fallback)
-    wiki = scrape_artist_artwork(artist)
+    wiki = scrape_artist_artwork(artist, wiki_url=wiki_url)
     if not result["image_url"] and wiki.get("image_url"):
         result["image_url"] = wiki["image_url"]
         logger.info(f"Using Wikipedia image for artist: {artist}")

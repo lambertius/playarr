@@ -272,6 +272,82 @@ async def stream_video(video_id: int, request: Request, db: Session = Depends(ge
     )
 
 
+@router.get("/stream-video-only/{video_id}")
+async def stream_video_only(video_id: int, request: Request, db: Session = Depends(get_db)):
+    """
+    Lightweight video-only stream for muted playback (e.g. the NowPlaying
+    visual feed).  Serves the raw file directly for MP4/WebM since the
+    browser can decode the video track even when the audio codec is
+    unsupported — the element is muted so audio is irrelevant.
+    Only MKV containers are remuxed (video-copy, no audio) because
+    Chrome cannot play the MKV container at all.
+    """
+    item = db.query(VideoItem).get(video_id)
+    if not item or not item.file_path or not os.path.isfile(item.file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    from app.config import get_settings
+    all_dirs = get_settings().get_all_library_dirs()
+    norm_path = os.path.normcase(os.path.normpath(item.file_path))
+    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
+               for d in all_dirs):
+        raise HTTPException(status_code=403,
+                            detail="Video file is outside configured library directories")
+
+    file_path = item.file_path
+    ext_lower = os.path.splitext(file_path)[1].lower()
+
+    # MKV needs remux to MP4 (video-only, no audio transcode)
+    if ext_lower in (".mkv",):
+        return _stream_remuxed_video_only(file_path)
+
+    # MP4/WebM: serve raw file — muted element ignores audio track
+    file_size = os.path.getsize(file_path)
+    mime_map = {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".avi": "video/x-msvideo",
+    }
+    content_type = mime_map.get(ext_lower, "video/mp4")
+
+    range_header = request.headers.get("range")
+    if range_header:
+        start, end = _parse_range(range_header, file_size)
+        chunk_size = end - start + 1
+
+        def iter_file():
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    read_size = min(remaining, 1024 * 1024)
+                    data = f.read(read_size)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            iter_file(),
+            status_code=206,
+            media_type=content_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(chunk_size),
+            },
+        )
+
+    return FileResponse(
+        file_path,
+        media_type=content_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        },
+    )
+
+
 @router.get("/stream-archive")
 async def stream_archive(path: str, request: Request):
     """Stream an archived video file by its direct path (validated to be inside an archive dir)."""
@@ -480,6 +556,18 @@ async def upload_artwork(
         )
         db.add(new_asset)
 
+    # Clear missing_artwork review flag if this upload completes the artwork set
+    if asset_type == "poster" and item.review_category in ("missing_artwork", "artwork_incomplete"):
+        from app.ai.models import AIThumbnail
+        has_thumb = db.query(AIThumbnail.id).filter(
+            AIThumbnail.video_id == video_id,
+            AIThumbnail.is_selected == True,  # noqa: E712
+        ).first() is not None
+        if has_thumb:
+            item.review_status = "none"
+            item.review_reason = None
+            item.review_category = None
+
     db.commit()
     return {"detail": "Artwork uploaded", "asset_type": asset_type, "path": dest_path}
 
@@ -532,6 +620,39 @@ async def delete_artwork(
     db.delete(asset)
     db.commit()
     return {"detail": "Artwork deleted", "asset_type": asset_type}
+
+
+@router.patch("/artwork/{video_id}/{asset_type}/crop")
+async def update_artwork_crop(
+    video_id: int,
+    asset_type: str,
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    """Update crop position for a video's artwork."""
+    import re
+    allowed_types = {"poster", "artist_thumb", "album_thumb"}
+    if asset_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"asset_type must be one of {allowed_types}")
+
+    crop_position = body.get("crop_position")
+    if crop_position is not None:
+        if not re.match(r"^\d{1,3}%\s+\d{1,3}%$", crop_position):
+            raise HTTPException(status_code=400, detail="crop_position must be like '50% 30%'")
+
+    asset = (
+        db.query(MediaAsset)
+        .filter(MediaAsset.video_id == video_id, MediaAsset.asset_type == asset_type, MediaAsset.status == "valid")
+        .first()
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    asset.crop_position = crop_position
+    db.commit()
+    # Invalidate artwork cache
+    _artwork_cache.pop((video_id, asset_type), None)
+    return {"detail": "Crop updated", "crop_position": crop_position}
 
 
 @router.post("/kill-streams")
@@ -647,6 +768,72 @@ def _stream_remuxed(
     )
 
 
+def _stream_remuxed_video_only(file_path: str) -> StreamingResponse:
+    """
+    Remux video stream only (no audio) from MKV to fragmented MP4.
+    Used for the muted visual feed — avoids audio transcoding overhead.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+    ffmpeg = settings.resolved_ffmpeg
+
+    cmd = [
+        ffmpeg,
+        "-i", file_path,
+        "-c:v", "copy",
+        "-an",  # strip audio entirely
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
+        "-v", "warning",
+        "pipe:1",
+    ]
+
+    logger.info(f"Video-only remux (MKV→MP4, no audio): {os.path.basename(file_path)}")
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **_POPEN_FLAGS,
+    )
+    _register_stream(file_path, process)
+
+    def _generate():
+        try:
+            while True:
+                chunk = process.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            _unregister_stream(file_path, process)
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
+            try:
+                process.stderr.close()
+            except OSError:
+                pass
+
+    return StreamingResponse(
+        _generate(),
+        media_type="video/mp4",
+        headers={
+            "Content-Type": "video/mp4",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 def _stream_transcoded(file_path: str, audio_bitrate: str = "256k") -> StreamingResponse:
     """
     Stream a video file with on-the-fly audio transcoding to AAC.
@@ -721,6 +908,187 @@ def _stream_transcoded(file_path: str, audio_bitrate: str = "256k") -> Streaming
             "Cache-Control": "no-cache",
         },
     )
+
+
+# ── Audio download ─────────────────────────────────────────
+# Windows Media Player POPM rating: 1→1, 2→64, 3→128, 4→196, 5→255
+_WMP_RATING_MAP = {1: 1, 2: 64, 3: 128, 4: 196, 5: 255}
+
+
+@router.get("/download-audio/{video_id}")
+async def download_audio(video_id: int, db: Session = Depends(get_db)):
+    """
+    Extract audio from a video as a tagged CBR MP3.
+    Matches source audio bitrate/channels. Tags with metadata + poster art.
+    """
+    import tempfile
+    import shutil
+
+    from app.config import get_settings
+
+    item = db.query(VideoItem).get(video_id)
+    if not item or not item.file_path or not os.path.isfile(item.file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    # Security: verify file is within library dirs
+    settings = get_settings()
+    all_dirs = settings.get_all_library_dirs()
+    norm_path = os.path.normcase(os.path.normpath(item.file_path))
+    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
+               for d in all_dirs):
+        raise HTTPException(status_code=403,
+                            detail="Video file is outside configured library directories")
+
+    ffmpeg = settings.resolved_ffmpeg
+
+    # Determine audio bitrate and channels from quality signature
+    qs = item.quality_signature
+    audio_bitrate_kbps = 192  # default
+    audio_channels = 2        # default stereo
+    if qs:
+        if qs.audio_bitrate:
+            # audio_bitrate is stored in bps, convert to kbps and clamp to
+            # standard CBR values
+            src_kbps = qs.audio_bitrate // 1000
+            cbr_options = [64, 96, 128, 160, 192, 224, 256, 320]
+            audio_bitrate_kbps = min(cbr_options, key=lambda x: abs(x - src_kbps))
+        if qs.audio_channels:
+            audio_channels = qs.audio_channels
+
+    # Build output filename
+    artist = item.artist or "Unknown Artist"
+    title = item.title or "Unknown Title"
+    safe_name = f"{artist} - {title}.mp3"
+    # Sanitize filename for Content-Disposition
+    for ch in r'<>:"/\\|?*':
+        safe_name = safe_name.replace(ch, "_")
+
+    tmp_dir = tempfile.mkdtemp(prefix="playarr_audio_")
+    mp3_path = os.path.join(tmp_dir, "output.mp3")
+
+    try:
+        # Step 1: Extract audio to CBR MP3
+        cmd = [
+            ffmpeg,
+            "-i", item.file_path,
+            "-vn",                          # no video
+            "-c:a", "libmp3lame",           # MP3 codec
+            "-b:a", f"{audio_bitrate_kbps}k",  # CBR bitrate
+            "-ac", str(audio_channels),     # match channel count
+            "-y",                           # overwrite
+            "-v", "warning",
+            mp3_path,
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300, **_POPEN_FLAGS,
+        )
+        if result.returncode != 0 or not os.path.isfile(mp3_path):
+            logger.error(f"FFmpeg audio extract failed: {result.stderr[:500]}")
+            raise HTTPException(status_code=500, detail="Audio extraction failed")
+
+        # Step 2: Tag the MP3 with metadata
+        _tag_mp3(mp3_path, item, db)
+
+        # Step 3: Stream the file back, then clean up
+        def _iter_and_cleanup():
+            try:
+                with open(mp3_path, "rb") as f:
+                    while True:
+                        chunk = f.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        file_size = os.path.getsize(mp3_path)
+        return StreamingResponse(
+            _iter_and_cleanup(),
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}"',
+                "Content-Length": str(file_size),
+                "Content-Type": "audio/mpeg",
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.exception(f"Audio download failed for video {video_id}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _tag_mp3(mp3_path: str, item: "VideoItem", db: Session):
+    """Apply ID3 tags to the MP3 file: artist, title, album, year, genre,
+    WMP-compliant star rating, and poster artwork."""
+    from mutagen.mp3 import MP3
+    from mutagen.id3 import (
+        ID3, TIT2, TPE1, TALB, TDRC, TCON, APIC, POPM, ID3NoHeaderError,
+    )
+
+    try:
+        audio = MP3(mp3_path, ID3=ID3)
+    except ID3NoHeaderError:
+        audio = MP3(mp3_path)
+        audio.add_tags()
+
+    tags = audio.tags
+
+    # Basic metadata
+    if item.title:
+        tags.add(TIT2(encoding=3, text=[item.title]))
+    if item.artist:
+        tags.add(TPE1(encoding=3, text=[item.artist]))
+
+    # Album = "[Song Title] Video"
+    album_title = f"{item.title} Video" if item.title else "Video"
+    tags.add(TALB(encoding=3, text=[album_title]))
+
+    if item.year:
+        tags.add(TDRC(encoding=3, text=[str(item.year)]))
+
+    # Genre — join all genres with semicolon
+    genres = [g.name for g in (item.genres or [])]
+    if genres:
+        tags.add(TCON(encoding=3, text=["; ".join(genres)]))
+
+    # WMP-compliant star rating via POPM frame
+    if item.song_rating and 1 <= item.song_rating <= 5:
+        wmp_val = _WMP_RATING_MAP.get(item.song_rating, 128)
+        tags.add(POPM(
+            email="Windows Media Player 9 Series",
+            rating=wmp_val,
+            count=0,
+        ))
+
+    # Poster artwork
+    poster = (
+        db.query(MediaAsset)
+        .filter(
+            MediaAsset.video_id == item.id,
+            MediaAsset.asset_type == "poster",
+        )
+        .first()
+    )
+    if poster and poster.file_path and os.path.isfile(poster.file_path):
+        try:
+            with open(poster.file_path, "rb") as img_f:
+                img_data = img_f.read()
+            ext = os.path.splitext(poster.file_path)[1].lower()
+            mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+            tags.add(APIC(
+                encoding=3,
+                mime=mime,
+                type=3,   # Cover (front)
+                desc="Cover",
+                data=img_data,
+            ))
+        except Exception as exc:
+            logger.warning(f"Failed to embed poster art: {exc}")
+
+    audio.save()
 
 
 def _parse_range(range_header: str, file_size: int):

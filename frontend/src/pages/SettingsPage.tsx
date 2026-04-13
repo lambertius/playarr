@@ -12,6 +12,7 @@ import { LogViewer } from "@/components/LogViewer";
 import { NewVideosSettings } from "@/components/new-videos/NewVideosSettings";
 import { AISettingsPanel } from "@/components/AISettingsPanel";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
+import { useFireworksStore } from "@/stores/fireworksStore";
 import {
   loadExclusions,
   saveExclusions,
@@ -268,7 +269,7 @@ const SETTING_META: Record<string, SettingMeta> = {
     group: "import",
     label: "YouTube Source Matching",
     description: "Pre-check YouTube source matching when adding or importing videos.",
-    tooltip: "When enabled, Playarr will search YouTube for the official music video and link it to the library entry. Useful for library-imported videos that don't have a source URL.",
+    tooltip: "When enabled, Playarr will search YouTube for the official music video and link it to the library entry. Videos that already have a YouTube link are automatically skipped — clear the existing link first to re-match.",
   },
   "import_scrape_tmvdb": {
     group: "import",
@@ -1569,6 +1570,7 @@ function LibraryMaintenanceContent() {
   const exportMutation = useLibraryExport();
   const [cleanDialogOpen, setCleanDialogOpen] = useState(false);
   const [exportMode, setExportMode] = useState<string>("skip_existing");
+  const [scanMode, setScanMode] = useState<string>("import_new");
 
   return (
     <>
@@ -1579,15 +1581,45 @@ function LibraryMaintenanceContent() {
             <div className="flex-1 min-w-0">
               <p className="text-sm text-text-secondary">Scan Library</p>
               <p className="text-xs text-text-muted leading-relaxed">
-                Scan the library directory for new files not tracked in the database. Creates library entries from NFO metadata or folder names.
+                Scan the library directory for new files not tracked in the database, or update existing entries from sidecar XMLs.
               </p>
+              <div className="flex flex-wrap gap-2 mt-2">
+                {[
+                  { value: "import_new", label: "Import New", desc: "Import untracked files" },
+                  { value: "update_existing", label: "Update Existing", desc: "Sync DB from sidecar XMLs" },
+                  { value: "both", label: "Both", desc: "Import new + update existing" },
+                ].map((opt) => (
+                  <Tooltip key={opt.value} content={opt.desc}>
+                    <label
+                      className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-md border cursor-pointer transition-colors ${
+                        scanMode === opt.value
+                          ? "border-accent bg-accent/10 text-accent"
+                          : "border-border text-text-muted hover:border-text-muted"
+                      }`}
+                    >
+                    <input
+                      type="radio"
+                      name="scanMode"
+                      value={opt.value}
+                      checked={scanMode === opt.value}
+                      onChange={() => setScanMode(opt.value)}
+                      className="sr-only"
+                    />
+                    <span>{opt.label}</span>
+                    </label>
+                  </Tooltip>
+                ))}
+              </div>
             </div>
             <button
-              onClick={() =>
-                scanMutation.mutate(true, {
-                  onSuccess: () => toast({ type: "success", title: "Library scan started" }),
-                })
-              }
+              onClick={() => {
+                const importNew = scanMode === "import_new" || scanMode === "both";
+                const updateExisting = scanMode === "update_existing" || scanMode === "both";
+                scanMutation.mutate(
+                  { importNew, updateExisting },
+                  { onSuccess: () => toast({ type: "success", title: "Library scan started" }) },
+                );
+              }}
               disabled={scanMutation.isPending}
               className="btn-secondary btn-sm flex items-center gap-1.5 shrink-0"
             >
@@ -1622,14 +1654,14 @@ function LibraryMaintenanceContent() {
                   { value: "overwrite_new", label: "Overwrite New", desc: "Only overwrite changed files" },
                   { value: "overwrite_all", label: "Overwrite All", desc: "Overwrite all files" },
                 ].map((opt) => (
-                  <label
-                    key={opt.value}
-                    className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-md border cursor-pointer transition-colors ${
-                      exportMode === opt.value
-                        ? "border-accent bg-accent/10 text-accent"
-                        : "border-border text-text-muted hover:border-text-muted"
-                    }`}
-                  >
+                  <Tooltip key={opt.value} content={opt.desc}>
+                    <label
+                      className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-md border cursor-pointer transition-colors ${
+                        exportMode === opt.value
+                          ? "border-accent bg-accent/10 text-accent"
+                          : "border-border text-text-muted hover:border-text-muted"
+                      }`}
+                    >
                     <input
                       type="radio"
                       name="exportMode"
@@ -1639,7 +1671,8 @@ function LibraryMaintenanceContent() {
                       className="sr-only"
                     />
                     <span>{opt.label}</span>
-                  </label>
+                    </label>
+                  </Tooltip>
                 ))}
               </div>
             </div>
@@ -2026,6 +2059,7 @@ function PartyModeSettings() {
   const [artistInput, setArtistInput] = useState("");
   const [genreInput, setGenreInput] = useState("");
   const [albumInput, setAlbumInput] = useState("");
+  const prerenderFireworks = useFireworksStore((s) => s.prerender);
 
   const save = (next: PartyModeExclusions) => {
     setExclusions(next);
@@ -2080,6 +2114,7 @@ function PartyModeSettings() {
                   const next = { ...animation, enabled: !animation.enabled };
                   setAnimation(next);
                   saveAnimationSettings(next);
+                  if (next.enabled) prerenderFireworks(next.duration * 1000);
                 }}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${animation.enabled ? "bg-accent" : "bg-white/20"}`}
               >
@@ -2103,6 +2138,10 @@ function PartyModeSettings() {
                   max={15}
                   step={1}
                   value={animation.duration}
+                  onMouseUp={(e) => {
+                    const next = { ...animation, duration: Number((e.target as HTMLInputElement).value) };
+                    prerenderFireworks(next.duration * 1000);
+                  }}
                   onChange={(e) => {
                     const next = { ...animation, duration: Number(e.target.value) };
                     setAnimation(next);

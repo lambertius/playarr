@@ -460,6 +460,18 @@ def update_canonical_track(
     from sqlalchemy.orm.attributes import flag_modified
     flag_modified(track, "field_provenance")
 
+    # User attribution
+    try:
+        from app.user_identity import get_instance_user_id
+        uid = get_instance_user_id(db)
+        fpu = dict(track.field_provenance_users or {})
+        for f in ["title", "artist", "album", "year", "is_cover", "original_artist", "original_title", "genres"]:
+            fpu[f] = uid
+        track.field_provenance_users = fpu
+        flag_modified(track, "field_provenance_users")
+    except Exception:
+        pass
+
     track.canonical_verified = True
     track.updated_at = datetime.now(timezone.utc)
     db.flush()
@@ -488,6 +500,20 @@ def create_canonical_track_manual(
     if album_name and album_name.strip():
         album_entity = get_or_create_album(db, artist_name, album_name, {})
 
+    _prov_fields = [
+        "title", "artist", "album", "year", "is_cover",
+        "original_artist", "original_title", "genres",
+    ]
+
+    # User attribution
+    _fpu = None
+    try:
+        from app.user_identity import get_instance_user_id
+        uid = get_instance_user_id(db)
+        _fpu = {f: uid for f in _prov_fields}
+    except Exception:
+        pass
+
     track = TrackEntity(
         title=title,
         artist_id=artist_entity.id,
@@ -498,10 +524,8 @@ def create_canonical_track_manual(
         original_title=original_title if is_cover else None,
         metadata_source="user",
         canonical_verified=True,
-        field_provenance={f: "user" for f in [
-            "title", "artist", "album", "year", "is_cover",
-            "original_artist", "original_title", "genres",
-        ]},
+        field_provenance={f: "user" for f in _prov_fields},
+        field_provenance_users=_fpu,
     )
     db.add(track)
     db.flush()

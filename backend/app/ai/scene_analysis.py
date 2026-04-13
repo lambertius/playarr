@@ -77,8 +77,67 @@ def analyze_scenes(
             .first()
         )
         if existing:
-            logger.info(f"Scene analysis exists for video {video_id}, skipping")
+            # If no thumbnail is selected, auto-select the best one now
+            has_selected = db.query(AIThumbnail).filter(
+                AIThumbnail.video_id == video_id,
+                AIThumbnail.is_selected == True,
+            ).first()
+            if not has_selected:
+                best = (
+                    db.query(AIThumbnail)
+                    .filter(AIThumbnail.video_id == video_id)
+                    .order_by(AIThumbnail.score_overall.desc())
+                    .first()
+                )
+                if best:
+                    best.is_selected = True
+                    _save_as_video_thumb(db, video, best)
+                    from sqlalchemy.orm.attributes import flag_modified
+                    state = dict(video.processing_state or {})
+                    state["thumbnail_selected"] = {
+                        "completed": True,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "method": "auto_select",
+                        "version": "1.0",
+                    }
+                    video.processing_state = state
+                    flag_modified(video, "processing_state")
+                    # Clear missing_artwork review flag if the flagged issue is resolved
+                    if video.review_category in ("missing_artwork", "artwork_incomplete"):
+                        rr = video.review_reason or ""
+                        needs_poster = "poster" in rr
+                        # Thumbnail is now selected, so check poster only if it was flagged
+                        if not needs_poster:
+                            video.review_status = "none"
+                            video.review_reason = None
+                            video.review_category = None
+                        else:
+                            has_poster = db.query(MediaAsset.id).filter(
+                                MediaAsset.video_id == video_id,
+                                MediaAsset.asset_type == "poster",
+                                MediaAsset.status == "valid",
+                            ).first() is not None
+                            if has_poster:
+                                video.review_status = "none"
+                                video.review_reason = None
+                                video.review_category = None
+                    db.commit()
+                    logger.info(f"Auto-selected best thumbnail for video {video_id}")
+            else:
+                logger.info(f"Scene analysis exists for video {video_id}, skipping")
             return existing
+    else:
+        # Clean up old thumbnails and analysis records before re-running
+        old_thumbs = db.query(AIThumbnail).filter(AIThumbnail.video_id == video_id).all()
+        for ot in old_thumbs:
+            if ot.file_path and os.path.isfile(ot.file_path):
+                try:
+                    os.remove(ot.file_path)
+                except OSError:
+                    pass
+            db.delete(ot)
+        db.query(AISceneAnalysis).filter(AISceneAnalysis.video_id == video_id).delete()
+        db.flush()
 
     settings = get_settings()
     ffmpeg = settings.resolved_ffmpeg
@@ -237,6 +296,19 @@ def select_thumbnail(
         }
         video.processing_state = state
         flag_modified(video, "processing_state")
+
+        # Clear missing_artwork review flag if both poster and thumb now exist
+        if video.review_category in ("missing_artwork", "artwork_incomplete"):
+            from app.models import MediaAsset
+            has_poster = db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == video_id,
+                MediaAsset.asset_type == "poster",
+                MediaAsset.status == "valid",
+            ).first() is not None
+            if has_poster:
+                video.review_status = "none"
+                video.review_reason = None
+                video.review_category = None
 
     db.commit()
     return thumb

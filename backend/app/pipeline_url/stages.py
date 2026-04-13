@@ -110,10 +110,17 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
         _coarse_update(job_id, JobStatus.skipped,
                        step=f"Skipped: {_dup_reason[:200]}",
                        progress=100)
-        # Flag existing item for review so user can inspect the match
+        # Link the skipped job to the existing video so UI can show poster/link
         if dup.existing_video_id:
-            _flag_existing_for_duplicate_review(
-                dup.existing_video_id, job_id, _dup_reason)
+            from app.database import CosmeticSessionLocal as _SkipSL
+            _skip_db = _SkipSL()
+            try:
+                _skip_job = _skip_db.query(ProcessingJob).get(job_id)
+                if _skip_job:
+                    _skip_job.video_id = dup.existing_video_id
+                    _skip_db.commit()
+            finally:
+                _skip_db.close()
         ws.sync_logs_to_db()
         ws.cleanup_on_success()
     except Exception as e:
@@ -631,6 +638,16 @@ def _step_duplicate_check(ws: ImportWorkspace, artist: str, title: str,
             ws.update_stage("duplicate_check", "complete")
             return
 
+        # Guard: if the matched item's file is missing, it's a zombie record — ignore it
+        if existing.file_path and not os.path.exists(existing.file_path):
+            ws.log(f"Ignoring zombie record id={existing.id} (file missing: {existing.file_path})")
+            ws.write_artifact("duplicate_check", {
+                "is_duplicate": False,
+                "is_possible_duplicate": False,
+            })
+            ws.update_stage("duplicate_check", "complete")
+            return
+
         existing_version = getattr(existing, "version_type", "normal") or "normal"
 
         # Different version types â†’ possible duplicate, proceed but flag for review
@@ -1056,16 +1073,20 @@ def _step_check_url_duplicate(ws: ImportWorkspace, url: str) -> None:
         ).first()
         if existing and existing.video_item:
             item = existing.video_item
-            ws.log(f"Exact URL already imported: '{item.artist} - {item.title}' (id={item.id})")
-            ws.update_stage("check_url_duplicate", "complete")
-            raise _DuplicateSkip(
-                existing_video_id=item.id,
-                match_type="exact_url",
-                reason=(
-                    f"URL already imported as "
-                    f"'{item.artist} - {item.title}' (id={item.id})"
-                ),
-            )
+            # Guard: if the matched item's file is missing, it's a zombie — ignore
+            if item.file_path and not os.path.exists(item.file_path):
+                ws.log(f"Ignoring zombie record id={item.id} (file missing: {item.file_path})")
+            else:
+                ws.log(f"Exact URL already imported: '{item.artist} - {item.title}' (id={item.id})")
+                ws.update_stage("check_url_duplicate", "complete")
+                raise _DuplicateSkip(
+                    existing_video_id=item.id,
+                    match_type="exact_url",
+                    reason=(
+                        f"URL already imported as "
+                        f"'{item.artist} - {item.title}' (id={item.id})"
+                    ),
+                )
     finally:
         db.close()
 
@@ -1114,6 +1135,12 @@ def _step_check_existing(ws: ImportWorkspace, provider_data: dict) -> None:
         result = {"has_existing": False}
         if existing_source and existing_source.video_item:
             item = existing_source.video_item
+            # Guard: if the matched item's file is missing, treat as no match
+            if item.file_path and not os.path.exists(item.file_path):
+                ws.log(f"Ignoring zombie record id={item.id} (file missing: {item.file_path})")
+                ws.write_artifact("existing_check", result)
+                ws.update_stage("check_existing", "complete")
+                return
             result["has_existing"] = True
             result["existing_video_id"] = item.id
             result["existing_folder"] = item.folder_path

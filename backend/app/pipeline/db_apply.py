@@ -385,8 +385,11 @@ def _apply_video_fields(video_item, v: dict, plan: dict) -> None:
     video_item.original_artist = plan.get("original_artist") or None
     video_item.original_title = plan.get("original_title") or None
 
-    video_item.review_status = plan.get("review_status", "none")
-    video_item.review_reason = plan.get("review_reason")
+    # Don't re-flag items the user already reviewed/approved
+    _new_review = plan.get("review_status", "none")
+    if not (video_item.review_status == "reviewed" and _new_review == "needs_human_review"):
+        video_item.review_status = _new_review
+        video_item.review_reason = plan.get("review_reason")
 
 
 def _get_or_create_genre(db, genre_name: str):

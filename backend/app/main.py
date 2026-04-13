@@ -89,6 +89,8 @@ def _apply_schema_upgrades(eng):
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN canonical_confidence FLOAT"))
             if "canonical_provenance" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN canonical_provenance VARCHAR(50)"))
+            if "editor_edit_type" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN editor_edit_type VARCHAR(10)"))
 
     # Matching subsystem tables — created by Base.metadata.create_all but
     # we need to ensure they exist for older DBs upgraded in-place.
@@ -175,6 +177,7 @@ def _apply_schema_upgrades(eng):
             "validation_error": "TEXT",
             "last_validated_at": "DATETIME",
             "file_hash": "VARCHAR(64)",
+            "crop_position": "VARCHAR(50)",
         }
         with eng.begin() as conn:
             for col_name, col_type in _new_ca.items():
@@ -194,6 +197,7 @@ def _apply_schema_upgrades(eng):
             "width": "INTEGER",
             "height": "INTEGER",
             "file_size_bytes": "INTEGER",
+            "crop_position": "VARCHAR(50)",
         }
         with eng.begin() as conn:
             for col_name, col_type in _new_ma.items():
@@ -274,6 +278,25 @@ def _apply_schema_upgrades(eng):
                 conn.execute(text("ALTER TABLE tracks ADD COLUMN acoustid_id VARCHAR(36)"))
             if "audio_fingerprint" not in tr_cols:
                 conn.execute(text("ALTER TABLE tracks ADD COLUMN audio_fingerprint TEXT"))
+
+    # ── User edit provenance (migration 016) ──
+    _user_prov_tables = ["video_items", "artists", "albums", "tracks"]
+    for tbl_name in _user_prov_tables:
+        if tbl_name in existing_tables:
+            tbl_cols = {c["name"] for c in insp.get_columns(tbl_name)}
+            with eng.begin() as conn:
+                if "field_provenance_users" not in tbl_cols:
+                    conn.execute(text(f"ALTER TABLE {tbl_name} ADD COLUMN field_provenance_users JSON"))
+    if "video_items" in existing_tables:
+        vi_cols4 = {c["name"] for c in insp.get_columns("video_items")}
+        if "last_edited_by" not in vi_cols4:
+            with eng.begin() as conn:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN last_edited_by VARCHAR(36)"))
+    if "metadata_snapshots" in existing_tables:
+        ms_cols = {c["name"] for c in insp.get_columns("metadata_snapshots")}
+        if "user_id" not in ms_cols:
+            with eng.begin() as conn:
+                conn.execute(text("ALTER TABLE metadata_snapshots ADD COLUMN user_id VARCHAR(36)"))
 
 
 def _migrate_ai_settings(eng):
@@ -514,6 +537,90 @@ def _detect_untracked_library_files():
         )
         for path in untracked:
             logger.warning(f"  Untracked: {path}")
+
+
+def _cleanup_zombie_records():
+    """Delete DB records whose video files no longer exist on disk.
+
+    Zombie records are left behind when a delete fails silently (e.g. file
+    locked by the player) or files are removed outside the app.  They cause
+    false duplicate detections and stale review queue entries.
+    """
+    from sqlalchemy.orm import Session as SASession
+    from app.models import VideoItem
+
+    with SASession(engine) as db:
+        all_items = db.query(VideoItem).all()
+        zombies = [v for v in all_items if v.file_path and not os.path.exists(v.file_path)]
+
+        if not zombies:
+            return
+
+        zombie_ids = [z.id for z in zombies]
+        logger.warning(
+            f"Found {len(zombies)} zombie record(s) (files missing from disk) — cleaning up:"
+        )
+        for z in zombies:
+            logger.warning(f"  Zombie: id={z.id} | {z.artist} - {z.title} | {z.file_path}")
+
+        # Use the same cleanup helpers as the delete endpoint
+        from app.routers.library import (
+            _cleanup_orphaned_child_rows,
+            _delete_video_cached_assets,
+            _delete_video_thumbnail_dir,
+            _delete_video_previews,
+            _cleanup_orphaned_entity_folders,
+            _clear_orphaned_duplicate_partners,
+        )
+
+        # Collect entity info for orphan cleanup
+        artist_names: set[str] = set()
+        album_keys: set[tuple[str, str]] = set()
+        artist_entity_ids: set[int] = set()
+        album_entity_ids: set[int] = set()
+        track_ids: set[int] = set()
+
+        for z in zombies:
+            if z.artist:
+                artist_names.add(z.artist)
+            if z.artist and z.album:
+                album_keys.add((z.artist, z.album))
+            if z.artist_entity_id:
+                artist_entity_ids.add(z.artist_entity_id)
+                from app.models import ArtistEntity
+                ent = db.get(ArtistEntity, z.artist_entity_id)
+                if ent and ent.canonical_name:
+                    artist_names.add(ent.canonical_name)
+            if z.album_entity_id:
+                album_entity_ids.add(z.album_entity_id)
+                if z.artist_entity_id:
+                    from app.models import AlbumEntity, ArtistEntity
+                    album_ent = db.get(AlbumEntity, z.album_entity_id)
+                    artist_ent = db.get(ArtistEntity, z.artist_entity_id)
+                    if album_ent and artist_ent:
+                        album_keys.add((artist_ent.canonical_name, album_ent.title))
+            if z.track_id:
+                track_ids.add(z.track_id)
+
+        _cleanup_orphaned_child_rows(db, zombie_ids)
+        _delete_video_cached_assets(db, zombie_ids)
+        _clear_orphaned_duplicate_partners(db, zombie_ids)
+
+        for z in zombies:
+            db.delete(z)
+        db.commit()
+
+        # Clean up thumbnail dirs and previews (no DB needed)
+        for z_id in zombie_ids:
+            _delete_video_thumbnail_dir(z_id)
+            _delete_video_previews(z_id, None)
+
+        # Clean up orphaned entity folders
+        _cleanup_orphaned_entity_folders(
+            db, artist_names, album_keys, artist_entity_ids, album_entity_ids, track_ids,
+        )
+
+        logger.info(f"Cleaned up {len(zombies)} zombie record(s)")
 
 
 def _purge_orphan_workspaces(engine):
@@ -1047,6 +1154,9 @@ async def lifespan(app: FastAPI):
 
     # Warn about video files in the library that aren't tracked in the DB
     _detect_untracked_library_files()
+
+    # Remove DB records whose video files no longer exist on disk ("zombies")
+    _cleanup_zombie_records()
 
     # --- Automatic artwork cache repair ---
     # Purge old corrupt cached assets (HTML-as-jpg, zero-byte, etc.) so they

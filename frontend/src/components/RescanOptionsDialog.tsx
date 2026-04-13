@@ -24,6 +24,7 @@ export interface RescanOptions {
   normalize: boolean;
   find_source_video: boolean;
   from_disk: boolean;
+  scene_analysis: boolean;
 }
 
 function getBoolSetting(settings: { key: string; value: string }[] | undefined, key: string, fallback: boolean): boolean {
@@ -44,6 +45,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
   const [normalize, setNormalize] = useState(true);
   const [findSourceVideo, setFindSourceVideo] = useState(false);
   const [fromDisk, setFromDisk] = useState(false);
+  const [sceneAnalysis, setSceneAnalysis] = useState(true);
 
   const { data: settings } = useSettings();
 
@@ -74,6 +76,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
       normalize,
       find_source_video: fromDisk ? false : findSourceVideo,
       from_disk: fromDisk,
+      scene_analysis: sceneAnalysis,
     });
   };
 
@@ -176,7 +179,8 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
               </Tooltip>
             </div>
             <ToggleRow label="Normalise Audio" description="Apply loudness normalisation (EBU R128) to ensure consistent volume across all tracks." checked={normalize} onChange={(v) => setNormalize(v)} />
-            <ToggleRow label="YouTube Source Matching" description="Search YouTube for the official music video source. If an existing YouTube link is present, it will be verified first." checked={findSourceVideo} onChange={(v) => setFindSourceVideo(v)} disabled={fromDisk} />
+            <ToggleRow label="Scene Analysis" description="Run scene detection and generate AI-scored thumbnails. Replaces existing thumbnails if present." checked={sceneAnalysis} onChange={(v) => setSceneAnalysis(v)} />
+            <ToggleRow label="YouTube Source Matching" description="Search YouTube for the official music video source. Videos that already have a YouTube link are automatically skipped — clear the existing link first to re-match." checked={findSourceVideo} onChange={(v) => setFindSourceVideo(v)} disabled={fromDisk} />
           </div>
 
           {/* Action buttons */}

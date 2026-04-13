@@ -120,12 +120,35 @@ export function CleanLibraryDialog({ open, onClose }: Props) {
     });
   };
 
-  const handleDeleteOrphans = () => {
+  const handleDeleteOrphans = (forcePermanent = false) => {
     const paths = [...selectedOrphans];
     if (paths.length === 0) return;
-    cleanOrphansMutation.mutate({ folder_paths: paths, mode: "delete" }, {
-      onSuccess: () => {
-        toast({ type: "success", title: `Deleted ${paths.length} orphaned folder(s)` });
+    cleanOrphansMutation.mutate({ folder_paths: paths, mode: "delete", force_permanent: forcePermanent }, {
+      onSuccess: (data) => {
+        const networkPaths = data.results?.filter(
+          (r: { status: string; folder: string }) => r.status === "network_confirm_required"
+        ) ?? [];
+        const deleted = data.results?.filter(
+          (r: { status: string }) => r.status === "deleted"
+        ).length ?? 0;
+
+        if (networkPaths.length > 0 && !forcePermanent) {
+          const confirmed = window.confirm(
+            `${networkPaths.length} folder(s) are on a network location where the recycle bin is unavailable.\n\n` +
+            `These will be permanently deleted and cannot be recovered.\n\n` +
+            `Do you want to proceed?`
+          );
+          if (confirmed) {
+            // Re-submit only the network paths with force_permanent
+            setSelectedOrphans(new Set(networkPaths.map((r: { folder: string }) => r.folder)));
+            handleDeleteOrphans(true);
+            return;
+          }
+        }
+
+        if (deleted > 0) {
+          toast({ type: "success", title: `Sent ${deleted} orphaned folder(s) to the recycle bin` });
+        }
         setSelectedOrphans(new Set());
         refetch();
       },
@@ -344,7 +367,7 @@ export function CleanLibraryDialog({ open, onClose }: Props) {
                         {selectedOrphans.size === orphanFolders.length ? "Deselect all" : "Select all"}
                       </button>
                       <button
-                        onClick={handleDeleteOrphans}
+                        onClick={() => handleDeleteOrphans()}
                         disabled={selectedOrphans.size === 0 || cleanOrphansMutation.isPending}
                         className="btn-danger btn-sm text-xs"
                       >
@@ -353,7 +376,7 @@ export function CleanLibraryDialog({ open, onClose }: Props) {
                     </div>
                   </div>
                   <p className="text-xs text-text-muted mb-2">
-                    These folders exist in the library directory but aren't tracked in the database.
+                    These folders exist in the library directory but aren't tracked in the database. Files will be sent to the recycle bin.
                   </p>
                   <div className="space-y-1 max-h-48 overflow-y-auto">
                     {orphanFolders.map((folder) => (

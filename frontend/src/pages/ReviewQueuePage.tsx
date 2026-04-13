@@ -2,10 +2,11 @@ import { useState, useMemo, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Search, ChevronLeft, ChevronRight, CheckCircle2, XCircle,
-  GitCompare, FolderInput, Link2, ClipboardList,
+  GitCompare, Link2, ClipboardList,
   Check, X, Tag, RefreshCw, ChevronDown, LayoutList, FileEdit,
   Trash2, ScanSearch, FolderSearch, Download, Volume2, Copy,
   Unlink2, AlertTriangle, HelpCircle, Sparkles, BrainCircuit,
+  ImageOff,
 } from "lucide-react";
 import type { ReviewParams, ReviewItem, DuplicateVideoSummary } from "@/types";
 import {
@@ -13,7 +14,8 @@ import {
   useSetReviewVersion, useBatchApproveReview, useBatchDismissReview,
   useScanRenames, useApplyRename, useBatchApplyRename,
   useBatchDeleteReview, useBatchScrapeReview, useRedownload,
-  useLibraryDuplicateScan, useScanEnrichment,
+  useLibraryDuplicateScan, useScanEnrichment, useBatchRepairArtwork,
+  useScanArtwork,
 } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -24,9 +26,9 @@ import { ScrapeOptionsModal, type ScrapeOptions } from "@/components/ScrapeOptio
 import { ScanOptionsModal } from "@/components/ScanOptionsModal";
 
 // ── Types ───────────────────────────────────────────────
-type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "import_error" | "manual_review" | "rename" | "scanned" | "normalization" | "canonical_missing" | "canonical_conflict" | "canonical_low_confidence" | "ai_pending" | "ai_partial";
+type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "manual_review" | "rename" | "scanned" | "normalization" | "canonical_missing" | "canonical_conflict" | "canonical_low_confidence" | "ai_pending" | "ai_partial" | "artwork_incomplete" | "missing_artwork";
 
-const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 500, 1000, 0];
 
 // ── Category config ─────────────────────────────────────
 const CATEGORY_CONFIG: Record<ReviewCategory, {
@@ -58,12 +60,6 @@ const CATEGORY_CONFIG: Record<ReviewCategory, {
     icon: <Link2 size={16} />,
     color: "bg-red-500/10 text-red-400",
     tooltip: "Non-fatal issues during URL import (download succeeded but metadata scraping or AI enrichment had errors). You can re-run metadata scraping, redownload, or dismiss.",
-  },
-  import_error: {
-    label: "Library Import Alerts",
-    icon: <FolderInput size={16} />,
-    color: "bg-amber-500/10 text-amber-400",
-    tooltip: "Non-fatal issues from library imports. Tracks imported successfully but had metadata or processing warnings. Take individual or bulk actions to resolve.",
   },
   manual_review: {
     label: "Manual Review",
@@ -119,6 +115,18 @@ const CATEGORY_CONFIG: Record<ReviewCategory, {
     color: "bg-yellow-500/10 text-yellow-400",
     tooltip: "Videos with partial AI enrichment — either AI metadata or scene analysis is missing. Run a metadata scrape with AI enabled to complete enrichment.",
   },
+  artwork_incomplete: {
+    label: "Missing Artwork",
+    icon: <ImageOff size={16} />,
+    color: "bg-amber-500/10 text-amber-400",
+    tooltip: "Videos linked to an artist or album entity but missing the corresponding artwork (artist_thumb or album_thumb). Use Repair Artwork to attempt recovery from disk, cache, or sibling videos.",
+  },
+  missing_artwork: {
+    label: "Missing Video Art",
+    icon: <ImageOff size={16} />,
+    color: "bg-rose-500/10 text-rose-400",
+    tooltip: "Videos missing poster or thumbnail artwork. Run a rescan with scene analysis enabled to generate thumbnails, or dismiss to ignore.",
+  },
 };
 
 // ── Help dialog ─────────────────────────────────────────
@@ -140,12 +148,6 @@ const HELP_ROWS: { category: ReviewCategory; cause: string; meaning: string; res
     cause: "A URL-based download completed but metadata scraping or AI enrichment encountered a non-fatal error.",
     meaning: "The video is in your library but may have incomplete or inaccurate metadata.",
     resolution: "Re-run metadata scraping, redownload the video, or dismiss if the metadata looks acceptable.",
-  },
-  {
-    category: "import_error",
-    cause: "A library import (folder scan or batch add) succeeded but had warnings during metadata processing.",
-    meaning: "The file was imported but metadata may be incomplete or parsing encountered issues.",
-    resolution: "Scrape metadata to enrich, manually edit the track details, or dismiss if acceptable.",
   },
   {
     category: "manual_review",
@@ -200,6 +202,18 @@ const HELP_ROWS: { category: ReviewCategory; cause: string; meaning: string; res
     cause: "Only part of the AI enrichment pipeline completed — either AI metadata was analysed but scenes were not, or vice versa.",
     meaning: "The track has incomplete AI enrichment. Some features (like smart thumbnails or corrected metadata) may be missing.",
     resolution: "Run a metadata scrape with AI enabled to complete the remaining enrichment step, or dismiss if acceptable.",
+  },
+  {
+    category: "artwork_incomplete",
+    cause: "The video is linked to an artist or album entity but no corresponding artwork (artist_thumb or album_thumb) MediaAsset could be found.",
+    meaning: "The entity artwork pipeline ran but could not locate artist or album artwork from MusicBrainz, Wikipedia, disk, or sibling videos.",
+    resolution: "Use the Repair Artwork button to re-attempt artwork recovery. Items that are false positives (artwork already exists) will be auto-cleared.",
+  },
+  {
+    category: "missing_artwork",
+    cause: "The video is missing its poster image, scene analysis thumbnail, or both.",
+    meaning: "The video will display without a poster or thumbnail in the library and player views.",
+    resolution: "Select the items and use the Scrape button with scene analysis enabled to generate thumbnails. For missing posters, run a metadata rescan.",
   },
 ];
 
@@ -358,8 +372,9 @@ function Pagination({
   onPageChange: (p: number) => void; onPageSizeChange: (s: number) => void;
 }) {
   if (total === 0) return null;
-  const start = (page - 1) * pageSize + 1;
-  const end = Math.min(page * pageSize, total);
+  const isAll = pageSize === 0;
+  const start = isAll ? 1 : (page - 1) * pageSize + 1;
+  const end = isAll ? total : Math.min(page * pageSize, total);
   return (
     <div className="flex items-center justify-between text-xs text-text-muted pt-3 pb-1">
       <div className="flex items-center gap-2">
@@ -370,23 +385,25 @@ function Pagination({
           className="bg-surface-lighter border border-surface-border rounded px-2 py-1 text-xs text-text-secondary"
         >
           {PAGE_SIZE_OPTIONS.map((s) => (
-            <option key={s} value={s}>{s}</option>
+            <option key={s} value={s}>{s === 0 ? "All" : s}</option>
           ))}
         </select>
         <span>per page</span>
       </div>
       <span className="text-text-secondary">{start}–{end} of {total}</span>
-      <div className="flex items-center gap-1">
-        <button onClick={() => onPageChange(page - 1)} disabled={page <= 1}
-          className="p-1 rounded hover:bg-surface-lighter disabled:opacity-30 disabled:cursor-not-allowed">
-          <ChevronLeft size={16} />
-        </button>
-        <span className="tabular-nums px-2 text-text-secondary">{page} / {totalPages || 1}</span>
-        <button onClick={() => onPageChange(page + 1)} disabled={page >= totalPages}
-          className="p-1 rounded hover:bg-surface-lighter disabled:opacity-30 disabled:cursor-not-allowed">
-          <ChevronRight size={16} />
-        </button>
-      </div>
+      {!isAll && (
+        <div className="flex items-center gap-1">
+          <button onClick={() => onPageChange(page - 1)} disabled={page <= 1}
+            className="p-1 rounded hover:bg-surface-lighter disabled:opacity-30 disabled:cursor-not-allowed">
+            <ChevronLeft size={16} />
+          </button>
+          <span className="tabular-nums px-2 text-text-secondary">{page} / {totalPages || 1}</span>
+          <button onClick={() => onPageChange(page + 1)} disabled={page >= totalPages}
+            className="p-1 rounded hover:bg-surface-lighter disabled:opacity-30 disabled:cursor-not-allowed">
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -480,14 +497,17 @@ export default function ReviewQueuePage() {
   const redownloadMutation = useRedownload();
   const dupeScanMutation = useLibraryDuplicateScan();
   const enrichScanMutation = useScanEnrichment();
+  const artworkScanMutation = useScanArtwork();
+  const batchRepairArtworkMutation = useBatchRepairArtwork();
   const [scrapeModalOpen, setScrapeModalOpen] = useState(false);
   const [renameScanModalOpen, setRenameScanModalOpen] = useState(false);
   const [dupeScanModalOpen, setDupeScanModalOpen] = useState(false);
   const [enrichScanModalOpen, setEnrichScanModalOpen] = useState(false);
+  const [artworkScanModalOpen, setArtworkScanModalOpen] = useState(false);
 
   const items = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const totalPages = pageSize === 0 ? 1 : Math.max(1, Math.ceil(total / pageSize));
   const categoryCounts = data?.category_counts ?? {};
 
   // Aggregate total for "all" stat card
@@ -522,6 +542,18 @@ export default function ReviewQueuePage() {
     toast({ type: "success", title: "Approved" });
     setSelectedIds((prev) => { const n = new Set(prev); n.delete(videoId); return n; });
   }, [approveMutation, toast]);
+
+  const handleRunSceneAnalysis = useCallback(async (videoId: number) => {
+    await batchScrapeMutation.mutateAsync({ videoIds: [videoId], options: { scene_analysis: true, scrape_wikipedia: false, scrape_musicbrainz: false } });
+    toast({ type: "success", title: "Scene analysis queued" });
+    setSelectedIds((prev) => { const n = new Set(prev); n.delete(videoId); return n; });
+  }, [batchScrapeMutation, toast]);
+
+  const handleScanSources = useCallback(async (videoId: number) => {
+    await batchRepairArtworkMutation.mutateAsync([videoId]);
+    toast({ type: "success", title: "Scan sources queued" });
+    setSelectedIds((prev) => { const n = new Set(prev); n.delete(videoId); return n; });
+  }, [batchRepairArtworkMutation, toast]);
 
   const handleDismiss = useCallback(async (videoId: number) => {
     const ok = await confirm({ title: "Dismiss review?", description: "This will clear the review flag and remove it from the queue." });
@@ -584,6 +616,12 @@ export default function ReviewQueuePage() {
     toast({ type: "success", title: result.flagged > 0 ? `Found ${result.flagged} item(s) needing AI enrichment` : "All videos are fully AI-enriched" });
   }, [enrichScanMutation, toast]);
 
+  const handleScanArtwork = useCallback(async (rescanAll: boolean) => {
+    setArtworkScanModalOpen(false);
+    const result = await artworkScanMutation.mutateAsync(rescanAll);
+    toast({ type: "success", title: result.flagged > 0 ? `Found ${result.flagged} item(s) with missing artwork` : "All videos have complete artwork" });
+  }, [artworkScanMutation, toast]);
+
   const handleApplyRename = useCallback(async (videoId: number) => {
     await applyRenameMutation.mutateAsync(videoId);
     toast({ type: "success", title: "Renamed successfully" });
@@ -609,6 +647,16 @@ export default function ReviewQueuePage() {
     toast({ type: "success", title: `Deleted ${result.count} item(s)${result.errors?.length ? `, ${result.errors.length} failed` : ""}` });
     setSelectedIds(new Set());
   }, [selectedIds, batchDeleteMutation, toast, confirm]);
+
+  const handleBatchRepairArtwork = useCallback(async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const ok = await confirm({ title: `Scan sources for ${ids.length} item(s)?`, description: "This will check local cache, disk, sibling videos, and external sources (MusicBrainz, Wikipedia, CAA) for missing entity artwork. Items where no artwork is available will be marked as unavailable to prevent future false positives." });
+    if (!ok) return;
+    const result = await batchRepairArtworkMutation.mutateAsync(ids);
+    toast({ type: "success", title: `Scan sources queued for ${result.total} item(s)` });
+    setSelectedIds(new Set());
+  }, [selectedIds, batchRepairArtworkMutation, toast, confirm]);
 
   const handleBatchScrape = useCallback(async () => {
     const ids = Array.from(selectedIds);
@@ -695,18 +743,31 @@ export default function ReviewQueuePage() {
               className="input-field pl-8 pr-3 py-1.5 text-sm w-56"
             />
           </div>
-          <button onClick={() => refetch()} className="btn-ghost btn-sm gap-1.5">
-            <RefreshCw size={14} /> Refresh
-          </button>
-          <button onClick={() => setRenameScanModalOpen(true)} disabled={scanRenamesMutation.isPending} className="btn-ghost btn-sm gap-1.5">
-            <FileEdit size={14} /> {scanRenamesMutation.isPending ? "Scanning…" : "Scan Renames"}
-          </button>
-          <button onClick={() => setDupeScanModalOpen(true)} disabled={dupeScanMutation.isPending} className="btn-ghost btn-sm gap-1.5">
-            <Copy size={14} /> {dupeScanMutation.isPending ? "Scanning…" : "Scan Duplicates"}
-          </button>
-          <button onClick={() => setEnrichScanModalOpen(true)} disabled={enrichScanMutation.isPending} className="btn-ghost btn-sm gap-1.5">
-            <BrainCircuit size={14} /> {enrichScanMutation.isPending ? "Scanning…" : "Scan AI Enrichment"}
-          </button>
+          <Tooltip content="Reload the review queue">
+            <button onClick={() => refetch()} className="btn-ghost btn-sm gap-1.5">
+              <RefreshCw size={14} /> Refresh
+            </button>
+          </Tooltip>
+          <Tooltip content="Scan library for files whose names don't match the naming convention">
+            <button onClick={() => setRenameScanModalOpen(true)} disabled={scanRenamesMutation.isPending} className="btn-ghost btn-sm gap-1.5">
+              <FileEdit size={14} /> {scanRenamesMutation.isPending ? "Scanning…" : "Scan Renames"}
+            </button>
+          </Tooltip>
+          <Tooltip content="Scan library for potential duplicate videos by artist and title">
+            <button onClick={() => setDupeScanModalOpen(true)} disabled={dupeScanMutation.isPending} className="btn-ghost btn-sm gap-1.5">
+              <Copy size={14} /> {dupeScanMutation.isPending ? "Scanning…" : "Scan Duplicates"}
+            </button>
+          </Tooltip>
+          <Tooltip content="Scan library for videos missing AI metadata or scene analysis">
+            <button onClick={() => setEnrichScanModalOpen(true)} disabled={enrichScanMutation.isPending} className="btn-ghost btn-sm gap-1.5">
+              <BrainCircuit size={14} /> {enrichScanMutation.isPending ? "Scanning…" : "Scan AI Enrichment"}
+            </button>
+          </Tooltip>
+          <Tooltip content="Scan library for videos missing poster or thumbnail artwork">
+            <button onClick={() => setArtworkScanModalOpen(true)} disabled={artworkScanMutation.isPending} className="btn-ghost btn-sm gap-1.5">
+              <ImageOff size={14} /> {artworkScanMutation.isPending ? "Scanning…" : "Scan Artwork"}
+            </button>
+          </Tooltip>
           <Tooltip content="Review category reference">
             <button onClick={() => setShowHelp(true)} className="btn-ghost btn-sm">
               <HelpCircle size={14} />
@@ -756,16 +817,6 @@ export default function ReviewQueuePage() {
           tooltip={CATEGORY_CONFIG.url_import_error.tooltip}
           onClick={() => handleCategoryChange("url_import_error")}
           selected={categoryFilter === "url_import_error"}
-        />
-        <FilterPill
-          icon={<FolderInput size={14} />}
-          label="Lib Import"
-          value={categoryCounts.import_error ?? 0}
-          active={(categoryCounts.import_error ?? 0) > 0}
-          color="bg-amber-500/10 text-amber-400"
-          tooltip={CATEGORY_CONFIG.import_error.tooltip}
-          onClick={() => handleCategoryChange("import_error")}
-          selected={categoryFilter === "import_error"}
         />
         <FilterPill
           icon={<ClipboardList size={14} />}
@@ -857,6 +908,26 @@ export default function ReviewQueuePage() {
           onClick={() => handleCategoryChange("ai_partial")}
           selected={categoryFilter === "ai_partial"}
         />
+        <FilterPill
+          icon={<ImageOff size={14} />}
+          label="Missing Art"
+          value={categoryCounts.artwork_incomplete ?? 0}
+          active={(categoryCounts.artwork_incomplete ?? 0) > 0}
+          color="bg-amber-500/10 text-amber-400"
+          tooltip={CATEGORY_CONFIG.artwork_incomplete.tooltip}
+          onClick={() => handleCategoryChange("artwork_incomplete")}
+          selected={categoryFilter === "artwork_incomplete"}
+        />
+        <FilterPill
+          icon={<ImageOff size={14} />}
+          label="Missing Video Art"
+          value={categoryCounts.missing_artwork ?? 0}
+          active={(categoryCounts.missing_artwork ?? 0) > 0}
+          color="bg-rose-500/10 text-rose-400"
+          tooltip={CATEGORY_CONFIG.missing_artwork.tooltip}
+          onClick={() => handleCategoryChange("missing_artwork")}
+          selected={categoryFilter === "missing_artwork"}
+        />
       </div>
 
       {/* Bulk action bar — always visible when there are items */}
@@ -893,6 +964,14 @@ export default function ReviewQueuePage() {
                   <button onClick={handleBatchApplyRename} disabled={batchApplyRenameMutation.isPending}
                     className="btn-ghost btn-sm gap-1 text-teal-400 hover:text-teal-300 text-xs">
                     <FileEdit size={13} /> Rename
+                  </button>
+                </Tooltip>
+              )}
+              {(categoryFilter === "artwork_incomplete" || categoryFilter === "missing_artwork") && (
+                <Tooltip content="Scan external sources (MusicBrainz, Wikipedia, CAA) for missing entity artwork, then clear flags">
+                  <button onClick={handleBatchRepairArtwork} disabled={batchRepairArtworkMutation.isPending}
+                    className="btn-ghost btn-sm gap-1 text-amber-400 hover:text-amber-300 text-xs">
+                    <ImageOff size={13} /> Scan Sources
                   </button>
                 </Tooltip>
               )}
@@ -949,20 +1028,14 @@ export default function ReviewQueuePage() {
         </div>
       ) : (
         <>
-          {/* Select all header */}
-          <div className="flex items-center gap-3 px-3 py-1.5 text-xs text-text-muted border-b border-surface-border mb-1">
-            <Tooltip content="Select or deselect all items on this page">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={allSelected}
-                  onChange={toggleSelectAll}
-                  className="rounded border-surface-border"
-                />
-                Select All
-              </label>
-            </Tooltip>
-          </div>
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            pageSize={pageSize}
+            total={total}
+            onPageChange={setPage}
+            onPageSizeChange={handlePageSizeChange}
+          />
 
           <div className="space-y-1.5">
             {(() => {
@@ -982,6 +1055,8 @@ export default function ReviewQueuePage() {
                     onSetVersion={(vt) => handleSetVersion(item.video_id, vt)}
                     onApplyRename={() => handleApplyRename(item.video_id)}
                     onRedownload={() => handleRedownload(item.video_id)}
+                    onRunSceneAnalysis={() => handleRunSceneAnalysis(item.video_id)}
+                    onScanSources={() => handleScanSources(item.video_id)}
                     categoryFilter={categoryFilter}
                   />
                 ));
@@ -1007,6 +1082,43 @@ export default function ReviewQueuePage() {
                 }
               }
 
+              // Inject the partner video into single-item groups from duplicate_of
+              for (const g of groups) {
+                if (g.items.length === 1 && g.items[0].duplicate_of) {
+                  const d = g.items[0].duplicate_of;
+                  g.items.push({
+                    video_id: d.video_id,
+                    artist: d.artist,
+                    title: d.title,
+                    filename: null,
+                    thumbnail_url: d.thumbnail_url,
+                    review_status: "none" as ReviewItem["review_status"],
+                    review_category: null,
+                    resolved_artist: "",
+                    resolved_recording: "",
+                    confidence_overall: 0,
+                    status: "unmatched" as ReviewItem["status"],
+                    is_user_pinned: false,
+                    top_candidate: null,
+                    candidate_count: 0,
+                    version_type: d.version_type,
+                    updated_at: null,
+                    resolution_label: d.resolution_label,
+                    file_size_bytes: d.file_size_bytes,
+                    import_method: d.import_method,
+                    duration_seconds: d.duration_seconds,
+                    video_codec: d.video_codec,
+                    audio_codec: d.audio_codec,
+                    video_bitrate: d.video_bitrate,
+                    audio_bitrate: d.audio_bitrate,
+                    fps: d.fps,
+                    hdr: d.hdr,
+                    container: d.container,
+                    quality_score: d.quality_score,
+                  });
+                }
+              }
+
               const renderCard = (item: ReviewItem) => (
                 <ReviewCard
                   key={item.video_id}
@@ -1020,6 +1132,8 @@ export default function ReviewQueuePage() {
                   onSetVersion={(vt) => handleSetVersion(item.video_id, vt)}
                   onApplyRename={() => handleApplyRename(item.video_id)}
                   onRedownload={() => handleRedownload(item.video_id)}
+                  onRunSceneAnalysis={() => handleRunSceneAnalysis(item.video_id)}
+                  onScanSources={() => handleScanSources(item.video_id)}
                   categoryFilter={categoryFilter}
                 />
               );
@@ -1090,6 +1204,14 @@ export default function ReviewQueuePage() {
         onScan={handleScanEnrichment}
         isPending={enrichScanMutation.isPending}
       />
+
+      <ScanOptionsModal
+        kind="artwork"
+        open={artworkScanModalOpen}
+        onClose={() => setArtworkScanModalOpen(false)}
+        onScan={handleScanArtwork}
+        isPending={artworkScanMutation.isPending}
+      />
     </div>
   );
 }
@@ -1146,8 +1268,10 @@ function DuplicateGroupCard({
   onSetVersion: (videoId: number, vt: string, approve?: boolean) => void;
 }) {
   const navigate = useNavigate();
-  const allIds = items.map((i) => i.video_id);
-  const allGroupSelected = allIds.every((id) => selectedIds.has(id));
+  // Only items actually in the review queue are actionable (not comparison-only partners)
+  const reviewItems = items.filter((i) => i.review_category === "duplicate");
+  const reviewIds = reviewItems.map((i) => i.video_id);
+  const allGroupSelected = reviewIds.length > 0 && reviewIds.every((id) => selectedIds.has(id));
 
   // Sort by quality score descending so best is first
   const sorted = [...items].sort((a, b) => (b.quality_score ?? 0) - (a.quality_score ?? 0));
@@ -1155,19 +1279,18 @@ function DuplicateGroupCard({
 
   const toggleGroupSelect = () => {
     if (allGroupSelected) {
-      allIds.forEach((id) => onToggleSelect(id));
+      reviewIds.forEach((id) => onToggleSelect(id));
     } else {
-      allIds.filter((id) => !selectedIds.has(id)).forEach((id) => onToggleSelect(id));
+      reviewIds.filter((id) => !selectedIds.has(id)).forEach((id) => onToggleSelect(id));
     }
   };
 
   const handleKeepAll = () => {
-    // Approve all items in the group
-    allIds.forEach((id) => onApprove(id));
+    reviewIds.forEach((id) => onApprove(id));
   };
 
   const handleDismissAll = () => {
-    allIds.forEach((id) => onDismiss(id));
+    reviewIds.forEach((id) => onDismiss(id));
   };
 
   return (
@@ -1199,6 +1322,7 @@ function DuplicateGroupCard({
           const isBest = score > 0 && score === bestScore && sorted.filter((s) => (s.quality_score ?? 0) === bestScore).length === 1;
           // For groups of 4+, wrap into rows of 2
           const isLastOdd = sorted.length > 3 && sorted.length % 2 === 1 && idx === sorted.length - 1;
+          const isComparisonOnly = item.review_category !== "duplicate";
 
           return (
             <div
@@ -1218,6 +1342,9 @@ function DuplicateGroupCard({
                 )}>
                   #{item.video_id}
                 </span>
+                {isComparisonOnly && (
+                  <span className="text-[10px] font-medium text-zinc-400 bg-zinc-500/10 px-1.5 py-0.5 rounded">Existing</span>
+                )}
                 {item.version_type && item.version_type !== "normal" && (
                   <VersionBadge versionType={item.version_type} className="text-[10px] px-1.5 py-0" />
                 )}
@@ -1235,12 +1362,18 @@ function DuplicateGroupCard({
                 </div>
               </div>
               <div className="flex items-center justify-between mt-1.5" onClick={(e) => e.stopPropagation()}>
-                <VersionTypeDropdown currentType={item.version_type} onSelect={(vt) => onSetVersion(item.video_id, vt)} />
-                <Tooltip content="Delete this video and its files from disk">
-                  <button onClick={() => onDelete(item.video_id)} className="btn-ghost btn-sm text-xs text-red-400/60 hover:text-red-300">
-                    <Trash2 size={13} />
-                  </button>
-                </Tooltip>
+                {!isComparisonOnly ? (
+                  <>
+                    <VersionTypeDropdown currentType={item.version_type} onSelect={(vt) => onSetVersion(item.video_id, vt)} />
+                    <Tooltip content="Delete this video and its files from disk">
+                      <button onClick={() => onDelete(item.video_id)} className="btn-ghost btn-sm text-xs text-red-400/60 hover:text-red-300">
+                        <Trash2 size={13} />
+                      </button>
+                    </Tooltip>
+                  </>
+                ) : (
+                  <span className="text-[10px] text-zinc-500 italic">Not in review queue</span>
+                )}
               </div>
             </div>
           );
@@ -1276,6 +1409,8 @@ function ReviewCard({
   onSetVersion,
   onApplyRename,
   onRedownload,
+  onRunSceneAnalysis,
+  onScanSources,
   categoryFilter,
 }: {
   item: ReviewItem;
@@ -1288,10 +1423,15 @@ function ReviewCard({
   onSetVersion: (vt: string) => void;
   onApplyRename: () => void;
   onRedownload: () => void;
+  onRunSceneAnalysis: () => void;
+  onScanSources: () => void;
   categoryFilter: ReviewCategory;
 }) {
   const reasons = parseReviewReason(item.review_reason);
   const hasNormFailure = (item.review_reason || "").toLowerCase().includes("audio normalization failed");
+  const isMissingSceneAnalysis = (item.review_category === "ai_partial" || item.review_category === "ai_pending") && (item.review_reason || "").toLowerCase().includes("scene analysis");
+  const isMissingVideoArtwork = item.review_category === "missing_artwork";
+  const isMissingEntityArt = isMissingVideoArtwork && /artist_thumb|album_thumb/.test(item.review_reason || "");
 
   return (
     <div
@@ -1377,6 +1517,18 @@ function ReviewCard({
                 <FileEdit size={14} /> Rename
               </button>
             </Tooltip>
+          ) : isMissingEntityArt ? (
+            <Tooltip content="Scan external sources (MusicBrainz, Wikipedia, CAA) for missing entity artwork">
+              <button onClick={onScanSources} className="btn-ghost btn-sm text-xs text-amber-400 hover:text-amber-300">
+                <ImageOff size={14} />
+              </button>
+            </Tooltip>
+          ) : isMissingSceneAnalysis || isMissingVideoArtwork ? (
+            <Tooltip content="Run scene analysis to generate thumbnails">
+              <button onClick={onRunSceneAnalysis} className="btn-ghost btn-sm text-xs text-emerald-400 hover:text-emerald-300">
+                <ScanSearch size={14} />
+              </button>
+            </Tooltip>
           ) : (
             <Tooltip content="Approve — accept the current classification and remove from review">
               <button onClick={onApprove} className="btn-ghost btn-sm text-xs text-emerald-400 hover:text-emerald-300">
@@ -1393,7 +1545,7 @@ function ReviewCard({
             </Tooltip>
           )}
 
-          <Tooltip content="Dismiss — clear the review flag entirely and remove from queue">
+          <Tooltip content={isMissingSceneAnalysis || isMissingVideoArtwork ? "Ignore — remove from queue (future scans may re-flag)" : "Dismiss — clear the review flag entirely and remove from queue"}>
             <button onClick={onDismiss} className="btn-ghost btn-sm text-xs text-red-400 hover:text-red-300">
               <X size={14} />
             </button>

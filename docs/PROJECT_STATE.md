@@ -1,8 +1,8 @@
 # Playarr — Project State Summary
 
-> **Generated:** 2 April 2026
-> **Version:** 1.0.0 (tagged `v1.0.0`)
-> **Git:** Local repository, 1 commit, no remote configured
+> **Generated:** 11 April 2026
+> **Version:** 1.9.13
+> **Git:** Local repository, main branch
 
 ---
 
@@ -10,14 +10,13 @@
 
 | Metric | Count |
 |--------|-------|
-| **Backend Python files** | 182 |
-| **Backend lines of code** | ~85,500 |
-| **Frontend TypeScript files** | 78 |
-| **Frontend lines of code** | ~29,100 |
+| **Backend Python files** | 187 |
+| **Backend lines of code** | ~95,100 |
+| **Frontend TypeScript files** | 84 |
+| **Frontend lines of code** | ~34,600 |
 | **Frontend CSS** | 1 file (index.css, ~220 lines, Tailwind CSS 4 @theme + @utility design system) |
-| **Total tracked files (git)** | 317 |
-| **Total lines (backend + frontend)** | ~114,600 |
-| **Alembic migrations** | 11 |
+| **Total lines (backend + frontend)** | ~129,700 |
+| **Alembic migrations** | 22 |
 | **Test files** | 7 |
 | **Documentation files** | 8 (in docs/) |
 
@@ -55,7 +54,7 @@ backend/
     ├── models.py             # Core ORM models (~950 lines)
     ├── schemas.py            # Pydantic request/response schemas
     ├── tasks.py              # Celery tasks (import, rescan, normalise, scan, export)
-    ├── version.py            # APP_VERSION = "1.0.0"
+    ├── version.py            # APP_VERSION = "1.9.13"
     ├── worker.py             # Celery setup + Redis broker
     ├── routers/              # 12 FastAPI routers
     │   ├── library.py        # Video CRUD, search, filters, party mode, rename
@@ -196,14 +195,12 @@ frontend/src/
 ## 9. Git State
 
 ```
-Branch: master
-Commits: 1 (v1.0.0: Initial release)
-Tag: v1.0.0
-Remote: none configured
-Uncommitted: docs/SPEC_SHEET.md, docs/PROJECT_STATE.md (these documents)
+Branch: main
+Commits: 44+
+Tags: v1.0.0 through v1.9.4
+Remote: origin → https://github.com/lambertius/playarr
 ```
-
-**To push:** `git remote add origin <url>` → `git push -u origin master --tags`
+**Status:** Active development, main branch, remote configured
 
 ---
 

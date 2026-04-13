@@ -36,7 +36,7 @@ const CATEGORY_META: Record<NewVideoCategory, { label: string; icon: React.Eleme
   famous:    { label: "Famous",               icon: Trophy,      description: "Iconic music videos you might be missing" },
 };
 
-const CATEGORY_ORDER: NewVideoCategory[] = ["famous", "popular", "new", "rising", "by_artist", "taste"];
+const CATEGORY_ORDER: NewVideoCategory[] = ["taste", "by_artist", "famous", "popular", "new", "rising"];
 
 export function NewVideosPage() {
   const { data: feed, isLoading, error } = useNewVideosFeed();
@@ -222,7 +222,7 @@ function CategorySection({
 
       {/* Responsive column grid */}
       <div className="grid grid-cols-[repeat(auto-fill,200px)] gap-4">
-        {videos.slice(0, 12).map(video => (
+        {videos.slice(0, 20).map(video => (
           <SuggestionCard key={video.id} video={video} onAdd={onAdd} />
         ))}
       </div>

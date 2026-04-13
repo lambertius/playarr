@@ -3,9 +3,9 @@
  * running rename or duplicate scans from the Review Queue.
  */
 import ReactDOM from "react-dom";
-import { X, FileEdit, Copy, BrainCircuit } from "lucide-react";
+import { X, FileEdit, Copy, BrainCircuit, ImageOff } from "lucide-react";
 
-type ScanKind = "renames" | "duplicates" | "enrichment";
+type ScanKind = "renames" | "duplicates" | "enrichment" | "artwork";
 
 interface ScanOptionsModalProps {
   kind: ScanKind;
@@ -70,6 +70,24 @@ const CONFIG: Record<ScanKind, {
         label: "Full library re-scan",
         description:
           "Re-scan every video in the library for incomplete AI enrichment, including items already flagged or dismissed. Use this for a complete audit of AI enrichment status.",
+        rescanAll: true,
+      },
+    ],
+  },
+  artwork: {
+    title: "Scan Missing Artwork",
+    icon: ImageOff,
+    options: [
+      {
+        label: "Unflagged videos only",
+        description:
+          "Scan for videos missing poster or thumbnail artwork, skipping any already in the review queue. Best for finding imported tracks that need artwork.",
+        rescanAll: false,
+      },
+      {
+        label: "Full library re-scan",
+        description:
+          "Re-scan every video in the library for missing artwork, including items already flagged or dismissed. Use this for a complete audit of artwork status.",
         rescanAll: true,
       },
     ],

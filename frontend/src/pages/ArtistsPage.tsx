@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Users, PartyPopper, ListPlus, Trash2, RefreshCw } from "lucide-react";
 import { useArtists, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks/queries";
 import { playbackApi } from "@/lib/api";
@@ -34,7 +34,10 @@ function groupByLetter(artists: { artist: string; count: number; video_ids: numb
 
 export function ArtistsPage() {
   const [filters, setFilters] = useState<FacetFilterParams>({});
-  const { data, isLoading, isError, refetch } = useArtists(filters);
+  const [searchParams] = useSearchParams();
+  const searchTerm = searchParams.get("search") ?? "";
+  const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
+  const { data, isLoading, isError, refetch } = useArtists(mergedFilters);
   const navigate = useNavigate();
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
   const { toast } = useToast();
@@ -104,6 +107,7 @@ export function ArtistsPage() {
           if (ok) {
             batchDeleteMutation.mutate(videoIds, {
               onSuccess: (res) => toast({ type: "success", title: `Deleted ${res.count} video(s)` }),
+              onError: (err: any) => toast({ type: "error", title: err?.response?.data?.detail || "Failed to delete videos" }),
             });
           }
           break;
@@ -113,7 +117,14 @@ export function ArtistsPage() {
     [navigate, batchRescanMutation, normalizeMutation, batchDeleteMutation, toast, confirm],
   );
 
-  const grouped = useMemo(() => (data ? groupByLetter(data) : []), [data]);
+  // Client-side filter: when searching, only show stacks whose artist name matches
+  const filtered = useMemo(() => {
+    if (!data || !searchTerm) return data ?? [];
+    const term = searchTerm.toLowerCase();
+    return data.filter((a) => a.artist.toLowerCase().includes(term));
+  }, [data, searchTerm]);
+
+  const grouped = useMemo(() => (filtered.length ? groupByLetter(filtered) : []), [filtered]);
 
   return (
     <div className="p-4 md:p-6">
@@ -122,7 +133,7 @@ export function ArtistsPage() {
           <Users size={22} /> Artists
         </h1>
         <button
-          onClick={() => launchParty(filters)}
+          onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
           className="btn-sm text-xs font-semibold px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 text-white hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 transition-all shadow-lg shadow-purple-500/25 flex items-center gap-1.5"
         >
@@ -147,6 +158,7 @@ export function ArtistsPage() {
                 });
                 if (ok) batchDeleteMutation.mutate(selectedVideoIds, {
                   onSuccess: (res) => { toast({ type: "success", title: `Deleted ${res.count} video(s)` }); setSelectedArtists(new Set()); },
+                  onError: (err: any) => toast({ type: "error", title: err?.response?.data?.detail || "Failed to delete videos" }),
                 });
               }}
               className="btn-danger btn-sm"
@@ -168,8 +180,8 @@ export function ArtistsPage() {
         </div>
       ) : isError ? (
         <ErrorState message="Failed to load artists" onRetry={refetch} />
-      ) : !data || data.length === 0 ? (
-        <EmptyState icon={<Users size={48} />} title="No artists yet" />
+      ) : !filtered || filtered.length === 0 ? (
+        <EmptyState icon={<Users size={48} />} title={searchTerm ? "No matching artists" : "No artists yet"} />
       ) : (
         grouped.map(({ letter, items }) => (
           <GroupedSection key={letter} heading={letter}>

@@ -452,4 +452,20 @@ def _find_existing_video(
             if qp_lower.startswith(dp_lower) or dp_lower.startswith(qp_lower):
                 return candidate
 
+        # Fuzzy fallback: comparison-key matching strips punctuation,
+        # accents, and special characters (AC/DC≈ACDC, Don't≈Dont,
+        # blink-182≈Blink182, Gotye; Kimbra≈Gotye Kimbra, etc.)
+        from app.matching.normalization import make_comparison_key
+        incoming_artist_key = make_comparison_key(artist)
+        incoming_title_key = make_comparison_key(title)
+        if incoming_artist_key and incoming_title_key:
+            all_videos = db.query(VideoItem).filter(
+                VideoItem.artist.isnot(None),
+                VideoItem.title.isnot(None),
+            ).all()
+            for candidate in all_videos:
+                if (make_comparison_key(candidate.artist or "") == incoming_artist_key
+                        and make_comparison_key(candidate.title or "") == incoming_title_key):
+                    return candidate
+
     return None

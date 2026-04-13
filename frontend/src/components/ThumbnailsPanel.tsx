@@ -85,7 +85,7 @@ export function ThumbnailsPanel({ videoId, processingState }: ThumbnailsPanelPro
               disabled={scenesMutation.isPending}
               onClick={() =>
                 scenesMutation.mutate(
-                  { videoId },
+                  { videoId, data: { force: true } },
                   {
                     onSuccess: () => toast({ type: "success", title: "Scene analysis started" }),
                     onError: () => toast({ type: "error", title: "Scene analysis failed" }),

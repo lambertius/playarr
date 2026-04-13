@@ -207,6 +207,19 @@ def select_thumbnail(
     if video:
         _save_as_video_thumb(db, video, thumb)
 
+        # Clear missing_artwork review flag if both poster and thumb now exist
+        if video.review_category in ("missing_artwork", "artwork_incomplete"):
+            from app.models import MediaAsset
+            has_poster = db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == video_id,
+                MediaAsset.asset_type == "poster",
+                MediaAsset.status == "valid",
+            ).first() is not None
+            if has_poster:
+                video.review_status = "none"
+                video.review_reason = None
+                video.review_category = None
+
     db.commit()
     return thumb
 

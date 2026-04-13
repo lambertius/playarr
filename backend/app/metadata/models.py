@@ -72,6 +72,9 @@ class ArtistEntity(Base):
     # JSON dict: {"canonical_name": "musicbrainz", "biography": "wikipedia", ...}
     field_provenance: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Field-level user attribution — which user last set each field
+    field_provenance_users: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
@@ -119,6 +122,9 @@ class AlbumEntity(Base):
 
     # Field-level provenance
     field_provenance: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Field-level user attribution — which user last set each field
+    field_provenance_users: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -203,6 +209,9 @@ class TrackEntity(Base):
     # Field-level provenance
     field_provenance: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Field-level user attribution — which user last set each field
+    field_provenance_users: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
@@ -255,6 +264,7 @@ class CachedAsset(Base):
     provenance: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     source_provider: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # musicbrainz|wikipedia|coverartarchive|youtube
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    crop_position: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # CSS object-position e.g. "50% 30%"
 
     # Validity tracking
     status: Mapped[str] = mapped_column(String(20), default="valid", server_default="valid")  # valid|invalid|missing|pending
@@ -272,7 +282,7 @@ class CachedAsset(Base):
     def _require_status(self, key, value):
         """Soft guard: warn if status is not set to a known value."""
         import logging
-        _VALID_STATUSES = {"valid", "invalid", "missing", "pending"}
+        _VALID_STATUSES = {"valid", "invalid", "missing", "pending", "unavailable"}
         if value and value not in _VALID_STATUSES:
             logging.getLogger(__name__).warning(
                 f"CachedAsset status '{value}' is not a recognized value "

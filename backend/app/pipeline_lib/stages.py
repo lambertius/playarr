@@ -65,6 +65,29 @@ def run_library_import_pipeline(job_id: int) -> None:
         ws.write_artifact("apply_result", {"video_id": video_id})
         ws.log(f"Applied to DB — video_id={video_id}")
 
+        # Flag the existing video for duplicate review when quality upgrade
+        dup_check = ws.read_artifact("duplicate_check") or {}
+        if dup_check.get("is_quality_upgrade"):
+            _existing_id = dup_check.get("existing_video_id")
+            if _existing_id:
+                from app.database import SessionLocal as _DupSL
+                from app.models import VideoItem as _DupVI
+                _dup_db = _DupSL()
+                try:
+                    _existing_vid = _dup_db.query(_DupVI).get(_existing_id)
+                    if _existing_vid:
+                        _existing_vid.review_status = "duplicate"
+                        _existing_vid.review_category = "duplicate"
+                        _existing_vid.review_reason = (
+                            f"Quality upgrade imported: {dup_check.get('incoming_resolution', '?')} "
+                            f"(was {dup_check.get('existing_resolution', '?')}). "
+                            f"New item id={video_id}"
+                        )
+                        _dup_db.commit()
+                        ws.log(f"Flagged existing id={_existing_id} for duplicate review")
+                finally:
+                    _dup_db.close()
+
         # Write Playarr XML sidecar
         try:
             from app.services.playarr_xml import write_playarr_xml
@@ -102,9 +125,6 @@ def run_library_import_pipeline(job_id: int) -> None:
                        step=f"Skipped: {_dup_reason[:200]}",
                        progress=100,
                        video_id=dup.existing_video_id)
-        if dup.existing_video_id:
-            _flag_existing_for_duplicate_review(
-                dup.existing_video_id, job_id, _dup_reason)
         ws.sync_logs_to_db()
         ws.cleanup_on_success()
     except TocTouDuplicateError as toctou:
@@ -117,9 +137,6 @@ def run_library_import_pipeline(job_id: int) -> None:
                        step=f"Skipped: {_toctou_reason[:200]}",
                        progress=100,
                        video_id=toctou.existing_video_id)
-        if toctou.existing_video_id:
-            _flag_existing_for_duplicate_review(
-                toctou.existing_video_id, job_id, _toctou_reason)
         ws.sync_logs_to_db()
         ws.cleanup_on_success()
     except Exception as e:
@@ -376,31 +393,40 @@ def _library_stage_b(ws: ImportWorkspace, job_id: int, params: dict) -> None:
         # The B3 precheck was conservative — now we have version info.
         dup_check = ws.read_artifact("duplicate_check") or {}
         if dup_check.get("is_possible_duplicate"):
-            incoming_version = version.get("version_type", "normal") or "normal"
-            existing_version = dup_check.get("existing_version_type", "normal")
-            if incoming_version == existing_version:
-                # Version detection resolved to same type → hard duplicate
-                _eid = dup_check["existing_video_id"]
-                ws.log(f"Version-aware re-check: both {incoming_version}, "
-                       f"confirmed duplicate (id={_eid}), skipping")
-                raise _DuplicateSkip(
-                    existing_video_id=_eid,
-                    match_type="name_match",
-                    reason=(
-                        f"Duplicate of existing item (id={_eid}, "
-                        f"both version={incoming_version})"
-                    ),
+            # Quality upgrades: keep both files, flag for duplicate review
+            if dup_check.get("is_quality_upgrade"):
+                version["review_status"] = "duplicate"
+                version["needs_review"] = True
+                _dup_reason = dup_check.get("reason", "Quality upgrade")
+                version["review_reason"] = _dup_reason
+                ws.write_artifact("version_detection", version)
+                ws.log(f"Quality upgrade: keeping both, flagging for duplicate review")
+            else:
+                incoming_version = version.get("version_type", "normal") or "normal"
+                existing_version = dup_check.get("existing_version_type", "normal")
+                if incoming_version == existing_version:
+                    # Version detection resolved to same type → hard duplicate
+                    _eid = dup_check["existing_video_id"]
+                    ws.log(f"Version-aware re-check: both {incoming_version}, "
+                           f"confirmed duplicate (id={_eid}), skipping")
+                    raise _DuplicateSkip(
+                        existing_video_id=_eid,
+                        match_type="name_match",
+                        reason=(
+                            f"Duplicate of existing item (id={_eid}, "
+                            f"both version={incoming_version})"
+                        ),
+                    )
+                # Still different versions → keep the review flag
+                version["review_status"] = "needs_human_review"
+                version["needs_review"] = True
+                _dup_reason = dup_check.get("reason", "Possible duplicate")
+                existing_reason = version.get("review_reason") or ""
+                version["review_reason"] = (
+                    f"{existing_reason}; {_dup_reason}" if existing_reason
+                    else _dup_reason
                 )
-            # Still different versions → keep the review flag
-            version["review_status"] = "needs_human_review"
-            version["needs_review"] = True
-            _dup_reason = dup_check.get("reason", "Possible duplicate")
-            existing_reason = version.get("review_reason") or ""
-            version["review_reason"] = (
-                f"{existing_reason}; {_dup_reason}" if existing_reason
-                else _dup_reason
-            )
-            ws.write_artifact("version_detection", version)
+                ws.write_artifact("version_detection", version)
 
         # B12: Entity resolution
         _coarse_update(job_id, step="Resolving entities", progress=75)
@@ -628,6 +654,7 @@ def _step_duplicate_precheck(ws: ImportWorkspace, artist: str, title: str,
     from app.database import SessionLocal
     from app.models import VideoItem
     from app.scraper.source_validation import parse_multi_artist
+    from app.matching.normalization import make_comparison_key
 
     db = SessionLocal()
     try:
@@ -635,6 +662,7 @@ def _step_duplicate_precheck(ws: ImportWorkspace, artist: str, title: str,
             VideoItem.artist.ilike(artist),
             VideoItem.title.ilike(title),
         ).first()
+        match_type = "exact"
         if not existing:
             # Fallback: primary artist prefix match + title
             query_primary, _ = parse_multi_artist(artist)
@@ -647,7 +675,30 @@ def _step_duplicate_precheck(ws: ImportWorkspace, artist: str, title: str,
                 dp_lower = db_primary.lower()
                 if dp_lower == qp_lower or qp_lower.startswith(dp_lower) or dp_lower.startswith(qp_lower):
                     existing = candidate
+                    match_type = "primary_artist"
                     break
+        if not existing:
+            # Fuzzy fallback: comparison-key matching strips punctuation,
+            # accents, and special characters (AC/DC≈ACDC, Don't≈Dont,
+            # blink-182≈Blink182, Gotye; Kimbra≈Gotye Kimbra, etc.)
+            incoming_artist_key = make_comparison_key(artist)
+            incoming_title_key = make_comparison_key(title)
+            if incoming_artist_key and incoming_title_key:
+                all_videos = db.query(VideoItem).filter(
+                    VideoItem.artist.isnot(None),
+                    VideoItem.title.isnot(None),
+                ).all()
+                for candidate in all_videos:
+                    if (make_comparison_key(candidate.artist or "") == incoming_artist_key
+                            and make_comparison_key(candidate.title or "") == incoming_title_key):
+                        existing = candidate
+                        match_type = "fuzzy"
+                        ws.log(
+                            f"Fuzzy match: '{artist} - {title}' ≈ "
+                            f"'{candidate.artist} - {candidate.title}' "
+                            f"(key: {incoming_artist_key} / {incoming_title_key})"
+                        )
+                        break
         if existing:
             existing_version = getattr(existing, "version_type", "normal") or "normal"
 
@@ -675,12 +726,52 @@ def _step_duplicate_precheck(ws: ImportWorkspace, artist: str, title: str,
                 ws.update_stage("duplicate_precheck", "complete")
                 return  # proceed with import
 
-            # Same version type (both normal) → hard duplicate → skip
-            ws.log(f"Duplicate found (id={existing.id}, version={existing_version}), skipping")
+            # Same version type (both normal) → check for quality upgrade
+            ffprobe = ws.read_artifact("ffprobe") or {}
+            incoming_height = ffprobe.get("height") or 0
+            existing_height = 0
+            qs = getattr(existing, "quality_signature", None)
+            if qs:
+                existing_height = qs.height or 0
+            elif existing.resolution_label:
+                # Parse height from label like "1080p" → 1080
+                try:
+                    existing_height = int(existing.resolution_label.rstrip("p"))
+                except (ValueError, AttributeError):
+                    pass
+
+            if incoming_height > existing_height and existing_height > 0:
+                ws.log(
+                    f"Quality upgrade available: existing id={existing.id} "
+                    f"({existing_height}p → {incoming_height}p). "
+                    f"Flagging for review."
+                )
+                ws.write_artifact("duplicate_check", {
+                    "is_duplicate": False,
+                    "is_possible_duplicate": True,
+                    "is_quality_upgrade": True,
+                    "existing_video_id": existing.id,
+                    "existing_artist": existing.artist,
+                    "existing_title": existing.title,
+                    "existing_version_type": existing_version,
+                    "existing_resolution": f"{existing_height}p",
+                    "incoming_resolution": f"{incoming_height}p",
+                    "match_type": match_type,
+                    "reason": (
+                        f"Quality upgrade for '{existing.artist} - {existing.title}' "
+                        f"(id={existing.id}, {existing_height}p → {incoming_height}p)"
+                    ),
+                })
+                ws.update_stage("duplicate_precheck", "complete")
+                return  # proceed with import — it's an upgrade
+
+            # Hard duplicate → skip
+            ws.log(f"Duplicate found (id={existing.id}, version={existing_version}, "
+                   f"match={match_type}), skipping")
             ws.update_stage("duplicate_precheck", "complete")
             raise _DuplicateSkip(
                 existing_video_id=existing.id,
-                match_type="name_match",
+                match_type=match_type,
                 reason=(
                     f"Duplicate of '{existing.artist} - {existing.title}' "
                     f"(id={existing.id}, version={existing_version})"
@@ -750,8 +841,8 @@ def _step_organize_file(ws: ImportWorkspace, source_path: str,
                     ev_path = os.path.join(target_folder, ev)
                     os.remove(ev_path)
                     ws.log(f"Overwrite: removed existing {ev}")
-            elif user_dup_action == "keep_both":
-                # User chose keep_both → allow coexistence, skip clash check
+            elif user_dup_action == "keep_both" or dup_check.get("is_quality_upgrade"):
+                # User chose keep_both, or auto quality upgrade → allow coexistence
                 ws.log(f"Keep both: allowing import alongside {len(existing_videos)} existing file(s)")
             else:
                 existing_video_id = _find_video_by_folder(target_folder)
@@ -1486,26 +1577,13 @@ def _find_video_by_folder(folder_path: str) -> Optional[int]:
 def _flag_existing_for_duplicate_review(existing_video_id: int,
                                         job_id: int,
                                         reason: str) -> None:
-    """Flag an existing library item for review when a duplicate import is skipped."""
-    from app.database import SessionLocal
-    from app.models import VideoItem
+    """Flag an existing library item for review when a duplicate import is skipped.
 
-    db = SessionLocal()
-    try:
-        item = db.query(VideoItem).get(existing_video_id)
-        if item and item.review_status in (None, "none"):
-            item.review_status = "needs_human_review"
-            item.review_category = "import_error"
-            item.review_reason = (
-                f"Duplicate import skipped (job {job_id}): {reason}"
-            )[:500]
-            db.commit()
-            logger.info(f"Flagged video {existing_video_id} for duplicate review")
-    except Exception as e:
-        db.rollback()
-        logger.warning(f"Failed to flag video {existing_video_id} for review: {e}")
-    finally:
-        db.close()
+    NOTE: Disabled — duplicate import skips are surfaced in the Queue tab
+    (skipped status) with poster art and skip reason, making the review
+    queue entry redundant.
+    """
+    return
 
 
 def _cleanup_organized_artifacts(ws: ImportWorkspace) -> None:

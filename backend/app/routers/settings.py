@@ -760,10 +760,13 @@ def delete_archive_items(body: DeleteArchiveRequest):
             continue
         if os.path.isdir(folder):
             try:
-                import shutil as _shutil
-                _shutil.rmtree(folder)
+                from app.safe_delete import safe_delete, NetworkDeleteError
+                try:
+                    safe_delete(folder)
+                except NetworkDeleteError:
+                    safe_delete(folder, force_permanent=True)
                 deleted += 1
-            except OSError as e:
+            except Exception as e:
                 errors.append(f"{folder}: {e}")
         else:
             errors.append(f"Not found: {folder}")
@@ -783,19 +786,15 @@ def clear_archive():
             continue
         for entry in os.listdir(archive_dir):
             entry_path = os.path.join(archive_dir, entry)
-            if os.path.isdir(entry_path):
+            try:
+                from app.safe_delete import safe_delete, NetworkDeleteError
                 try:
-                    import shutil as _shutil
-                    _shutil.rmtree(entry_path)
-                    deleted += 1
-                except OSError as e:
-                    errors.append(f"{entry_path}: {e}")
-            elif os.path.isfile(entry_path):
-                try:
-                    os.remove(entry_path)
-                    deleted += 1
-                except OSError as e:
-                    errors.append(f"{entry_path}: {e}")
+                    safe_delete(entry_path)
+                except NetworkDeleteError:
+                    safe_delete(entry_path, force_permanent=True)
+                deleted += 1
+            except Exception as e:
+                errors.append(f"{entry_path}: {e}")
     return {"deleted": deleted, "errors": errors}
 
 
@@ -828,10 +827,13 @@ def clean_stale_archives(body: DeleteArchiveRequest):
             errors.append(f"Still has video: {folder}")
             continue
         try:
-            import shutil as _shutil
-            _shutil.rmtree(folder)
+            from app.safe_delete import safe_delete, NetworkDeleteError
+            try:
+                safe_delete(folder)
+            except NetworkDeleteError:
+                safe_delete(folder, force_permanent=True)
             deleted += 1
-        except OSError as e:
+        except Exception as e:
             errors.append(f"{folder}: {e}")
     return {"deleted": deleted, "errors": errors}
 

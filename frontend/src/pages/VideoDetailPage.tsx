@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Pencil, Check, X, ChevronLeft, ChevronRight, Shuffle, Play, ListEnd, ListStart, ListPlus } from "lucide-react";
+import { ArrowLeft, Pencil, Check, X, ChevronLeft, ChevronRight, Shuffle, Play, ListEnd, ListStart, ListPlus, Music, Loader2 } from "lucide-react";
 import {
   useVideo, useSnapshots, useJobs, useUpdateVideo, useVideoNav,
 } from "@/hooks/queries";
@@ -46,6 +46,7 @@ export function VideoDetailPage() {
   const updateMutation = useUpdateVideo(id);
   const [editingPlot, setEditingPlot] = useState(false);
   const [plotDraft, setPlotDraft] = useState("");
+  const [audioDownloading, setAudioDownloading] = useState(false);
 
   /* ── Loading skeleton ── */
   if (isLoading) {
@@ -89,9 +90,9 @@ export function VideoDetailPage() {
   const thumbAsset = video.media_assets?.find((a) => a.asset_type === "video_thumb");
   const posterAsset = video.media_assets?.find((a) => a.asset_type === "poster");
   const playerPoster = thumbAsset
-    ? `/api/playback/asset/${thumbAsset.id}`
+    ? `/api/playback/asset/${thumbAsset.id}${thumbAsset.file_hash ? `?h=${thumbAsset.file_hash}` : ""}`
     : posterAsset
-      ? playbackApi.posterUrl(video.id)
+      ? `${playbackApi.posterUrl(video.id)}${posterAsset.file_hash ? `?h=${posterAsset.file_hash}` : ""}`
       : undefined;
 
   return (
@@ -156,6 +157,39 @@ export function VideoDetailPage() {
               {/* ── Playback actions ── */}
               <div className="w-px h-5 bg-surface-border mx-1" />
               <PlaybackActions video={video} />
+
+              {/* ── Audio download ── */}
+              <div className="w-px h-5 bg-surface-border mx-1" />
+              <Tooltip content="Download audio (MP3)">
+                <button
+                  disabled={audioDownloading}
+                  onClick={async () => {
+                    setAudioDownloading(true);
+                    try {
+                      const res = await fetch(`/api/playback/download-audio/${video.id}`);
+                      if (!res.ok) throw new Error("Download failed");
+                      const blob = await res.blob();
+                      const disposition = res.headers.get("content-disposition");
+                      const match = disposition?.match(/filename="(.+?)"/);
+                      const filename = match?.[1] ?? `${video.artist} - ${video.title}.mp3`;
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = filename;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    } catch {
+                      // silently fail
+                    } finally {
+                      setAudioDownloading(false);
+                    }
+                  }}
+                  className="btn-ghost btn-icon"
+                  aria-label="Download audio"
+                >
+                  {audioDownloading ? <Loader2 size={16} className="animate-spin" /> : <Music size={16} />}
+                </button>
+              </Tooltip>
             </div>
           </div>
           <div className="flex items-center gap-2 mt-1 flex-wrap">

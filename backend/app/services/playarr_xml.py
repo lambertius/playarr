@@ -90,8 +90,11 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
         _opt(ver, "original_title", video.original_title)
         if getattr(video, "parent_video_id", None):
             _txt(ver, "parent_video_id", str(video.parent_video_id))
-        if getattr(video, "canonical_provenance", None):
-            _txt(ver, "canonical_provenance", video.canonical_provenance)
+
+    # ── canonical tracking (outside <version> so it applies to all videos) ──
+    _opt(identity, "canonical_provenance", getattr(video, "canonical_provenance", None))
+    if getattr(video, "canonical_confidence", None) is not None:
+        _txt(identity, "canonical_confidence", video.canonical_confidence)
 
     # ── genres ──
     if video.genres:
@@ -244,6 +247,12 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     if archive_filename:
         archive_el = SubElement(root, "archive")
         _txt(archive_el, "original_filename", archive_filename)
+    if getattr(video, "editor_edit_type", None):
+        if archive_filename:
+            _txt(archive_el, "edit_type", video.editor_edit_type)
+        else:
+            archive_el = SubElement(root, "archive")
+            _txt(archive_el, "edit_type", video.editor_edit_type)
 
     # ── processing state ──
     ps = video.processing_state
@@ -263,6 +272,8 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     # ── flags ──
     flags = SubElement(root, "flags")
     _txt(flags, "exclude_from_editor_scan", video.exclude_from_editor_scan)
+    if getattr(video, "editor_edit_type", None):
+        _txt(flags, "editor_edit_type", video.editor_edit_type)
     if video.locked_fields:
         import json
         locked = video.locked_fields if isinstance(video.locked_fields, list) else json.loads(video.locked_fields)
@@ -324,13 +335,14 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
             artist_assets = db.query(CachedAsset).filter(
                 CachedAsset.entity_type == "artist",
                 CachedAsset.entity_id == video.artist_entity_id,
-                CachedAsset.status == "valid",
+                CachedAsset.status.in_(["valid", "unavailable"]),
             ).all()
             if artist_assets:
                 art_cache = SubElement(ae, "cached_artwork")
                 for ca in artist_assets:
                     ca_el = SubElement(art_cache, "asset")
                     _txt(ca_el, "kind", ca.kind)
+                    _txt(ca_el, "status", ca.status)
                     _opt(ca_el, "source_url", ca.source_url)
                     _opt(ca_el, "file_hash", ca.file_hash)
                     _opt(ca_el, "provenance", ca.provenance)
@@ -350,13 +362,14 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
             album_assets = db.query(CachedAsset).filter(
                 CachedAsset.entity_type == "album",
                 CachedAsset.entity_id == video.album_entity_id,
-                CachedAsset.status == "valid",
+                CachedAsset.status.in_(["valid", "unavailable"]),
             ).all()
             if album_assets:
                 art_cache = SubElement(al, "cached_artwork")
                 for ca in album_assets:
                     ca_el = SubElement(art_cache, "asset")
                     _txt(ca_el, "kind", ca.kind)
+                    _txt(ca_el, "status", ca.status)
                     _opt(ca_el, "source_url", ca.source_url)
                     _opt(ca_el, "file_hash", ca.file_hash)
                     _opt(ca_el, "provenance", ca.provenance)
@@ -506,9 +519,22 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
             parent_vid = _text(ver.find("parent_video_id"))
             if parent_vid:
                 result["parent_video_id"] = int(parent_vid)
-            result["canonical_provenance"] = _text(ver.find("canonical_provenance")) or None
+            # Legacy: canonical_provenance was previously nested inside <version>
+            if not result.get("canonical_provenance"):
+                result["canonical_provenance"] = _text(ver.find("canonical_provenance")) or None
         else:
             result["version_type"] = "normal"
+
+        # canonical tracking — top-level in <identity>
+        cp = _text(identity.find("canonical_provenance"))
+        if cp:
+            result["canonical_provenance"] = cp
+        cc = _text(identity.find("canonical_confidence"))
+        if cc:
+            try:
+                result["canonical_confidence"] = float(cc)
+            except (ValueError, TypeError):
+                pass
 
     # ── genres ──
     genres_el = root.find("genres")
@@ -643,6 +669,9 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         orig = archive_el.findtext("original_filename")
         if orig:
             result["archive_original_filename"] = orig
+        edit_type = archive_el.findtext("edit_type")
+        if edit_type:
+            result["editor_edit_type"] = edit_type
 
     # ── processing state ──
     state_el = root.find("processing_state")
@@ -690,6 +719,9 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
     flags_el = root.find("flags")
     if flags_el is not None:
         result["exclude_from_editor_scan"] = _bool(flags_el.find("exclude_from_editor_scan"))
+        edit_type = _text(flags_el.find("editor_edit_type"))
+        if edit_type:
+            result["editor_edit_type"] = edit_type
         lf = flags_el.find("locked_fields")
         if lf is not None:
             result["locked_fields"] = [_text(f) for f in lf.findall("field") if _text(f)]
@@ -754,6 +786,7 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
                 for ca in ac.findall("asset"):
                     artist_ref["cached_artwork"].append({
                         "kind": _text(ca.find("kind")),
+                        "status": _text(ca.find("status")) or "valid",
                         "source_url": _text(ca.find("source_url")) or None,
                         "file_hash": _text(ca.find("file_hash")) or None,
                         "provenance": _text(ca.find("provenance")) or None,
@@ -773,6 +806,7 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
                 for ca in ac.findall("asset"):
                     album_ref["cached_artwork"].append({
                         "kind": _text(ca.find("kind")),
+                        "status": _text(ca.find("status")) or "valid",
                         "source_url": _text(ca.find("source_url")) or None,
                         "file_hash": _text(ca.find("file_hash")) or None,
                         "provenance": _text(ca.find("provenance")) or None,

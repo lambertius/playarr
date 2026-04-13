@@ -1981,8 +1981,15 @@ def resolve_metadata_unified(
             _pma_id = _pma_resync  # already imported above
             _pre_primary, _pre_feat = _pma_id(_pre_review_artist)
             _post_primary, _post_feat = _pma_id(_post_review_artist)
-            _pre_set = {_pre_primary.lower()} | {f.lower() for f in _pre_feat}
-            _post_set = {_post_primary.lower()} | {f.lower() for f in _post_feat}
+            # Normalise Unicode hyphens (U+2010 HYPHEN, U+2011 NON-BREAKING
+            # HYPHEN, U+2013 EN DASH, U+2014 EM DASH, U+2212 MINUS) to ASCII
+            # before comparing.  AI source resolution may return 'Run\u2013D.M.C.'
+            # while AI final review corrects to 'Run-D.M.C.' \u2014 same artist,
+            # different codepoint.
+            _uhyp = re.compile(r'[\u2010\u2011\u2013\u2014\u2212]')
+            _norm_id = lambda s: _uhyp.sub('-', s.lower())
+            _pre_set = {_norm_id(_pre_primary)} | {_norm_id(f) for f in _pre_feat}
+            _post_set = {_norm_id(_post_primary)} | {_norm_id(f) for f in _post_feat}
             if _pre_set != _post_set:
                 _artist_changed_by_review = True
                 _log(f"Artist identity changed by review: '{_pre_review_artist}' Ã¢â€ â€™ '{_post_review_artist}'")

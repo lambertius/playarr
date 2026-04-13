@@ -143,6 +143,13 @@ def build_plan_from_workspace(ws) -> dict:
 
     # ── User duplicate action overrides ──────────────────────────────
     dup_check = ws.read_artifact("duplicate_check") or {}
+
+    # Quality upgrade → flag as duplicate for review
+    if dup_check.get("is_quality_upgrade"):
+        plan["review_status"] = "duplicate"
+        plan["review_category"] = "duplicate"
+        plan["review_reason"] = dup_check.get("reason", "Quality upgrade")
+
     user_action = dup_check.get("user_action")
     if user_action == "overwrite":
         plan["overwrite_existing"] = True
@@ -309,9 +316,9 @@ def build_plan_from_workspace(ws) -> dict:
     plan["processing_flags"] = flags
 
     # ── Deferred tasks ───────────────────────────────────────────────
-    deferred = ["preview", "matching"]
+    deferred = ["preview", "matching", "entity_artwork"]
     if mode == "advanced":
-        deferred.extend(["kodi_export", "entity_artwork", "orphan_cleanup"])
+        deferred.extend(["kodi_export", "orphan_cleanup"])
         if not metadata.get("ai_final_review") or not metadata.get("plot"):
             deferred.append("ai_enrichment")
         deferred.append("scene_analysis")

@@ -222,6 +222,47 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
                             _clear = _flag_ok("audio_normalized")
                         elif _rc == "scanned":
                             _clear = _flag_ok("metadata_scraped") or _flag_ok("metadata_resolved")
+                        elif _rc == "artwork_incomplete":
+                            from app.models import MediaAsset as _MA_clr
+                            _needed_clr = []
+                            if _fv.artist_entity_id:
+                                _needed_clr.append("artist_thumb")
+                            if _fv.album_entity_id:
+                                _needed_clr.append("album_thumb")
+                            if _needed_clr:
+                                _has_all = all(
+                                    _fdb.query(_MA_clr.id).filter(
+                                        _MA_clr.video_id == video_id,
+                                        _MA_clr.asset_type == _at,
+                                    ).first()
+                                    for _at in _needed_clr
+                                )
+                                _clear = _has_all
+                            else:
+                                _clear = True
+                        elif _rc == "missing_artwork":
+                            from app.models import MediaAsset as _MA_ma
+                            from app.ai.models import AIThumbnail as _AT_ma
+                            _rr_ma = _fv.review_reason or ""
+                            _needs_poster = "poster" in _rr_ma
+                            _needs_thumb = "thumbnail" in _rr_ma
+                            _has_poster = _fdb.query(_MA_ma.id).filter(
+                                _MA_ma.video_id == video_id,
+                                _MA_ma.asset_type == "poster",
+                                _MA_ma.status == "valid",
+                            ).first() is not None
+                            _has_thumb = _fdb.query(_AT_ma.id).filter(
+                                _AT_ma.video_id == video_id,
+                                _AT_ma.is_selected == True,
+                            ).first() is not None
+                            if _needs_poster and _needs_thumb:
+                                _clear = _has_poster and _has_thumb
+                            elif _needs_poster:
+                                _clear = _has_poster
+                            elif _needs_thumb:
+                                _clear = _has_thumb
+                            else:
+                                _clear = _has_poster and _has_thumb
                         if _clear:
                             _fv.review_status = "none"
                             _fv.review_reason = None
@@ -389,6 +430,10 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
             analyze_scenes(db, video_id)
             _mark_processing_state(db, video_id, "scenes_analyzed", method="scene_analysis")
             _mark_processing_state(db, video_id, "thumbnail_selected", method="scene_analysis")
+            from app.models import clear_stale_enrichment_review
+            _v = db.query(VideoItem).get(video_id)
+            if _v:
+                clear_stale_enrichment_review(_v, db=db)
             db.commit()
 
             # Persist scene thumbnails to the video folder so they survive
@@ -835,6 +880,8 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                         last_validated_at=datetime.now(timezone.utc),
                     ))
 
+                db.commit()
+                _mark_processing_state(db, video_id, "entity_artwork_linked", method="artwork_pipeline")
                 db.commit()
             db_write(_write_entity_artwork)
             ws.log("Entity artwork pipeline complete")
@@ -1808,6 +1855,9 @@ def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
                     display_name=_deferred_display,
                 )
 
+            if item:
+                from app.models import clear_stale_enrichment_review
+                clear_stale_enrichment_review(item, db=db)
             db.commit()
         except ImportError:
             pass

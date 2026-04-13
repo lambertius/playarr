@@ -267,8 +267,13 @@ def _get_genre_display_map(db: Session) -> dict:
 def _apply_facet_filters(query, *, version_type=None, artist=None,
                          year_from=None, year_to=None,
                          song_rating=None, video_rating=None,
-                         genre=None, quality=None):
+                         genre=None, quality=None, search=None):
     """Apply common browse-page filters to a VideoItem query."""
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            or_(VideoItem.artist.ilike(term), VideoItem.title.ilike(term), VideoItem.album.ilike(term))
+        )
     if version_type:
         query = query.filter(VideoItem.version_type == version_type)
     if artist:
@@ -419,6 +424,7 @@ def party_mode(
 
 @router.get("/artists", response_model=List[dict])
 def list_artists(
+    search: Optional[str] = None,
     version_type: Optional[str] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
@@ -442,7 +448,7 @@ def list_artists(
     query = _apply_facet_filters(query, version_type=version_type,
                                  year_from=year_from, year_to=year_to,
                                  song_rating=song_rating, video_rating=video_rating,
-                                 genre=genre, quality=quality)
+                                 genre=genre, quality=quality, search=search)
     rows = query.all()
 
     # Split semicolon-separated artists into individual buckets
@@ -466,6 +472,7 @@ def list_artists(
 
 @router.get("/years", response_model=List[dict])
 def list_years(
+    search: Optional[str] = None,
     version_type: Optional[str] = None,
     artist: Optional[str] = None,
     song_rating: Optional[int] = None,
@@ -486,7 +493,7 @@ def list_years(
     query = _apply_facet_filters(query, version_type=version_type,
                                  artist=artist,
                                  song_rating=song_rating, video_rating=video_rating,
-                                 genre=genre, quality=quality)
+                                 genre=genre, quality=quality, search=search)
     results = query.group_by(VideoItem.year).order_by(VideoItem.year.desc()).all()
     return [
         {"year": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
@@ -496,6 +503,7 @@ def list_years(
 
 @router.get("/genres", response_model=List[dict])
 def list_genres(
+    search: Optional[str] = None,
     version_type: Optional[str] = None,
     artist: Optional[str] = None,
     year_from: Optional[int] = None,
@@ -512,7 +520,7 @@ def list_genres(
                                 artist=artist,
                                 year_from=year_from, year_to=year_to,
                                 song_rating=song_rating, video_rating=video_rating,
-                                quality=quality)
+                                quality=quality, search=search)
     filtered_ids = base.subquery()
     query = (
         db.query(
@@ -552,6 +560,7 @@ def list_genres(
 
 @router.get("/albums", response_model=List[dict])
 def list_albums(
+    search: Optional[str] = None,
     version_type: Optional[str] = None,
     artist: Optional[str] = None,
     year_from: Optional[int] = None,
@@ -584,7 +593,7 @@ def list_albums(
     eq = _apply_facet_filters(eq, version_type=version_type, artist=artist,
                               year_from=year_from, year_to=year_to,
                               song_rating=song_rating, video_rating=video_rating,
-                              genre=genre, quality=quality)
+                              genre=genre, quality=quality, search=search)
     entity_rows = eq.group_by(VideoItem.album_entity_id).order_by(VideoItem.album).all()
 
     results = []
@@ -613,7 +622,7 @@ def list_albums(
     fq = _apply_facet_filters(fq, version_type=version_type, artist=artist,
                               year_from=year_from, year_to=year_to,
                               song_rating=song_rating, video_rating=video_rating,
-                              genre=genre, quality=quality)
+                              genre=genre, quality=quality, search=search)
     fallback_rows = fq.group_by(VideoItem.album).order_by(VideoItem.album).all()
 
     for r in fallback_rows:
@@ -631,6 +640,7 @@ def list_albums(
 
 @router.get("/song-ratings", response_model=List[dict])
 def list_song_ratings(
+    search: Optional[str] = None,
     version_type: Optional[str] = None,
     artist: Optional[str] = None,
     year_from: Optional[int] = None,
@@ -651,7 +661,7 @@ def list_song_ratings(
     query = _apply_facet_filters(query, version_type=version_type,
                                  artist=artist,
                                  year_from=year_from, year_to=year_to,
-                                 genre=genre, quality=quality)
+                                 genre=genre, quality=quality, search=search)
     results = query.group_by(VideoItem.song_rating).order_by(VideoItem.song_rating.desc()).all()
     return [
         {"rating": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
@@ -661,6 +671,7 @@ def list_song_ratings(
 
 @router.get("/video-ratings", response_model=List[dict])
 def list_video_ratings(
+    search: Optional[str] = None,
     version_type: Optional[str] = None,
     artist: Optional[str] = None,
     year_from: Optional[int] = None,
@@ -681,7 +692,7 @@ def list_video_ratings(
     query = _apply_facet_filters(query, version_type=version_type,
                                  artist=artist,
                                  year_from=year_from, year_to=year_to,
-                                 genre=genre, quality=quality)
+                                 genre=genre, quality=quality, search=search)
     results = query.group_by(VideoItem.video_rating).order_by(VideoItem.video_rating.desc()).all()
     return [
         {"rating": r[0], "count": r[1], "video_ids": [int(x) for x in r[2].split(",")] if r[2] else []}
@@ -691,6 +702,7 @@ def list_video_ratings(
 
 @router.get("/quality-buckets", response_model=List[dict])
 def list_quality_buckets(
+    search: Optional[str] = None,
     version_type: Optional[str] = None,
     artist: Optional[str] = None,
     year_from: Optional[int] = None,
@@ -722,7 +734,7 @@ def list_quality_buckets(
                                  artist=artist,
                                  year_from=year_from, year_to=year_to,
                                  song_rating=song_rating, video_rating=video_rating,
-                                 genre=genre)
+                                 genre=genre, search=search)
     results = query.group_by("bucket").all()
 
     # Sort by the defined bucket order
@@ -822,6 +834,7 @@ def detect_orphans(db: Session = Depends(get_db)):
 class OrphanCleanRequest(BaseModel):
     folder_paths: List[str]
     mode: str = "delete"  # "delete" or "archive"
+    force_permanent: bool = False  # True = confirmed permanent delete for network paths
 
 
 @router.post("/orphans/clean")
@@ -831,6 +844,7 @@ def clean_orphans(body: OrphanCleanRequest, db: Session = Depends(get_db)):
     Only folders inside the library directory and not tracked in DB are allowed.
     """
     from app.config import get_settings
+    from app.safe_delete import safe_delete, NetworkDeleteError
     settings = get_settings()
     all_library_dirs = [
         os.path.normcase(os.path.normpath(d))
@@ -877,24 +891,16 @@ def clean_orphans(body: OrphanCleanRequest, db: Session = Depends(get_db)):
                 shutil.move(fp, dest)
                 results.append({"folder": fp, "status": "archived", "destination": dest})
             else:
-                # Delete with OneDrive-aware retry
-                for attempt in range(3):
-                    try:
-                        shutil.rmtree(fp)
-                    except Exception:
-                        time.sleep(0.5)
-                    if os.path.isdir(fp):
-                        try:
-                            os.rmdir(fp)
-                        except Exception:
-                            pass
-                    if not os.path.isdir(fp):
-                        break
-
-                if os.path.isdir(fp):
-                    results.append({"folder": fp, "status": "error", "reason": "Could not fully remove folder"})
-                else:
+                # Send to recycle bin (or permanent delete if force_permanent)
+                try:
+                    safe_delete(fp, force_permanent=body.force_permanent)
                     results.append({"folder": fp, "status": "deleted"})
+                except NetworkDeleteError:
+                    results.append({
+                        "folder": fp,
+                        "status": "network_confirm_required",
+                        "reason": "This folder is on a network location where the recycle bin is unavailable. Deletion would be permanent.",
+                    })
         except Exception as exc:
             logger.exception(f"Error cleaning orphan folder: {fp}")
             results.append({"folder": fp, "status": "error", "reason": str(exc)})
@@ -1239,7 +1245,11 @@ def clean_redundant_files(body: CleanRedundantRequest, db: Session = Depends(get
             continue
 
         try:
-            os.remove(fp)
+            from app.safe_delete import safe_delete, NetworkDeleteError
+            try:
+                safe_delete(fp)
+            except NetworkDeleteError:
+                safe_delete(fp, force_permanent=True)
             # Also remove any MediaAsset records pointing at this file
             db.query(MediaAsset).filter(
                 MediaAsset.file_path == fp,
@@ -1429,7 +1439,9 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
 
     # Save snapshot before editing
     from app.tasks import _save_metadata_snapshot, _get_or_create_genre
-    _save_metadata_snapshot(db, item, "manual_edit")
+    from app.user_identity import get_instance_user_id
+    _uid = get_instance_user_id(db)
+    _save_metadata_snapshot(db, item, "manual_edit", user_id=_uid)
 
     # Capture old entity IDs before changes — orphan cleanup after commit
     _old_artist_entity_id = item.artist_entity_id
@@ -1562,6 +1574,15 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
             fp[f] = "manual"
         item.field_provenance = fp
         _fp_flag(item, "field_provenance")
+
+        # Track which user set each field
+        fpu = dict(item.field_provenance_users or {})
+        for f in _manually_changed:
+            fpu[f] = _uid
+        item.field_provenance_users = fpu
+        _fp_flag(item, "field_provenance_users")
+
+        item.last_edited_by = _uid
 
     db.commit()
     db.refresh(item)
@@ -2133,8 +2154,15 @@ def delete_video(video_id: int, db: Session = Depends(get_db)):
     db.delete(item)
     db.commit()
 
-    # Remove the video folder from disk
-    _robust_rmtree(folder_path)
+    # Remove the video folder from disk (recycle bin)
+    from app.safe_delete import safe_delete, NetworkDeleteError
+    try:
+        safe_delete(folder_path)
+    except NetworkDeleteError:
+        # Network path — permanent delete (user already confirmed via UI delete button)
+        safe_delete(folder_path, force_permanent=True)
+    except Exception:
+        logger.warning(f"Could not remove folder: {folder_path}")
 
     # Remove thumbnail cache directory for this video
     _delete_video_thumbnail_dir(video_id)
@@ -2220,11 +2248,17 @@ def batch_delete_videos(req: BatchDeleteRequest, db: Session = Depends(get_db)):
         db.commit()
 
     # Remove video folders, thumbnails, and preview files from disk
+    from app.safe_delete import safe_delete, NetworkDeleteError
     deleted_set = set(deleted_ids)
     for item in items:
         if item.id in deleted_set:
             if item.folder_path:
-                _robust_rmtree(item.folder_path)
+                try:
+                    safe_delete(item.folder_path)
+                except NetworkDeleteError:
+                    safe_delete(item.folder_path, force_permanent=True)
+                except Exception:
+                    logger.warning(f"Could not remove folder: {item.folder_path}")
             _delete_video_thumbnail_dir(item.id)
             basename = os.path.splitext(os.path.basename(item.file_path))[0] if item.file_path else None
             _delete_video_previews(item.id, basename)

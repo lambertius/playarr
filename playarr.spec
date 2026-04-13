@@ -103,6 +103,7 @@ hiddenimports = [
     "multipart",
     "python_multipart",
     "dotenv",
+    "send2trash",
     # App modules — ensure all routers are collected
     "app",
     "app.main",
@@ -114,6 +115,7 @@ hiddenimports = [
     "app.worker",
     "app.version",
     "app.runtime_dirs",
+    "app.safe_delete",
     "app.routers.library",
     "app.routers.jobs",
     "app.routers.playback",

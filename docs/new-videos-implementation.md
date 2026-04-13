@@ -2,7 +2,7 @@
 
 ## Display Strategy
 
-Suggestions are rendered as **thumbnail cards** (280 px wide) in horizontally scrollable carousels, one row per category (`famous`, `popular`, `by_artist`, `taste`, `new`, `rising`).  
+Suggestions are rendered as **thumbnail cards** (280 px wide) in responsive grids, one section per category.  Category order: `taste`, `by_artist`, `famous`, `popular`, `new`, `rising` — personalized sections first.  Up to 20 cards per category.
 No embedded players — clicking "Open Source" opens the original provider page in a new tab.  
 Each card shows: thumbnail, duration overlay, title, artist, channel, trust badge (green/yellow/red), recommendation reason, and action buttons (add/cart/dismiss).
 
@@ -12,12 +12,12 @@ The engine is **modular by category**. Each category has its own candidate gener
 
 | Category | Source |
 |----------|--------|
-| `famous` | Curated seed list of 40 iconic music videos (YouTube IDs) |
-| `popular` | Curated seed list of 20 popular music videos |
-| `by_artist` | Artists in the user's library with ≥ `nv_min_owned_for_artist_rec` owned videos |
-| `taste` | Artists from the user's 5-star rated videos |
-| `new` | Placeholder — ready for YouTube Data API or RSS integration |
-| `rising` | Placeholder — ready for trending/chart API integration |
+| `famous` | Curated seed list of ~97 iconic music videos (YouTube IDs) + yt-dlp search |
+| `popular` | Curated seed list of ~60 popular music videos + yt-dlp search |
+| `by_artist` | Artists in the user's library with ≥ `nv_min_owned_for_artist_rec` owned videos (default 1) — seed matching + yt-dlp search for up to 8 artists |
+| `taste` | Multi-signal preference scoring: 5-star artists (weight 1.0), 4-star (0.6), 3-star (0.3 if <8 artists), PlaybackHistory play-count bonus (0.05/play, capped 0.5), genre affinity (top 3 genres via yt-dlp) — up to 6 artist searches |
+| `new` | yt-dlp search for recent official music video releases |
+| `rising` | yt-dlp search for trending/viral music videos |
 
 Generators produce `RecommendationCandidate` objects. The `RecommendationRanker` applies a weighted linear combination:
 
@@ -37,9 +37,10 @@ Results are deduplicated against the user's existing library (by `provider_video
 
 - **VEVO channels** → 0.95 base
 - **Official artist channel** (name overlap check) → 0.88 base
-- **Negative content patterns** (lyric video, cover, remix, reaction, fan-made, unofficial, bootleg) → penalties of 0.08–0.25
-- **View count signal** — ≥1M views → +0.05 bonus; <1K with no official indicator → −0.05
-- **Duration sanity** — <30s or >900s → −0.10 penalty
+- **Negative content patterns** (lyric video, cover, remix, reaction, fan-made, unofficial, bootleg, compilation) → penalties of 0.10–0.20
+- **Hard-blocked content** — multi-hour compilations ("N hours of"), full albums, nonstop mixes, megamixes → score 0.0
+- **View count signal** — ≥100M views → +0.05 bonus; ≥10M → +0.03; <10K → −0.05
+- **Duration sanity** — <60s → −0.15; >8 min → −0.25; >15 min → hard-blocked (score 0.0)
 
 Returns a `TrustResult` with the numeric score, list of reasons, list of penalties, and inferred `source_type` (`vevo` / `official` / `label` / `user_upload` / `unknown`).
 

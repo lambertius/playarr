@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { MonitorPlay, PartyPopper, ListPlus, Trash2, RefreshCw } from "lucide-react";
 import { useQualityBuckets, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks/queries";
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
@@ -61,7 +61,10 @@ function groupByTier(buckets: QualityBucket[]): QualityGroup[] {
 
 export function QualityPage() {
   const [filters, setFilters] = useState<FacetFilterParams>({});
-  const { data, isLoading, isError, refetch } = useQualityBuckets(filters);
+  const [searchParams] = useSearchParams();
+  const searchTerm = searchParams.get("search") ?? "";
+  const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
+  const { data, isLoading, isError, refetch } = useQualityBuckets(mergedFilters);
   const navigate = useNavigate();
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
   const { toast } = useToast();
@@ -148,7 +151,7 @@ export function QualityPage() {
           <MonitorPlay size={22} /> Quality
         </h1>
         <button
-          onClick={() => launchParty(filters)}
+          onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
           className="btn-sm text-xs font-semibold px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 text-white hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 transition-all shadow-lg shadow-purple-500/25 flex items-center gap-1.5"
         >

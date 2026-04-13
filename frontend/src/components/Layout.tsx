@@ -3,7 +3,7 @@ import {
   Library, Users, CalendarDays, Tags, Disc3, Star, MonitorPlay, ListMusic, ListOrdered, Settings, Plus, CheckCircle2, Film, FlaskConical, Sparkles, ArrowUpCircle, X, Heart, Archive, Database,
 } from "lucide-react";
 import { useStats, useReviewQueue, useUpdateCheck } from "@/hooks/queries";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AddVideoModal } from "@/components/AddVideoModal";
 import { GlobalSearch } from "@/components/GlobalSearch";
 import { PlayerBar } from "@/components/PlayerBar";
@@ -12,6 +12,7 @@ import { Fireworks } from "@/components/Fireworks";
 import { Tooltip } from "@/components/Tooltip";
 import { usePlaybackStore } from "@/stores/playbackStore";
 import { useFireworksStore } from "@/stores/fireworksStore";
+import { loadAnimationSettings } from "@/hooks/usePartyMode";
 
 const navItems = [
   { to: "/library", icon: Library, label: "Library" },
@@ -221,8 +222,18 @@ export function Layout() {
 function GlobalFireworks() {
   const visible = useFireworksStore((s) => s.visible);
   const duration = useFireworksStore((s) => s.duration);
+  const blobUrl = useFireworksStore((s) => s.blobUrl);
   const hide = useFireworksStore((s) => s.hide);
+  const prerender = useFireworksStore((s) => s.prerender);
+
+  // Pre-render the fireworks animation in the background on app startup
+  useEffect(() => {
+    const settings = loadAnimationSettings();
+    if (settings.enabled) {
+      prerender(settings.duration * 1000);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!visible) return null;
-  return <Fireworks duration={duration} onComplete={hide} />;
+  return <Fireworks duration={duration} blobUrl={blobUrl} onComplete={hide} />;
 }

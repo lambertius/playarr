@@ -18,7 +18,7 @@ Endpoints:
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File as FastAPIFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -381,6 +381,7 @@ def refresh_all(db: Session = Depends(get_db)):
         sub_ids.append(child.id)
         dispatch_task(metadata_refresh_task, job_id=child.id, video_id=vid, force=True)
 
+    parent.input_params = {"sub_job_ids": sub_ids}
     db.commit()
     dispatch_task(complete_batch_job_task, parent_job_id=parent.id, sub_job_ids=sub_ids)
     return RefreshResult(job_id=parent.id, message=f"Queued refresh for {len(ids)} videos")
@@ -419,6 +420,7 @@ def refresh_missing(db: Session = Depends(get_db)):
         sub_ids.append(child.id)
         dispatch_task(metadata_refresh_task, job_id=child.id, video_id=v.id, force=False)
 
+    parent.input_params = {"sub_job_ids": sub_ids}
     db.commit()
     dispatch_task(complete_batch_job_task, parent_job_id=parent.id, sub_job_ids=sub_ids)
     return RefreshResult(job_id=parent.id, message=f"Queued refresh for {len(vids)} videos")
@@ -655,6 +657,7 @@ class MbidStats(BaseModel):
     with_release_group_id: int
     with_track_id: int
     with_any_mbid: int
+    with_complete: int = 0
     artist_conflicts: int
     with_playarr_video_id: int = 0
     with_playarr_track_id: int = 0
@@ -681,6 +684,16 @@ def get_mbid_stats(db: Session = Depends(get_db)):
         )
     ).scalar() or 0
 
+    # Complete = has artist + recording + (release or release_group)
+    with_complete = db.query(func.count(VideoItem.id)).filter(
+        VideoItem.mb_artist_id.isnot(None),
+        VideoItem.mb_recording_id.isnot(None),
+        or_(
+            VideoItem.mb_release_id.isnot(None),
+            VideoItem.mb_release_group_id.isnot(None),
+        ),
+    ).scalar() or 0
+
     # Playarr content IDs
     with_pvid = db.query(func.count(VideoItem.id)).filter(VideoItem.playarr_video_id.isnot(None)).scalar() or 0
     with_ptid = db.query(func.count(VideoItem.id)).filter(VideoItem.playarr_track_id.isnot(None)).scalar() or 0
@@ -704,6 +717,7 @@ def get_mbid_stats(db: Session = Depends(get_db)):
         with_release_group_id=with_rg,
         with_track_id=with_track,
         with_any_mbid=with_any,
+        with_complete=with_complete,
         artist_conflicts=conflict_count,
         with_playarr_video_id=with_pvid,
         with_playarr_track_id=with_ptid,
@@ -1102,3 +1116,1121 @@ def create_genre_tile(body: GenreConsolidateManualRequest, db: Session = Depends
 
     db.commit()
     return {"updated": updated, "master_genre_id": master.id, "master_name": master.name}
+
+
+# ---------------------------------------------------------------------------
+# Artwork Manager — entity-level artwork stats and management
+# ---------------------------------------------------------------------------
+
+class ArtworkVideoStats(BaseModel):
+    total: int
+    with_poster: int
+    poster_from_source: int
+    poster_from_thumb: int
+    with_thumbnail: int
+    with_artist_thumb: int
+    with_album_thumb: int
+
+
+class ArtworkEntityStats(BaseModel):
+    total: int
+    with_art: int
+    with_source: int
+    missing_with_source: int
+    missing_no_source: int
+
+
+class ArtworkStats(BaseModel):
+    videos: ArtworkVideoStats
+    artists: ArtworkEntityStats
+    albums: ArtworkEntityStats
+
+
+class ArtworkChildVideo(BaseModel):
+    id: int
+    title: str
+    artist: Optional[str] = None
+
+
+class ArtworkEntityRow(BaseModel):
+    id: int
+    name: str
+    entity_type: str  # "artist" | "album"
+    has_art: bool
+    art_path: Optional[str] = None
+    has_source: bool
+    source_providers: List[str] = []
+    video_count: int = 0
+    category: str  # "filled" | "missing" | "unavailable"
+    provenance: Optional[str] = None
+    children: List[ArtworkChildVideo] = []
+    created_at: Optional[str] = None
+    mb_id: Optional[str] = None
+    parent_artist_name: Optional[str] = None
+    crop_position: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ArtworkEntitiesResponse(BaseModel):
+    items: List[ArtworkEntityRow]
+    total: int
+    page: int
+    per_page: int
+
+
+class ArtworkRepairRequest(BaseModel):
+    entity_type: str  # "artist" | "album"
+    entity_ids: List[int]
+
+
+class EntitySourceRow(BaseModel):
+    id: Optional[int] = None
+    provider: str
+    source_type: str
+    url: str
+    provenance: Optional[str] = None
+
+
+class EntitySourcesResponse(BaseModel):
+    entity_type: str
+    entity_id: int
+    mb_id: Optional[str] = None
+    sources: List[EntitySourceRow] = []
+
+
+class EntitySourceUpdate(BaseModel):
+    entity_type: str  # "artist" | "album"
+    entity_id: int
+    mb_id: Optional[str] = None
+    wiki_url: Optional[str] = None
+
+
+@router.get("/artwork-stats", response_model=ArtworkStats)
+def get_artwork_stats(db: Session = Depends(get_db)):
+    """Artwork fill statistics across the library."""
+    from sqlalchemy import func, or_
+    from app.models import MediaAsset, Source, SourceProvider
+    from app.ai.models import AIThumbnail
+    from app.metadata.models import CachedAsset
+
+    # --- Video-level stats ---
+    total_videos = db.query(func.count(VideoItem.id)).filter(
+        VideoItem.file_path.isnot(None)
+    ).scalar() or 0
+
+    with_poster = db.query(func.count(func.distinct(MediaAsset.video_id))).filter(
+        MediaAsset.asset_type == "poster", MediaAsset.status == "valid",
+    ).scalar() or 0
+
+    _THUMB_PROVENANCES = ("thumb_fallback", "video_thumb_fallback", "youtube_thumb")
+    poster_from_thumb = db.query(func.count(func.distinct(MediaAsset.video_id))).filter(
+        MediaAsset.asset_type == "poster",
+        MediaAsset.status == "valid",
+        MediaAsset.provenance.in_(_THUMB_PROVENANCES),
+    ).scalar() or 0
+    poster_from_source = with_poster - poster_from_thumb
+
+    with_thumb = db.query(func.count(func.distinct(AIThumbnail.video_id))).filter(
+        AIThumbnail.is_selected == True,  # noqa: E712
+    ).scalar() or 0
+
+    with_artist_thumb = db.query(func.count(func.distinct(MediaAsset.video_id))).filter(
+        MediaAsset.asset_type == "artist_thumb", MediaAsset.status == "valid",
+    ).scalar() or 0
+
+    with_album_thumb = db.query(func.count(func.distinct(MediaAsset.video_id))).filter(
+        MediaAsset.asset_type == "album_thumb", MediaAsset.status == "valid",
+    ).scalar() or 0
+
+    # --- Artist-level stats ---
+    total_artists = db.query(func.count(ArtistEntity.id)).scalar() or 0
+
+    artist_ids_mbid = set(
+        r[0] for r in db.query(ArtistEntity.id).filter(ArtistEntity.mb_artist_id.isnot(None)).all()
+    )
+    artist_ids_source = set(
+        r[0] for r in (
+            db.query(VideoItem.artist_entity_id)
+            .join(Source, Source.video_id == VideoItem.id)
+            .filter(
+                VideoItem.artist_entity_id.isnot(None),
+                Source.source_type == "artist",
+                Source.provider.in_([SourceProvider.wikipedia, SourceProvider.musicbrainz]),
+            )
+            .distinct()
+            .all()
+        ) if r[0]
+    )
+    artists_with_source_ids = artist_ids_mbid | artist_ids_source
+
+    artists_with_art_ids = set(
+        r[0] for r in db.query(CachedAsset.entity_id).filter(
+            CachedAsset.entity_type == "artist",
+            CachedAsset.kind == "poster",
+            CachedAsset.status == "valid",
+        ).all()
+    )
+    # Include artists that have art via MediaAsset (artist_thumb)
+    ma_artist_art_ids = set(
+        r[0] for r in (
+            db.query(VideoItem.artist_entity_id)
+            .join(MediaAsset, MediaAsset.video_id == VideoItem.id)
+            .filter(
+                VideoItem.artist_entity_id.isnot(None),
+                MediaAsset.asset_type == "artist_thumb",
+                MediaAsset.status == "valid",
+            )
+            .distinct()
+            .all()
+        ) if r[0]
+    )
+    artists_with_art_ids = artists_with_art_ids | ma_artist_art_ids
+
+    artists_with_art = len(artists_with_art_ids)
+    artists_missing_with_source = len(artists_with_source_ids - artists_with_art_ids)
+    artists_missing_no_source = total_artists - len(artists_with_art_ids) - artists_missing_with_source
+
+    # --- Album-level stats ---
+    total_albums = db.query(func.count(AlbumEntity.id)).scalar() or 0
+
+    album_ids_mbid = set(
+        r[0] for r in db.query(AlbumEntity.id).filter(
+            or_(AlbumEntity.mb_release_id.isnot(None), AlbumEntity.mb_release_group_id.isnot(None))
+        ).all()
+    )
+    album_ids_source = set(
+        r[0] for r in (
+            db.query(VideoItem.album_entity_id)
+            .join(Source, Source.video_id == VideoItem.id)
+            .filter(
+                VideoItem.album_entity_id.isnot(None),
+                Source.source_type.in_(["album", "single"]),
+                Source.provider.in_([SourceProvider.wikipedia, SourceProvider.musicbrainz]),
+            )
+            .distinct()
+            .all()
+        ) if r[0]
+    )
+    albums_with_source_ids = album_ids_mbid | album_ids_source
+
+    albums_with_art_ids = set(
+        r[0] for r in db.query(CachedAsset.entity_id).filter(
+            CachedAsset.entity_type == "album",
+            CachedAsset.kind == "poster",
+            CachedAsset.status == "valid",
+        ).all()
+    )
+    # Include albums that have art via MediaAsset (album_thumb)
+    ma_album_art_ids = set(
+        r[0] for r in (
+            db.query(VideoItem.album_entity_id)
+            .join(MediaAsset, MediaAsset.video_id == VideoItem.id)
+            .filter(
+                VideoItem.album_entity_id.isnot(None),
+                MediaAsset.asset_type == "album_thumb",
+                MediaAsset.status == "valid",
+            )
+            .distinct()
+            .all()
+        ) if r[0]
+    )
+    albums_with_art_ids = albums_with_art_ids | ma_album_art_ids
+
+    albums_with_art = len(albums_with_art_ids)
+    albums_missing_with_source = len(albums_with_source_ids - albums_with_art_ids)
+    albums_missing_no_source = total_albums - len(albums_with_art_ids) - albums_missing_with_source
+
+    return ArtworkStats(
+        videos=ArtworkVideoStats(
+            total=total_videos,
+            with_poster=with_poster,
+            poster_from_source=poster_from_source,
+            poster_from_thumb=poster_from_thumb,
+            with_thumbnail=with_thumb,
+            with_artist_thumb=with_artist_thumb,
+            with_album_thumb=with_album_thumb,
+        ),
+        artists=ArtworkEntityStats(
+            total=total_artists,
+            with_art=artists_with_art,
+            with_source=len(artists_with_source_ids),
+            missing_with_source=artists_missing_with_source,
+            missing_no_source=max(0, artists_missing_no_source),
+        ),
+        albums=ArtworkEntityStats(
+            total=total_albums,
+            with_art=albums_with_art,
+            with_source=len(albums_with_source_ids),
+            missing_with_source=albums_missing_with_source,
+            missing_no_source=max(0, albums_missing_no_source),
+        ),
+    )
+
+
+@router.get("/artwork-entities", response_model=ArtworkEntitiesResponse)
+def list_artwork_entities(
+    entity_type: str = Query("artist", description="artist or album"),
+    status: Optional[str] = Query(None, description="filled, missing, or unavailable"),
+    search: Optional[str] = Query(None, description="Search by name (case-insensitive)"),
+    sort: Optional[str] = Query("name_asc", description="name_asc, name_desc, date_asc, date_desc"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """List artist or album entities with their artwork status, children, and search/sort."""
+    import os
+    from sqlalchemy import func
+    from app.models import Source, SourceProvider, MediaAsset
+    from app.metadata.models import CachedAsset
+
+    if entity_type == "artist":
+        all_entities = db.query(ArtistEntity).all()
+
+        art_map: dict[int, CachedAsset] = {}
+        for ca in db.query(CachedAsset).filter(
+            CachedAsset.entity_type == "artist",
+            CachedAsset.kind == "poster",
+            CachedAsset.status == "valid",
+        ).all():
+            art_map[ca.entity_id] = ca
+
+        # MediaAsset fallback: artist_thumb per entity via video linkage
+        ma_art_map: dict[int, str] = {}  # entity_id -> file_path
+        ma_prov_map: dict[int, str] = {}
+        ma_crop_map: dict[int, str | None] = {}
+        for row in (
+            db.query(VideoItem.artist_entity_id, MediaAsset.file_path, MediaAsset.provenance, MediaAsset.crop_position)
+            .join(MediaAsset, MediaAsset.video_id == VideoItem.id)
+            .filter(
+                VideoItem.artist_entity_id.isnot(None),
+                MediaAsset.asset_type == "artist_thumb",
+                MediaAsset.status == "valid",
+            )
+            .all()
+        ):
+            eid = row[0]
+            if eid and eid not in ma_art_map:
+                ma_art_map[eid] = row[1]
+                ma_prov_map[eid] = row[2]
+                ma_crop_map[eid] = row[3]
+
+        source_map: dict[int, set[str]] = {}
+        for row in (
+            db.query(VideoItem.artist_entity_id, Source.provider)
+            .join(Source, Source.video_id == VideoItem.id)
+            .filter(
+                VideoItem.artist_entity_id.isnot(None),
+                Source.source_type == "artist",
+            )
+            .distinct()
+            .all()
+        ):
+            if row[0]:
+                source_map.setdefault(row[0], set()).add(row[1].value if hasattr(row[1], 'value') else str(row[1]))
+
+        # Children: videos linked to each artist entity
+        children_map: dict[int, list[ArtworkChildVideo]] = {}
+        for vi in (
+            db.query(VideoItem.id, VideoItem.title, VideoItem.artist, VideoItem.artist_entity_id)
+            .filter(VideoItem.artist_entity_id.isnot(None))
+            .order_by(VideoItem.title)
+            .all()
+        ):
+            children_map.setdefault(vi[3], []).append(
+                ArtworkChildVideo(id=vi[0], title=vi[1] or "Untitled", artist=vi[2])
+            )
+
+        rows: list[ArtworkEntityRow] = []
+        for ent in all_entities:
+            ca = art_map.get(ent.id)
+            ca_valid = ca is not None and ca.local_cache_path and os.path.isfile(ca.local_cache_path)
+            ma_path = ma_art_map.get(ent.id)
+            ma_valid = ma_path is not None and os.path.isfile(ma_path)
+            has_art = ca_valid or ma_valid
+            art_path = (ca.local_cache_path if ca_valid else ma_path) if has_art else None
+            prov = (ca.provenance if ca_valid else ma_prov_map.get(ent.id)) if has_art else None
+            crop = (ca.crop_position if ca_valid else ma_crop_map.get(ent.id)) if has_art else None
+            providers = list(source_map.get(ent.id, set()))
+            has_mbid = bool(ent.mb_artist_id)
+            has_source = has_mbid or len(providers) > 0
+            if has_mbid and "musicbrainz" not in providers:
+                providers.append("musicbrainz")
+
+            if has_art:
+                category = "filled"
+            elif has_source:
+                category = "missing"
+            else:
+                category = "unavailable"
+
+            kids = children_map.get(ent.id, [])
+
+            rows.append(ArtworkEntityRow(
+                id=ent.id,
+                name=ent.canonical_name,
+                entity_type="artist",
+                has_art=has_art,
+                art_path=art_path,
+                has_source=has_source,
+                source_providers=providers,
+                video_count=len(kids),
+                category=category,
+                provenance=prov,
+                children=kids,
+                created_at=ent.created_at.isoformat() if ent.created_at else None,
+                mb_id=ent.mb_artist_id,
+                crop_position=crop,
+            ))
+
+    elif entity_type == "album":
+        all_entities = db.query(AlbumEntity).all()
+
+        art_map = {}
+        for ca in db.query(CachedAsset).filter(
+            CachedAsset.entity_type == "album",
+            CachedAsset.kind == "poster",
+            CachedAsset.status == "valid",
+        ).all():
+            art_map[ca.entity_id] = ca
+
+        # MediaAsset fallback: album_thumb per entity via video linkage
+        ma_art_map: dict[int, str] = {}
+        ma_prov_map: dict[int, str] = {}
+        ma_crop_map: dict[int, str | None] = {}
+        for row in (
+            db.query(VideoItem.album_entity_id, MediaAsset.file_path, MediaAsset.provenance, MediaAsset.crop_position)
+            .join(MediaAsset, MediaAsset.video_id == VideoItem.id)
+            .filter(
+                VideoItem.album_entity_id.isnot(None),
+                MediaAsset.asset_type == "album_thumb",
+                MediaAsset.status == "valid",
+            )
+            .all()
+        ):
+            eid = row[0]
+            if eid and eid not in ma_art_map:
+                ma_art_map[eid] = row[1]
+                ma_prov_map[eid] = row[2]
+                ma_crop_map[eid] = row[3]
+
+        source_map = {}
+        for row in (
+            db.query(VideoItem.album_entity_id, Source.provider)
+            .join(Source, Source.video_id == VideoItem.id)
+            .filter(
+                VideoItem.album_entity_id.isnot(None),
+                Source.source_type.in_(["album", "single"]),
+            )
+            .distinct()
+            .all()
+        ):
+            if row[0]:
+                source_map.setdefault(row[0], set()).add(row[1].value if hasattr(row[1], 'value') else str(row[1]))
+
+        # Children: videos linked to each album entity
+        children_map: dict[int, list[ArtworkChildVideo]] = {}
+        for vi in (
+            db.query(VideoItem.id, VideoItem.title, VideoItem.artist, VideoItem.album_entity_id)
+            .filter(VideoItem.album_entity_id.isnot(None))
+            .order_by(VideoItem.title)
+            .all()
+        ):
+            children_map.setdefault(vi[3], []).append(
+                ArtworkChildVideo(id=vi[0], title=vi[1] or "Untitled", artist=vi[2])
+            )
+
+        artist_names: dict[int, str] = {}
+        for a in db.query(ArtistEntity).all():
+            artist_names[a.id] = a.canonical_name
+
+        rows = []
+        for ent in all_entities:
+            ca = art_map.get(ent.id)
+            ca_valid = ca is not None and ca.local_cache_path and os.path.isfile(ca.local_cache_path)
+            ma_path = ma_art_map.get(ent.id)
+            ma_valid = ma_path is not None and os.path.isfile(ma_path)
+            has_art = ca_valid or ma_valid
+            art_path = (ca.local_cache_path if ca_valid else ma_path) if has_art else None
+            prov = (ca.provenance if ca_valid else ma_prov_map.get(ent.id)) if has_art else None
+            crop = (ca.crop_position if ca_valid else ma_crop_map.get(ent.id)) if has_art else None
+            providers = list(source_map.get(ent.id, set()))
+            has_mbid = bool(ent.mb_release_id or ent.mb_release_group_id)
+            has_source = has_mbid or len(providers) > 0
+            if has_mbid and "musicbrainz" not in providers:
+                providers.append("musicbrainz")
+
+            if has_art:
+                category = "filled"
+            elif has_source:
+                category = "missing"
+            else:
+                category = "unavailable"
+
+            artist_name = artist_names.get(ent.artist_id, "") if ent.artist_id else ""
+            display_name = f"{artist_name} — {ent.title}" if artist_name else ent.title
+            kids = children_map.get(ent.id, [])
+
+            rows.append(ArtworkEntityRow(
+                id=ent.id,
+                name=display_name,
+                entity_type="album",
+                has_art=has_art,
+                art_path=art_path,
+                has_source=has_source,
+                source_providers=providers,
+                video_count=len(kids),
+                category=category,
+                provenance=prov,
+                children=kids,
+                created_at=ent.created_at.isoformat() if ent.created_at else None,
+                mb_id=ent.mb_release_id or ent.mb_release_group_id,
+                parent_artist_name=artist_name or None,
+                crop_position=crop,
+            ))
+    elif entity_type == "poster":
+        # Video-level poster art (uses MediaAsset, not CachedAsset)
+        from app.models import MediaAsset
+        all_videos = db.query(VideoItem).all()
+
+        # Build map of video_id -> MediaAsset for valid posters
+        poster_map: dict[int, MediaAsset] = {}
+        for ma in db.query(MediaAsset).filter(
+            MediaAsset.asset_type == "poster",
+            MediaAsset.status == "valid",
+        ).all():
+            poster_map[ma.video_id] = ma
+
+        rows = []
+        for vi in all_videos:
+            ma = poster_map.get(vi.id)
+            has_art = ma is not None and ma.file_path and os.path.isfile(ma.file_path)
+
+            if has_art:
+                category = "filled"
+            else:
+                category = "missing"
+
+            display_name = f"{vi.artist or 'Unknown'} — {vi.title or 'Untitled'}"
+
+            rows.append(ArtworkEntityRow(
+                id=vi.id,
+                name=display_name,
+                entity_type="poster",
+                has_art=has_art,
+                art_path=ma.file_path if ma else None,
+                has_source=True,
+                source_providers=[],
+                video_count=1,
+                category=category,
+                provenance=ma.provenance if ma else None,
+                children=[],
+                created_at=vi.created_at.isoformat() if vi.created_at else None,
+                mb_id=None,
+                crop_position=ma.crop_position if ma else None,
+            ))
+    else:
+        raise HTTPException(400, "entity_type must be 'artist', 'album', or 'poster'")
+
+    # Filter by status
+    if status:
+        rows = [r for r in rows if r.category == status]
+
+    # Search filter
+    if search:
+        search_lower = search.lower()
+        rows = [r for r in rows if search_lower in r.name.lower()]
+
+    # Sort
+    if sort == "name_desc":
+        rows.sort(key=lambda r: r.name.lower(), reverse=True)
+    elif sort == "date_asc":
+        rows.sort(key=lambda r: r.created_at or "")
+    elif sort == "date_desc":
+        rows.sort(key=lambda r: r.created_at or "", reverse=True)
+    else:  # name_asc (default)
+        rows.sort(key=lambda r: r.name.lower())
+
+    total = len(rows)
+    start = (page - 1) * per_page
+    page_rows = rows[start:start + per_page]
+
+    return ArtworkEntitiesResponse(items=page_rows, total=total, page=page, per_page=per_page)
+
+
+@router.post("/artwork-bulk-repair")
+def artwork_bulk_repair(
+    body: ArtworkRepairRequest,
+    db: Session = Depends(get_db),
+):
+    """Repair missing entity artwork by trying disk/CachedAsset/sibling strategies.
+
+    For each entity:
+    1. Check if CachedAsset already valid — skip.
+    2. Look for art on disk in shared folders.
+    3. Copy from sibling MediaAsset with same entity.
+    """
+    import os
+    from app.models import MediaAsset
+    from app.metadata.models import CachedAsset
+    from app.pipeline_lib.services.artwork_service import validate_file as _vf
+    from app.pipeline_lib.services.artwork_manager import (
+        _safe_name, get_artists_dir, get_albums_dir,
+    )
+
+    repaired = 0
+    already_ok = 0
+    still_missing = 0
+    entity_type = body.entity_type
+
+    if entity_type == "artist":
+        entities = db.query(ArtistEntity).filter(ArtistEntity.id.in_(body.entity_ids)).all()
+    elif entity_type == "album":
+        entities = db.query(AlbumEntity).filter(AlbumEntity.id.in_(body.entity_ids)).all()
+    else:
+        raise HTTPException(400, "entity_type must be 'artist' or 'album'")
+
+    for ent in entities:
+        ca = db.query(CachedAsset).filter(
+            CachedAsset.entity_type == entity_type,
+            CachedAsset.entity_id == ent.id,
+            CachedAsset.kind == "poster",
+            CachedAsset.status == "valid",
+        ).first()
+        if ca and ca.local_cache_path and os.path.isfile(ca.local_cache_path):
+            already_ok += 1
+            continue
+
+        art_path = None
+
+        # Strategy 1: Check shared folder on disk
+        try:
+            if entity_type == "artist":
+                name = ent.canonical_name
+                candidate = os.path.join(get_artists_dir(), _safe_name(name), "poster.jpg")
+                if os.path.isfile(candidate):
+                    art_path = candidate
+            elif entity_type == "album":
+                artist_ent = db.query(ArtistEntity).get(ent.artist_id) if ent.artist_id else None
+                artist_name = artist_ent.canonical_name if artist_ent else ""
+                if artist_name:
+                    candidate = os.path.join(
+                        get_albums_dir(), _safe_name(artist_name),
+                        _safe_name(ent.title), "poster.jpg",
+                    )
+                    if os.path.isfile(candidate):
+                        art_path = candidate
+        except Exception:
+            pass
+
+        # Strategy 2: Check any existing MediaAsset for this entity's videos
+        if not art_path:
+            asset_type = "artist_thumb" if entity_type == "artist" else "album_thumb"
+            filter_col = VideoItem.artist_entity_id if entity_type == "artist" else VideoItem.album_entity_id
+            sibling = (
+                db.query(MediaAsset.file_path)
+                .join(VideoItem, MediaAsset.video_id == VideoItem.id)
+                .filter(
+                    filter_col == ent.id,
+                    MediaAsset.asset_type == asset_type,
+                    MediaAsset.status == "valid",
+                )
+                .first()
+            )
+            if sibling and sibling[0] and os.path.isfile(sibling[0]):
+                art_path = sibling[0]
+
+        # Strategy 3: CachedAsset exists but file missing — mark stale
+        if not art_path and ca and ca.local_cache_path:
+            ca.status = "missing"
+
+        if art_path:
+            vr = _vf(art_path)
+            if ca:
+                ca.local_cache_path = art_path
+                ca.status = "valid" if (vr and vr.valid) else "invalid"
+                if vr and vr.valid:
+                    ca.width = vr.width
+                    ca.height = vr.height
+                    ca.file_size_bytes = vr.file_size_bytes
+                    ca.checksum = vr.file_hash
+            else:
+                db.add(CachedAsset(
+                    entity_type=entity_type,
+                    entity_id=ent.id,
+                    kind="poster",
+                    local_cache_path=art_path,
+                    provenance="artwork_repair",
+                    status="valid" if (vr and vr.valid) else "invalid",
+                    width=vr.width if vr and vr.valid else None,
+                    height=vr.height if vr and vr.valid else None,
+                    file_size_bytes=vr.file_size_bytes if vr and vr.valid else None,
+                    checksum=vr.file_hash if vr and vr.valid else None,
+                ))
+            repaired += 1
+        else:
+            still_missing += 1
+
+    db.commit()
+    return {
+        "status": "repaired",
+        "repaired": repaired,
+        "already_ok": already_ok,
+        "still_missing": still_missing,
+        "total": len(entities),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Entity artwork image serving, upload, delete
+# ---------------------------------------------------------------------------
+
+@router.get("/entity-artwork/{entity_type}/{entity_id}")
+def get_entity_artwork(
+    entity_type: str,
+    entity_id: int,
+    db: Session = Depends(get_db),
+):
+    """Serve entity poster artwork image for display in the artwork manager."""
+    import os
+    from fastapi.responses import FileResponse
+    from app.metadata.models import CachedAsset
+
+    if entity_type not in ("artist", "album", "poster"):
+        raise HTTPException(400, "entity_type must be 'artist', 'album', or 'poster'")
+
+    if entity_type == "poster":
+        # Video poster — served from MediaAsset
+        from app.models import MediaAsset
+        ma = db.query(MediaAsset).filter(
+            MediaAsset.video_id == entity_id,
+            MediaAsset.asset_type == "poster",
+            MediaAsset.status == "valid",
+        ).first()
+        if not ma or not ma.file_path or not os.path.isfile(ma.file_path):
+            raise HTTPException(404, "No artwork found")
+        return FileResponse(
+            ma.file_path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    ca = db.query(CachedAsset).filter(
+        CachedAsset.entity_type == entity_type,
+        CachedAsset.entity_id == entity_id,
+        CachedAsset.kind == "poster",
+        CachedAsset.status == "valid",
+    ).first()
+
+    if ca and ca.local_cache_path and os.path.isfile(ca.local_cache_path):
+        return FileResponse(
+            ca.local_cache_path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    # Fallback: check MediaAsset (artist_thumb / album_thumb) via video linkage
+    from app.models import MediaAsset, VideoItem
+    asset_type = "artist_thumb" if entity_type == "artist" else "album_thumb"
+    id_col = VideoItem.artist_entity_id if entity_type == "artist" else VideoItem.album_entity_id
+    ma = (
+        db.query(MediaAsset)
+        .join(VideoItem, VideoItem.id == MediaAsset.video_id)
+        .filter(
+            id_col == entity_id,
+            MediaAsset.asset_type == asset_type,
+            MediaAsset.status == "valid",
+        )
+        .first()
+    )
+    if ma and ma.file_path and os.path.isfile(ma.file_path):
+        return FileResponse(
+            ma.file_path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    raise HTTPException(404, "No artwork found")
+
+
+@router.put("/entity-artwork/{entity_type}/{entity_id}")
+async def upload_entity_artwork(
+    entity_type: str,
+    entity_id: int,
+    file: UploadFile = FastAPIFile(...),
+    db: Session = Depends(get_db),
+):
+    """Upload / replace artwork for an artist or album entity."""
+    import os
+    from datetime import datetime, timezone
+    from app.metadata.models import CachedAsset
+    from app.pipeline_lib.services.artwork_manager import (
+        _safe_name, get_artists_dir, get_albums_dir,
+    )
+    from app.pipeline_lib.services.artwork_service import validate_and_store_upload, validate_file
+
+    if entity_type not in ("artist", "album", "poster"):
+        raise HTTPException(400, "entity_type must be 'artist', 'album', or 'poster'")
+
+    if entity_type == "artist":
+        ent = db.query(ArtistEntity).get(entity_id)
+        if not ent:
+            raise HTTPException(404, "Artist entity not found")
+        dest_dir = os.path.join(get_artists_dir(), _safe_name(ent.canonical_name))
+    elif entity_type == "poster":
+        vi = db.query(VideoItem).get(entity_id)
+        if not vi:
+            raise HTTPException(404, "Video not found")
+        from app.config import get_settings
+        dest_dir = os.path.join(get_settings().library_dir, "_PlayarrCache", "videos", str(vi.id))
+    else:
+        ent = db.query(AlbumEntity).get(entity_id)
+        if not ent:
+            raise HTTPException(404, "Album entity not found")
+        artist_ent = db.query(ArtistEntity).get(ent.artist_id) if ent.artist_id else None
+        artist_name = artist_ent.canonical_name if artist_ent else "Unknown Artist"
+        dest_dir = os.path.join(
+            get_albums_dir(), _safe_name(artist_name), _safe_name(ent.title),
+        )
+
+    os.makedirs(dest_dir, exist_ok=True)
+    dest_path = os.path.join(dest_dir, "poster.jpg")
+
+    # Read upload bytes and validate
+    file_bytes = await file.read()
+    result = validate_and_store_upload(file_bytes, dest_path)
+    if not result.success:
+        raise HTTPException(400, f"Invalid image: {result.error}")
+
+    now = datetime.now(timezone.utc)
+    vr = validate_file(dest_path)
+
+    if entity_type == "poster":
+        # Upsert MediaAsset for video poster
+        from app.models import MediaAsset
+        ma = db.query(MediaAsset).filter(
+            MediaAsset.video_id == entity_id,
+            MediaAsset.asset_type == "poster",
+        ).first()
+        if ma:
+            ma.file_path = dest_path
+            ma.status = "valid"
+            ma.provenance = "manual_upload"
+            ma.width = vr.width if vr and vr.valid else None
+            ma.height = vr.height if vr and vr.valid else None
+            ma.file_size_bytes = vr.file_size_bytes if vr and vr.valid else None
+            ma.file_hash = vr.file_hash if vr and vr.valid else None
+            ma.last_validated_at = now
+        else:
+            ma = MediaAsset(
+                video_id=entity_id,
+                asset_type="poster",
+                file_path=dest_path,
+                provenance="manual_upload",
+                status="valid",
+                width=vr.width if vr and vr.valid else None,
+                height=vr.height if vr and vr.valid else None,
+                file_size_bytes=vr.file_size_bytes if vr and vr.valid else None,
+                file_hash=vr.file_hash if vr and vr.valid else None,
+                last_validated_at=now,
+            )
+            db.add(ma)
+    else:
+        # Upsert CachedAsset for artist/album
+        ca = db.query(CachedAsset).filter(
+            CachedAsset.entity_type == entity_type,
+            CachedAsset.entity_id == entity_id,
+            CachedAsset.kind == "poster",
+        ).first()
+        if ca:
+            ca.local_cache_path = dest_path
+            ca.status = "valid"
+            ca.provenance = "manual_upload"
+            ca.width = vr.width if vr and vr.valid else None
+            ca.height = vr.height if vr and vr.valid else None
+            ca.file_size_bytes = vr.file_size_bytes if vr and vr.valid else None
+            ca.checksum = vr.file_hash if vr and vr.valid else None
+            ca.last_validated_at = now
+        else:
+            ca = CachedAsset(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                kind="poster",
+                local_cache_path=dest_path,
+                provenance="manual_upload",
+                status="valid",
+                width=vr.width if vr and vr.valid else None,
+                height=vr.height if vr and vr.valid else None,
+                file_size_bytes=vr.file_size_bytes if vr and vr.valid else None,
+                checksum=vr.file_hash if vr and vr.valid else None,
+                last_validated_at=now,
+            )
+            db.add(ca)
+
+    db.commit()
+    return {"detail": "Artwork uploaded", "entity_type": entity_type, "entity_id": entity_id}
+
+
+@router.delete("/entity-artwork/{entity_type}/{entity_id}")
+def delete_entity_artwork(
+    entity_type: str,
+    entity_id: int,
+    db: Session = Depends(get_db),
+):
+    """Delete artwork for an artist or album entity."""
+    import os
+    from app.metadata.models import CachedAsset
+
+    if entity_type not in ("artist", "album", "poster"):
+        raise HTTPException(400, "entity_type must be 'artist', 'album', or 'poster'")
+
+    if entity_type == "poster":
+        from app.models import MediaAsset
+        ma = db.query(MediaAsset).filter(
+            MediaAsset.video_id == entity_id,
+            MediaAsset.asset_type == "poster",
+        ).first()
+        if not ma:
+            raise HTTPException(404, "No artwork record found")
+        if ma.file_path and os.path.isfile(ma.file_path):
+            try:
+                os.remove(ma.file_path)
+            except OSError:
+                pass
+        db.delete(ma)
+        db.commit()
+        return {"detail": "Artwork deleted", "entity_type": entity_type, "entity_id": entity_id}
+
+    ca = db.query(CachedAsset).filter(
+        CachedAsset.entity_type == entity_type,
+        CachedAsset.entity_id == entity_id,
+        CachedAsset.kind == "poster",
+    ).first()
+
+    if not ca:
+        raise HTTPException(404, "No artwork record found")
+
+    # Remove file from disk
+    if ca.local_cache_path and os.path.isfile(ca.local_cache_path):
+        try:
+            os.remove(ca.local_cache_path)
+        except OSError:
+            pass
+
+    db.delete(ca)
+    db.commit()
+    return {"detail": "Artwork deleted", "entity_type": entity_type, "entity_id": entity_id}
+
+
+class CropPositionUpdate(BaseModel):
+    crop_position: Optional[str] = None  # CSS object-position e.g. "50% 30%"
+
+
+@router.patch("/entity-artwork/{entity_type}/{entity_id}/crop")
+def update_entity_crop(
+    entity_type: str,
+    entity_id: int,
+    body: CropPositionUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update crop position for entity artwork."""
+    import re
+    from app.metadata.models import CachedAsset
+
+    if entity_type not in ("artist", "album", "poster"):
+        raise HTTPException(400, "entity_type must be 'artist', 'album', or 'poster'")
+
+    # Validate crop_position format (CSS object-position values)
+    if body.crop_position is not None:
+        if not re.match(r"^\d{1,3}%\s+\d{1,3}%$", body.crop_position):
+            raise HTTPException(400, "crop_position must be like '50% 30%'")
+
+    if entity_type == "poster":
+        from app.models import MediaAsset
+        ma = db.query(MediaAsset).filter(
+            MediaAsset.video_id == entity_id,
+            MediaAsset.asset_type == "poster",
+            MediaAsset.status == "valid",
+        ).first()
+        if not ma:
+            raise HTTPException(404, "No artwork record found")
+        ma.crop_position = body.crop_position
+        db.commit()
+        return {"detail": "Crop updated", "crop_position": body.crop_position}
+
+    # artist/album: try CachedAsset first, then MediaAsset fallback
+    ca = db.query(CachedAsset).filter(
+        CachedAsset.entity_type == entity_type,
+        CachedAsset.entity_id == entity_id,
+        CachedAsset.kind == "poster",
+        CachedAsset.status == "valid",
+    ).first()
+    if ca:
+        ca.crop_position = body.crop_position
+        db.commit()
+        return {"detail": "Crop updated", "crop_position": body.crop_position}
+
+    # MediaAsset fallback via video linkage
+    from app.models import MediaAsset
+    asset_type = "artist_thumb" if entity_type == "artist" else "album_thumb"
+    entity_col = VideoItem.artist_entity_id if entity_type == "artist" else VideoItem.album_entity_id
+    ma = (
+        db.query(MediaAsset)
+        .join(VideoItem, MediaAsset.video_id == VideoItem.id)
+        .filter(entity_col == entity_id, MediaAsset.asset_type == asset_type, MediaAsset.status == "valid")
+        .first()
+    )
+    if not ma:
+        raise HTTPException(404, "No artwork record found")
+    ma.crop_position = body.crop_position
+    db.commit()
+    return {"detail": "Crop updated", "crop_position": body.crop_position}
+
+
+# ---------------------------------------------------------------------------
+# Entity source management (MB ID + Wikipedia URL)
+# ---------------------------------------------------------------------------
+
+@router.get("/entity-sources/{entity_type}/{entity_id}", response_model=EntitySourcesResponse)
+def get_entity_sources(
+    entity_type: str,
+    entity_id: int,
+    db: Session = Depends(get_db),
+):
+    """Get current MusicBrainz ID and Wikipedia source URLs for an entity."""
+    from app.models import Source, SourceProvider
+
+    if entity_type not in ("artist", "album"):
+        raise HTTPException(400, "entity_type must be 'artist' or 'album'")
+
+    mb_id = None
+    if entity_type == "artist":
+        ent = db.query(ArtistEntity).get(entity_id)
+        if not ent:
+            raise HTTPException(404, "Artist entity not found")
+        mb_id = ent.mb_artist_id
+    else:
+        ent = db.query(AlbumEntity).get(entity_id)
+        if not ent:
+            raise HTTPException(404, "Album entity not found")
+        mb_id = ent.mb_release_id or ent.mb_release_group_id
+
+    # Find Wikipedia Source records linked through videos
+    filter_col = VideoItem.artist_entity_id if entity_type == "artist" else VideoItem.album_entity_id
+    source_type_match = "artist" if entity_type == "artist" else "album"
+
+    wiki_sources = (
+        db.query(Source)
+        .join(VideoItem, Source.video_id == VideoItem.id)
+        .filter(
+            filter_col == entity_id,
+            Source.provider == SourceProvider.wikipedia,
+            Source.source_type == source_type_match,
+        )
+        .all()
+    )
+
+    sources: list[EntitySourceRow] = []
+    seen_urls: set[str] = set()
+    for ws in wiki_sources:
+        url = ws.canonical_url or ws.original_url or ""
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            sources.append(EntitySourceRow(
+                id=ws.id,
+                provider="wikipedia",
+                source_type=ws.source_type,
+                url=url,
+                provenance=ws.provenance,
+            ))
+
+    return EntitySourcesResponse(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        mb_id=mb_id,
+        sources=sources,
+    )
+
+
+@router.put("/entity-sources")
+def update_entity_sources(
+    body: EntitySourceUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update MusicBrainz ID and/or Wikipedia source URL for an entity.
+
+    For Wikipedia URLs, updates (or creates) Source records on all videos
+    linked to this entity.
+    """
+    from app.models import Source, SourceProvider
+
+    entity_type = body.entity_type
+    entity_id = body.entity_id
+
+    if entity_type not in ("artist", "album"):
+        raise HTTPException(400, "entity_type must be 'artist' or 'album'")
+
+    # Update MB ID on entity
+    if entity_type == "artist":
+        ent = db.query(ArtistEntity).get(entity_id)
+        if not ent:
+            raise HTTPException(404, "Artist entity not found")
+        if body.mb_id is not None:
+            ent.mb_artist_id = body.mb_id or None
+    else:
+        ent = db.query(AlbumEntity).get(entity_id)
+        if not ent:
+            raise HTTPException(404, "Album entity not found")
+        if body.mb_id is not None:
+            # Store as release group ID (preferred for artwork)
+            ent.mb_release_group_id = body.mb_id or None
+
+    # Update Wikipedia Source records across all linked videos
+    if body.wiki_url is not None:
+        filter_col = VideoItem.artist_entity_id if entity_type == "artist" else VideoItem.album_entity_id
+        source_type_val = "artist" if entity_type == "artist" else "album"
+
+        video_ids = [
+            r[0] for r in db.query(VideoItem.id).filter(filter_col == entity_id).all()
+        ]
+
+        if body.wiki_url:
+            # Extract Wikipedia page slug for source_video_id
+            from urllib.parse import urlparse, unquote
+            parsed = urlparse(body.wiki_url)
+            wiki_page_id = unquote(parsed.path.rsplit("/", 1)[-1]) if parsed.path else body.wiki_url
+
+            # Upsert Wikipedia source on each video
+            for vid in video_ids:
+                existing = db.query(Source).filter(
+                    Source.video_id == vid,
+                    Source.provider == SourceProvider.wikipedia,
+                    Source.source_type == source_type_val,
+                ).first()
+                if existing:
+                    existing.canonical_url = body.wiki_url
+                    existing.original_url = body.wiki_url
+                    existing.source_video_id = wiki_page_id
+                    existing.provenance = "manual"
+                else:
+                    db.add(Source(
+                        video_id=vid,
+                        provider=SourceProvider.wikipedia,
+                        source_type=source_type_val,
+                        source_video_id=wiki_page_id,
+                        original_url=body.wiki_url,
+                        canonical_url=body.wiki_url,
+                        provenance="manual",
+                    ))
+        else:
+            # Clear Wikipedia sources
+            for vid in video_ids:
+                db.query(Source).filter(
+                    Source.video_id == vid,
+                    Source.provider == SourceProvider.wikipedia,
+                    Source.source_type == source_type_val,
+                ).delete()
+
+    db.commit()
+    return {"detail": "Sources updated", "entity_type": entity_type, "entity_id": entity_id}

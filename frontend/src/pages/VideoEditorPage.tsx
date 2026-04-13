@@ -30,6 +30,7 @@ const X264_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "m
 // ── Local storage keys ───────────────────────────────────
 const QUEUE_KEY = "playarr_video_editor_queue";
 const ENCODE_JOBS_KEY = "playarr_editor_encode_jobs";
+const MANUAL_IDS_KEY = "playarr_editor_manual_ids";
 
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
@@ -59,6 +60,19 @@ function loadEncodeJobs(): { videoId: number; jobId: number }[] {
 
 function saveEncodeJobs(jobs: { videoId: number; jobId: number }[]) {
   localStorage.setItem(ENCODE_JOBS_KEY, JSON.stringify(jobs));
+}
+
+function loadManualIds(): Set<number> {
+  try {
+    const raw = localStorage.getItem(MANUAL_IDS_KEY);
+    return raw ? new Set(JSON.parse(raw) as number[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveManualIds(ids: Set<number>) {
+  localStorage.setItem(MANUAL_IDS_KEY, JSON.stringify([...ids]));
 }
 
 // ── Numeric Stepper — larger +/- buttons for number inputs ──
@@ -152,6 +166,14 @@ export function VideoEditorPage() {
   const [isScanning, setIsScanning] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
+  const [showScanDialog, setShowScanDialog] = useState(false);
+
+  // Manual item tracking (persisted in localStorage)
+  const [manualIds, setManualIds] = useState<Set<number>>(loadManualIds);
+
+  // Tag filter for queue display
+  type TagFilter = "all" | "letterboxed" | "manual";
+  const [tagFilter, setTagFilter] = useState<TagFilter>("all");
 
   // Queue display: sorting and pagination
   type SortField = "artist" | "album" | "title" | "created_at" | "editor_order";
@@ -169,7 +191,7 @@ export function VideoEditorPage() {
   const [lastEncodeSummary, setLastEncodeSummary] = useState<{ title: string; summary: string } | null>(null);
 
   // Fetch queue items from API
-  const { data: queueItems, isLoading: queueLoading, refetch: refetchQueue } = useEditorQueue(queueIds);
+  const { data: queueItems, isLoading: queueLoading } = useEditorQueue(queueIds);
   const detectLetterbox = useDetectLetterbox();
   const scanLetterbox = useScanLetterbox();
   const scanResults = useEditorScanResults(scanJobId);
@@ -180,6 +202,7 @@ export function VideoEditorPage() {
 
   // ── Video playback controls ──────────────────────────────
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const dbDurationRef = useRef<number>(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -191,12 +214,25 @@ export function VideoEditorPage() {
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
+    // Force the video element to reload when src changes on the same element
+    // (some browsers don't fire loadedmetadata on src attribute change alone)
+    if (videoRef.current) {
+      videoRef.current.load();
+    }
   }, [selectedId]);
+
+  const handleDurationChange = useCallback(() => {
+    if (videoRef.current) {
+      const dur = videoRef.current.duration;
+      if (dur && isFinite(dur) && dur > 0) setDuration(dur);
+    }
+  }, []);
 
   const handleVideoRef = useCallback((el: HTMLVideoElement | null) => {
     if (videoRef.current) {
       videoRef.current.removeEventListener("timeupdate", handleTimeUpdate);
       videoRef.current.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      videoRef.current.removeEventListener("durationchange", handleDurationChange);
       videoRef.current.removeEventListener("play", handlePlayEvent);
       videoRef.current.removeEventListener("pause", handlePauseEvent);
       videoRef.current.removeEventListener("ended", handlePauseEvent);
@@ -205,6 +241,7 @@ export function VideoEditorPage() {
     if (el) {
       el.addEventListener("timeupdate", handleTimeUpdate);
       el.addEventListener("loadedmetadata", handleLoadedMetadata);
+      el.addEventListener("durationchange", handleDurationChange);
       el.addEventListener("play", handlePlayEvent);
       el.addEventListener("pause", handlePauseEvent);
       el.addEventListener("ended", handlePauseEvent);
@@ -218,10 +255,21 @@ export function VideoEditorPage() {
   }, []);
   const handleLoadedMetadata = useCallback(() => {
     if (videoRef.current) {
-      const dur = videoRef.current.duration;
-      setDuration(dur);
+      const el = videoRef.current;
+      const elDur = el.duration;
+      setDuration(elDur);
+
+      // For native MP4 with range support, seek to 1/3 of the real duration.
+      // For piped streams this silently stays near 0 — acceptable since the
+      // poster provides a visual preview and the user can press play.
+      const dur = (dbDurationRef.current > 0) ? dbDurationRef.current : elDur;
       if (dur > 0) {
-        videoRef.current.currentTime = dur / 3;
+        const target = dur / 3;
+        const seekable = el.seekable;
+        const seekEnd = seekable.length > 0 ? seekable.end(seekable.length - 1) : 0;
+        if (seekEnd >= target) {
+          el.currentTime = target;
+        }
       }
     }
   }, []);
@@ -315,6 +363,9 @@ export function VideoEditorPage() {
   // Sync encodeJobs to localStorage
   useEffect(() => { saveEncodeJobs(encodeJobs); }, [encodeJobs]);
 
+  // Sync manualIds to localStorage
+  useEffect(() => { saveManualIds(manualIds); }, [manualIds]);
+
   // Track which items we've already triggered auto-detection for (persists across hot reloads)
   const AUTO_DETECTED_KEY = "playarr_editor_auto_detected";
   const autoDetectedRef = useRef<Set<number>>(
@@ -387,6 +438,7 @@ export function VideoEditorPage() {
   const removeFromQueue = useCallback((videoId: number) => {
     setQueueIds(prev => prev.filter(id => id !== videoId));
     setCheckedIds(prev => { const n = new Set(prev); n.delete(videoId); return n; });
+    setManualIds(prev => { const n = new Set(prev); n.delete(videoId); return n; });
     if (selectedId === videoId) setSelectedId(null);
   }, [selectedId]);
 
@@ -395,6 +447,7 @@ export function VideoEditorPage() {
     setCheckedIds(new Set());
     setSelectedId(null);
     setEncodeJobs([]);
+    setManualIds(new Set());
     autoDetectedRef.current.clear();
     try { localStorage.removeItem(AUTO_DETECTED_KEY); } catch {}
   }, []);
@@ -454,6 +507,19 @@ export function VideoEditorPage() {
     [queueItems, selectedId],
   );
 
+  // Prefer the DB-stored duration (reliable) over the video element's
+  // reported duration (unreliable for remuxed/transcoded streams).
+  const effectiveDuration = useMemo(() => {
+    const dbDur = selectedItem?.duration_seconds;
+    if (dbDur && dbDur > 0) return dbDur;
+    return duration;
+  }, [selectedItem?.duration_seconds, duration]);
+
+  // Keep ref in sync so handleLoadedMetadata (stable callback) can use DB duration
+  dbDurationRef.current = selectedItem?.duration_seconds ?? 0;
+
+
+
   const selectedSettings = selectedId ? getItemSettings(selectedId) : null;
 
   // ── Manual crop override from edge pixel inputs ──────────
@@ -511,16 +577,26 @@ export function VideoEditorPage() {
   }, [updateItemSetting]);
 
   // ── Letterbox scan ──────────────────────────────────────
-  const handleScanLibrary = useCallback(async (includeExcluded: boolean = false) => {
+  const handleScanLibrary = useCallback(async (opts: {
+    includeExcluded?: boolean;
+    skipCropped?: boolean;
+    skipTrimmed?: boolean;
+  } = {}) => {
     setIsScanning(true);
     try {
-      const result = await scanLetterbox.mutateAsync({ limit: 2000, includeExcluded });
+      const result = await scanLetterbox.mutateAsync({
+        limit: 2000,
+        includeExcluded: opts.includeExcluded,
+        skipCropped: opts.skipCropped,
+        skipTrimmed: opts.skipTrimmed,
+      });
       if (result.status === "scanning" && result.job_id) {
         setScanJobId(result.job_id);
         toast({ type: "info", title: "Letterbox scan started..." });
       } else if (result.results) {
-        // Inline results
+        // Inline results — replace queue with fresh scan results
         const ids = result.results.map(r => r.video_id);
+        clearQueue();
         addToQueue(ids);
         // Store letterbox crop info
         for (const r of result.results) {
@@ -544,12 +620,14 @@ export function VideoEditorPage() {
       toast({ type: "error", title: "Letterbox scan failed" });
       setIsScanning(false);
     }
-  }, [scanLetterbox, addToQueue, updateItemSetting, toast]);
+  }, [scanLetterbox, addToQueue, clearQueue, updateItemSetting, toast]);
 
   // Watch scan job results
   useEffect(() => {
     if (scanResults.data?.status === "complete" && scanResults.data.results.length > 0) {
+      // Replace queue with fresh scan results
       const ids = scanResults.data.results.map((r: LetterboxScanItem) => r.video_id);
+      clearQueue();
       addToQueue(ids);
       for (const r of scanResults.data.results) {
         updateItemSetting(r.video_id, {
@@ -573,7 +651,7 @@ export function VideoEditorPage() {
       setScanJobId(null);
       setIsScanning(false);
     }
-  }, [scanResults.data, addToQueue, updateItemSetting, toast]);
+  }, [scanResults.data, addToQueue, clearQueue, updateItemSetting, toast]);
 
   // Watch encode job status
   useEffect(() => {
@@ -588,7 +666,6 @@ export function VideoEditorPage() {
       }
       removeFromQueue(activeEncodeJob.videoId);
       setEncodeJobs(prev => prev.filter(j => j.jobId !== activeEncodeJob.jobId));
-      refetchQueue();
     } else if (status === "failed") {
       toast({ type: "error", title: `Encode failed: ${encodeStatus.data.error ?? "Unknown error"}` });
       setEncodeJobs(prev => prev.filter(j => j.jobId !== activeEncodeJob.jobId));
@@ -596,15 +673,25 @@ export function VideoEditorPage() {
       toast({ type: "warning", title: `Encode cancelled: ${encodeStatus.data.error ?? "Cancelled by user"}` });
       setEncodeJobs(prev => prev.filter(j => j.jobId !== activeEncodeJob.jobId));
     }
-  }, [encodeStatus.data, activeEncodeJob, queueItems, toast, refetchQueue, removeFromQueue]);
+  }, [encodeStatus.data, activeEncodeJob, queueItems, toast, removeFromQueue]);
 
   // Set of video IDs currently encoding
   const encodingVideoIds = useMemo(() => new Set(encodeJobs.map(j => j.videoId)), [encodeJobs]);
 
-  // Sorted + paginated queue items
+  // Sorted + filtered + paginated queue items
   const sortedQueueItems = useMemo(() => {
     if (!queueItems) return [];
-    const items = [...queueItems];
+    // Filter to only items still in the queue (handles optimistic removal)
+    const queueIdSet = new Set(queueIds);
+    let items = queueItems.filter(i => queueIdSet.has(i.video_id));
+
+    // Apply tag filter
+    if (tagFilter === "letterboxed") {
+      items = items.filter(i => i.letterbox_detected);
+    } else if (tagFilter === "manual") {
+      items = items.filter(i => manualIds.has(i.video_id));
+    }
+
     if (sortBy === "editor_order") return items; // preserve insertion order
     items.sort((a, b) => {
       let cmp = 0;
@@ -625,7 +712,7 @@ export function VideoEditorPage() {
       return sortDir === "desc" ? -cmp : cmp;
     });
     return items;
-  }, [queueItems, sortBy, sortDir]);
+  }, [queueItems, queueIds, sortBy, sortDir, tagFilter, manualIds]);
 
   const totalPages = pageSize === 0 ? 1 : Math.max(1, Math.ceil(sortedQueueItems.length / pageSize));
   const clampedPage = Math.min(currentPage, totalPages);
@@ -815,25 +902,14 @@ export function VideoEditorPage() {
 
         {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-surface-border bg-surface">
-          <Tooltip content="Scan library for letterboxed videos (skips excluded)">
+          <Tooltip content="Scan library for letterboxed videos">
             <button
               className="btn-secondary btn-sm"
-              onClick={() => handleScanLibrary(false)}
+              onClick={() => setShowScanDialog(true)}
               disabled={isScanning}
             >
               {isScanning ? <Loader2 size={14} className="animate-spin" /> : <ScanLine size={14} />}
               Scan
-            </button>
-          </Tooltip>
-
-          <Tooltip content="Scan all videos including excluded">
-            <button
-              className="btn-secondary btn-sm"
-              onClick={() => handleScanLibrary(true)}
-              disabled={isScanning}
-            >
-              {isScanning ? <Loader2 size={14} className="animate-spin" /> : <ScanLine size={14} />}
-              Scan All
             </button>
           </Tooltip>
 
@@ -965,6 +1041,15 @@ export function VideoEditorPage() {
             >
               {sortDir === "asc" ? "A→Z" : "Z→A"}
             </button>
+            <select
+              value={tagFilter}
+              onChange={e => { setTagFilter(e.target.value as TagFilter); setCurrentPage(1); }}
+              className="input-sm text-[11px] py-0.5 px-1 bg-surface"
+            >
+              <option value="all">All</option>
+              <option value="letterboxed">Letterboxed</option>
+              <option value="manual">Manual</option>
+            </select>
             <div className="flex-1" />
             <span className="text-text-muted">Show</span>
             <select
@@ -983,7 +1068,7 @@ export function VideoEditorPage() {
 
         {/* Queue List */}
         <div className="flex-1 overflow-y-auto">
-          {queueLoading && queueIds.length > 0 && (
+          {queueLoading && !queueItems && queueIds.length > 0 && (
             <div className="flex items-center justify-center py-8 text-text-muted">
               <Loader2 size={20} className="animate-spin mr-2" /> Loading queue...
             </div>
@@ -1052,6 +1137,7 @@ export function VideoEditorPage() {
               settings={getItemSettings(item.video_id)}
               isEncoding={encodingVideoIds.has(item.video_id)}
               encodeProgress={activeEncodeJob?.videoId === item.video_id ? (encodeStatus.data?.progress_percent ?? 0) : undefined}
+              isManual={manualIds.has(item.video_id)}
               onToggleCheck={() => toggleCheck(item.video_id)}
               onSelect={() => setSelectedId(item.video_id === selectedId ? null : item.video_id)}
               onRemove={() => removeFromQueue(item.video_id)}
@@ -1184,13 +1270,13 @@ export function VideoEditorPage() {
               <input
                 type="range"
                 min={0}
-                max={duration || 0}
+                max={effectiveDuration || 0}
                 step={0.1}
                 value={currentTime}
                 onChange={handleSeek}
                 className="flex-1 h-1 accent-accent cursor-pointer"
               />
-              <span className="text-[11px] text-text-muted tabular-nums w-[38px]">{formatTime(duration)}</span>
+              <span className="text-[11px] text-text-muted tabular-nums w-[38px]">{formatTime(effectiveDuration)}</span>
               <button onClick={toggleMute} className="btn-ghost btn-xs text-text-muted">
                 {isMuted || volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
               </button>
@@ -1588,18 +1674,27 @@ export function VideoEditorPage() {
           </>
         )}
       </div>
+
+      {/* Scan options dialog */}
+      {showScanDialog && (
+        <ScanDialog
+          onScan={(opts) => handleScanLibrary(opts)}
+          onClose={() => setShowScanDialog(false)}
+        />
+      )}
     </div>
   );
 }
 
 // ── Queue Row Component ──────────────────────────────────
-function QueueRow({ item, checked, selected, settings, isEncoding, encodeProgress, onToggleCheck, onSelect, onRemove, onDetectLetterbox, onEncode, onExclude, excludePending }: {
+function QueueRow({ item, checked, selected, settings, isEncoding, encodeProgress, isManual, onToggleCheck, onSelect, onRemove, onDetectLetterbox, onEncode, onExclude, excludePending }: {
   item: EditorQueueItem;
   checked: boolean;
   selected: boolean;
   settings: { ratio: string; crop?: CropPreviewResponse; targetDar?: string };
   isEncoding: boolean;
   encodeProgress?: number;
+  isManual: boolean;
   onToggleCheck: () => void;
   onSelect: () => void;
   onRemove: () => void;
@@ -1652,6 +1747,9 @@ function QueueRow({ item, checked, selected, settings, isEncoding, encodeProgres
           {item.letterbox_detected && (
             <span className="text-orange-400">· Letterboxed</span>
           )}
+          {isManual && (
+            <span className="text-blue-400">· Manual</span>
+          )}
           {hasCrop && (
             <span className="text-accent">· Crop set</span>
           )}
@@ -1695,6 +1793,73 @@ function QueueRow({ item, checked, selected, settings, isEncoding, encodeProgres
           />
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Scan Dialog ──────────────────────────────────────────
+function ScanDialog({ onScan, onClose }: {
+  onScan: (opts: { includeExcluded?: boolean; skipCropped?: boolean; skipTrimmed?: boolean }) => void;
+  onClose: () => void;
+}) {
+  const [includeExcluded, setIncludeExcluded] = useState(false);
+  const [includeCropped, setIncludeCropped] = useState(false);
+  const [includeTrimmed, setIncludeTrimmed] = useState(false);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div className="bg-surface-light border border-surface-border rounded-lg shadow-xl w-72 p-5" onClick={e => e.stopPropagation()}>
+        <h3 className="text-sm font-semibold text-text-primary mb-1">Letterbox Scan</h3>
+        <p className="text-xs text-text-muted mb-4 leading-relaxed">
+          Scan for videos with black bars. Excluded, previously cropped, and trimmed videos are skipped by default.
+        </p>
+
+        <button
+          className="btn-secondary btn-sm w-full justify-center mb-3"
+          onClick={() => {
+            onScan({
+              includeExcluded,
+              skipCropped: !includeCropped,
+              skipTrimmed: !includeTrimmed,
+            });
+            onClose();
+          }}
+        >
+          Scan
+        </button>
+
+        <div className="space-y-1.5">
+          <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includeExcluded}
+              onChange={() => setIncludeExcluded(!includeExcluded)}
+              className="accent-accent w-3.5 h-3.5"
+            />
+            Include excluded videos
+          </label>
+          <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includeCropped}
+              onChange={() => setIncludeCropped(!includeCropped)}
+              className="accent-accent w-3.5 h-3.5"
+            />
+            Include previously cropped
+          </label>
+          <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includeTrimmed}
+              onChange={() => setIncludeTrimmed(!includeTrimmed)}
+              className="accent-accent w-3.5 h-3.5"
+            />
+            Include previously trimmed
+          </label>
+        </div>
+
+        <button className="btn-ghost btn-xs text-text-muted mt-3 w-full" onClick={onClose}>Cancel</button>
+      </div>
     </div>
   );
 }
@@ -1799,4 +1964,8 @@ export function addToVideoEditorQueue(videoIds: number[]) {
   const current = loadQueueIds();
   const newIds = videoIds.filter(id => !current.includes(id));
   saveQueueIds([...current, ...newIds]);
+  // Mark as manually added
+  const manuals = loadManualIds();
+  for (const id of newIds) manuals.add(id);
+  saveManualIds(manuals);
 }

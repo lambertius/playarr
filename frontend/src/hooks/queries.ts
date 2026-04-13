@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, exportApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi, metadataManagerApi } from "@/lib/api";
 import type {
   LibraryParams, JobsParams, VideoItemUpdate, FacetFilterParams,
@@ -432,7 +432,8 @@ export function useNormalize() {
 export function useLibraryScan() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (importNew?: boolean) => jobsApi.libraryScan(importNew),
+    mutationFn: ({ importNew, updateExisting }: { importNew?: boolean; updateExisting?: boolean } = {}) =>
+      jobsApi.libraryScan(importNew, updateExisting),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
   });
 }
@@ -585,6 +586,7 @@ export function useReviewQueue(params?: ReviewParams) {
     queryKey: qk.reviewQueue(params),
     queryFn: () => reviewApi.list(params),
     placeholderData: (prev) => prev,
+    refetchInterval: 15_000,
   });
 }
 
@@ -629,6 +631,14 @@ export function useBatchDismissReview() {
   });
 }
 
+export function useBatchRepairArtwork() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (videoIds: number[]) => reviewApi.batchRepairArtwork(videoIds),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["reviewQueue"] }); },
+  });
+}
+
 export function useScanRenames() {
   const qc = useQueryClient();
   return useMutation({
@@ -641,6 +651,14 @@ export function useScanEnrichment() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (rescanAll: boolean = false) => reviewApi.scanEnrichment(rescanAll),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["reviewQueue"] }); },
+  });
+}
+
+export function useScanArtwork() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rescanAll: boolean = false) => reviewApi.scanArtwork(rescanAll),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["reviewQueue"] }); },
   });
 }
@@ -1064,6 +1082,7 @@ export function useEditorQueue(videoIds: number[]) {
     queryKey: qk.editorQueue(videoIds),
     queryFn: () => videoEditorApi.getQueueItems(videoIds),
     enabled: videoIds.length > 0,
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -1075,8 +1094,8 @@ export function useDetectLetterbox() {
 
 export function useScanLetterbox() {
   return useMutation({
-    mutationFn: ({ limit, includeExcluded }: { limit: number; includeExcluded?: boolean }) =>
-      videoEditorApi.scanLetterbox(limit, includeExcluded),
+    mutationFn: (opts: { limit: number; includeExcluded?: boolean; skipCropped?: boolean; skipTrimmed?: boolean }) =>
+      videoEditorApi.scanLetterbox(opts),
   });
 }
 
@@ -1111,18 +1130,14 @@ export function useCropPreview() {
 }
 
 export function useVideoEditorEncode() {
-  const qc = useQueryClient();
   return useMutation({
     mutationFn: (req: EncodeRequest) => videoEditorApi.encode(req),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
   });
 }
 
 export function useVideoEditorBatchEncode() {
-  const qc = useQueryClient();
   return useMutation({
     mutationFn: (items: EncodeRequest[]) => videoEditorApi.batchEncode(items),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
   });
 }
 
@@ -1138,13 +1153,9 @@ export function useRestoreFromArchive() {
 }
 
 export function useSetExcludeFromScan() {
-  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ videoId, exclude }: { videoId: number; exclude: boolean }) =>
       videoEditorApi.setExcludeFromScan(videoId, exclude),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["editorQueue"] });
-    },
   });
 }
 
@@ -1431,6 +1442,51 @@ export function useCreateTile() {
       qc.invalidateQueries({ queryKey: qk.genreBlacklist });
       qc.invalidateQueries({ queryKey: ["genres"] });
       qc.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}
+
+// ─── Artwork Manager ────────────────────────────────────
+
+export function useArtworkStats() {
+  return useQuery({ queryKey: ["artworkStats"], queryFn: metadataManagerApi.artworkStats });
+}
+
+export function useArtworkEntities(entity_type: string, status?: string, page = 1, per_page = 50, search?: string, sort?: string) {
+  return useQuery({
+    queryKey: ["artworkEntities", entity_type, status, page, per_page, search, sort],
+    queryFn: () => metadataManagerApi.artworkEntities(entity_type, status, page, per_page, search, sort),
+  });
+}
+
+export function useArtworkBulkRepair() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { entity_type: string; entity_ids: number[] }) =>
+      metadataManagerApi.artworkBulkRepair(data.entity_type, data.entity_ids),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["artworkStats"] });
+      qc.invalidateQueries({ queryKey: ["artworkEntities"] });
+    },
+  });
+}
+
+export function useEntitySources(entity_type: string, entity_id: number) {
+  return useQuery({
+    queryKey: ["entitySources", entity_type, entity_id],
+    queryFn: () => metadataManagerApi.getEntitySources(entity_type, entity_id),
+    enabled: entity_id > 0,
+  });
+}
+
+export function useUpdateEntitySources() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { entity_type: string; entity_id: number; mb_id?: string | null; wiki_url?: string | null }) =>
+      metadataManagerApi.updateEntitySources(data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["entitySources"] });
+      qc.invalidateQueries({ queryKey: ["artworkEntities"] });
     },
   });
 }

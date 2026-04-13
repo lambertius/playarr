@@ -508,7 +508,7 @@ function ScrapeMetadataPopup({
               <div>
                 <span className="font-medium text-text-primary">YouTube Source Matching</span>
                 <p className="text-[11px] text-text-muted mt-0.5">
-                  Search YouTube for the official music video. If an existing YouTube link is present, it will be verified first.
+                  Search YouTube for the official music video. Videos with an existing YouTube link are automatically skipped — clear the link first to re-match.
                 </p>
               </div>
             </div>
@@ -1146,6 +1146,9 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
             onSuccess: () => {
               toast({ type: "success", title: "Video deleted" });
               onDeleted();
+            },
+            onError: (err: any) => {
+              toast({ type: "error", title: err?.response?.data?.detail || "Failed to delete video" });
             },
           });
         }

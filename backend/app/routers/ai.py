@@ -302,6 +302,11 @@ def run_scene_analysis(
 
     # Mark processing step complete
     _set_processing_flag(video, "scenes_analyzed", method="manual")
+
+    # Clear stale review flag if enrichment is now complete
+    from app.models import clear_stale_enrichment_review
+    clear_stale_enrichment_review(video, db=db)
+
     db.commit()
 
     # Persist to disk: update XML sidecar + copy thumb files to video folder
@@ -943,6 +948,16 @@ def _batch_scenes_task(video_ids: List[int], force: bool):
         for vid in video_ids:
             try:
                 analyze_scenes(db, vid, force=force)
+
+                # Clear missing_artwork review flag if the artwork issue is resolved
+                try:
+                    from app.models import clear_stale_enrichment_review
+                    video = db.query(VideoItem).get(vid)
+                    if video:
+                        clear_stale_enrichment_review(video, db=db)
+                        db.commit()
+                except Exception:
+                    pass
 
                 # Persist to disk: update XML + copy thumbs to video folder
                 try:

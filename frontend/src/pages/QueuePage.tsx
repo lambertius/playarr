@@ -3,7 +3,7 @@ import {
   RefreshCw, Wifi, WifiOff, Search, AlertTriangle, RotateCcw,
   ChevronLeft, ChevronRight, Trash2,
   Download, FolderInput, Activity, CheckCircle2, XCircle, Ban, SkipForward,
-  Clapperboard, FileSearch,
+  Clapperboard, FileSearch, ArrowUpDown,
 } from "lucide-react";
 import { useJobs, useJobLog, useRetryJob, useCancelJob, useClearHistory, useDeleteBatch } from "@/hooks/queries";
 import { jobsApi } from "@/lib/api";
@@ -19,6 +19,8 @@ import type { JobSummary } from "@/types";
 type QueueTab = "active" | "history";
 type HistoryFilter = "all" | "complete" | "failed" | "cancelled" | "skipped";
 type SourceFilter = "all" | "download" | "import" | "editor" | "scraper";
+type HistorySortBy = "date_added" | "date_completed" | "artist" | "title";
+type HistorySortDir = "asc" | "desc";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
@@ -129,6 +131,12 @@ export function QueuePage() {
   const [statusFilter, setStatusFilter] = useState<string | null>(() => {
     return localStorage.getItem("queue_status_filter") || null;
   });
+  const [historySortBy, setHistorySortBy] = useState<HistorySortBy>(() => {
+    return (localStorage.getItem("queue_history_sort_by") as HistorySortBy) || "date_added";
+  });
+  const [historySortDir, setHistorySortDir] = useState<HistorySortDir>(() => {
+    return (localStorage.getItem("queue_history_sort_dir") as HistorySortDir) || "desc";
+  });
 
   // Persist filter state
   useEffect(() => { localStorage.setItem("queue_tab", activeTab); }, [activeTab]);
@@ -138,6 +146,8 @@ export function QueuePage() {
     if (statusFilter) localStorage.setItem("queue_status_filter", statusFilter);
     else localStorage.removeItem("queue_status_filter");
   }, [statusFilter]);
+  useEffect(() => { localStorage.setItem("queue_history_sort_by", historySortBy); }, [historySortBy]);
+  useEffect(() => { localStorage.setItem("queue_history_sort_dir", historySortDir); }, [historySortDir]);
 
   // Pagination
   const [activePage, setActivePage] = useState(1);
@@ -195,6 +205,47 @@ export function QueuePage() {
     return historyJobs.filter((j) => j.status === historyFilter);
   }, [historyJobs, historyFilter]);
 
+  // Sorted history
+  const sortedHistory = useMemo(() => {
+    const sorted = [...filteredHistory];
+    const dir = historySortDir === "asc" ? 1 : -1;
+
+    const parseDisplayName = (dn: string | null | undefined) => {
+      if (!dn) return { artist: "", title: "" };
+      const actionSep = dn.indexOf(" \u203a ");
+      const core = actionSep >= 0 ? dn.slice(0, actionSep) : dn;
+      const dashIdx = core.indexOf(" \u2013 ");
+      if (dashIdx >= 0) return { artist: core.slice(0, dashIdx), title: core.slice(dashIdx + 3) };
+      return { artist: core, title: "" };
+    };
+
+    sorted.sort((a, b) => {
+      let cmp = 0;
+      switch (historySortBy) {
+        case "date_added":
+          cmp = (a.created_at || "").localeCompare(b.created_at || "");
+          break;
+        case "date_completed":
+          cmp = (a.completed_at || "").localeCompare(b.completed_at || "");
+          break;
+        case "artist": {
+          const aa = parseDisplayName(a.display_name).artist.toLowerCase();
+          const ba = parseDisplayName(b.display_name).artist.toLowerCase();
+          cmp = aa.localeCompare(ba);
+          break;
+        }
+        case "title": {
+          const at = parseDisplayName(a.display_name).title.toLowerCase();
+          const bt = parseDisplayName(b.display_name).title.toLowerCase();
+          cmp = at.localeCompare(bt);
+          break;
+        }
+      }
+      return cmp * dir;
+    });
+    return sorted;
+  }, [filteredHistory, historySortBy, historySortDir]);
+
   // History type counts (for sub-tab badges)
   const historyTypeCounts = useMemo(() => {
     const c = { all: filteredHistory.length, download: 0, import: 0, editor: 0, scraper: 0 };
@@ -225,7 +276,7 @@ export function QueuePage() {
   // History status counts
   // Paginated slices
   const activeTotalPages = Math.max(1, Math.ceil(activeJobs.length / activePageSize));
-  const historyTotalPages = Math.max(1, Math.ceil(filteredHistory.length / historyPageSize));
+  const historyTotalPages = Math.max(1, Math.ceil(sortedHistory.length / historyPageSize));
 
   const activeSlice = useMemo(() => {
     const start = (activePage - 1) * activePageSize;
@@ -234,8 +285,8 @@ export function QueuePage() {
 
   const historySlice = useMemo(() => {
     const start = (historyPage - 1) * historyPageSize;
-    return filteredHistory.slice(start, start + historyPageSize);
-  }, [filteredHistory, historyPage, historyPageSize]);
+    return sortedHistory.slice(start, start + historyPageSize);
+  }, [sortedHistory, historyPage, historyPageSize]);
 
   // Reset page when filter/search changes
   const setActivePageSafe = useCallback((p: number) => setActivePage(Math.max(1, Math.min(p, activeTotalPages))), [activeTotalPages]);
@@ -401,6 +452,9 @@ export function QueuePage() {
           setSelectedIds(new Set());
           refetch();
         },
+        onError: (err: any) => {
+          toast({ type: "error", title: err?.response?.data?.detail || "Failed to delete tracks" });
+        },
       });
     }
   }, [selectedIds, jobs, confirm, batchDeleteMutation, toast, refetch]);
@@ -474,7 +528,7 @@ export function QueuePage() {
   );
 
   const currentJobs = activeTab === "active" ? activeSlice : historySlice;
-  const currentTotal = activeTab === "active" ? activeJobs.length : filteredHistory.length;
+  const currentTotal = activeTab === "active" ? activeJobs.length : sortedHistory.length;
   const currentPage = activeTab === "active" ? activePage : historyPage;
   const currentTotalPages = activeTab === "active" ? activeTotalPages : historyTotalPages;
   const currentPageSize = activeTab === "active" ? activePageSize : historyPageSize;
@@ -671,6 +725,29 @@ export function QueuePage() {
               </button>
             );
           })}
+
+          {/* Sort controls */}
+          <div className="flex-1" />
+          <div className="flex items-center gap-1.5">
+            <ArrowUpDown size={12} className="text-text-muted" />
+            <select
+              value={historySortBy}
+              onChange={(e) => { setHistorySortBy(e.target.value as HistorySortBy); setHistoryPage(1); }}
+              className="bg-surface-lighter border border-surface-border rounded px-2 py-1 text-xs text-text-secondary"
+            >
+              <option value="date_added">Date Added</option>
+              <option value="date_completed">Date Completed</option>
+              <option value="artist">Artist</option>
+              <option value="title">Title</option>
+            </select>
+            <button
+              onClick={() => { setHistorySortDir(historySortDir === "asc" ? "desc" : "asc"); setHistoryPage(1); }}
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-surface-lighter border border-surface-border text-text-secondary hover:text-text-primary transition-colors"
+              title={historySortDir === "asc" ? "Ascending (A → Z)" : "Descending (Z → A)"}
+            >
+              {historySortDir === "asc" ? "A → Z" : "Z → A"}
+            </button>
+          </div>
         </div>
       )}
 

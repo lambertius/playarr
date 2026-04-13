@@ -267,6 +267,8 @@ class AddToEditorRequest(BaseModel):
 class LetterboxScanRequest(BaseModel):
     limit: int = Field(default=200, ge=1, le=2000)
     include_excluded: bool = False
+    skip_cropped: bool = False
+    skip_trimmed: bool = False
 
 
 class CropPreviewRequest(BaseModel):
@@ -465,7 +467,8 @@ def scan_library_letterbox(
     if req.limit <= 20:
         # Small scan — run inline
         from app.services.video_editor import scan_library_for_letterboxing
-        results = scan_library_for_letterboxing(db, limit=req.limit, include_excluded=req.include_excluded)
+        results = scan_library_for_letterboxing(db, limit=req.limit, include_excluded=req.include_excluded,
+                                                skip_cropped=req.skip_cropped, skip_trimmed=req.skip_trimmed)
         return {"status": "complete", "results": results, "total_scanned": req.limit}
     else:
         # Large scan — create background job
@@ -481,34 +484,68 @@ def scan_library_letterbox(
         db.refresh(job)
 
         # Run in background thread
-        def _run_scan(job_id: int, limit: int, include_excluded: bool):
+        def _run_scan(job_id: int, limit: int, include_excluded: bool,
+                     skip_cropped: bool, skip_trimmed: bool):
             from app.services.video_editor import scan_library_for_letterboxing
+            from app.pipeline_url.write_queue import db_write, db_write_soon
             sdb = SessionLocal()
             try:
-                j = sdb.query(ProcessingJob).get(job_id)
-                j.status = JobStatus.analyzing
-                j.started_at = datetime.now(timezone.utc)
-                j.current_step = "Scanning for letterboxing..."
-                sdb.commit()
+                db_write_soon(lambda: _encode_update_job(job_id, status=JobStatus.analyzing,
+                                                          started_at=datetime.now(timezone.utc),
+                                                          current_step="Scanning for letterboxing..."))
 
-                results = scan_library_for_letterboxing(sdb, limit=limit, include_excluded=include_excluded)
+                def _on_progress(current, total, artist, title):
+                    pct = int((current / total) * 100) if total > 0 else 0
+                    step = f"Scanning {current}/{total}: {artist} — {title}"
+                    _c, _p, _s = current, pct, step  # capture for closure
+                    db_write_soon(lambda: _encode_update_job(
+                        job_id, progress_percent=_p, current_step=_s))
 
-                j.status = JobStatus.complete
-                j.completed_at = datetime.now(timezone.utc)
-                j.progress_percent = 100
-                j.current_step = f"Found {len(results)} videos with letterboxing"
-                j.input_params = {"limit": limit, "results": results}
-                sdb.commit()
+                results = scan_library_for_letterboxing(
+                    sdb, limit=limit, include_excluded=include_excluded,
+                    skip_cropped=skip_cropped, skip_trimmed=skip_trimmed,
+                    on_progress=_on_progress)
+
+                _r = results  # capture for closure
+                _n = len(results)
+                def _finish_scan():
+                    from sqlalchemy.orm.attributes import flag_modified
+                    sdb2 = SessionLocal()
+                    try:
+                        j = sdb2.query(ProcessingJob).get(job_id)
+                        if j:
+                            j.status = JobStatus.complete
+                            j.completed_at = datetime.now(timezone.utc)
+                            j.progress_percent = 100
+                            j.current_step = f"Found {_n} videos with letterboxing"
+                            j.input_params = {"limit": limit, "results": _r}
+                            flag_modified(j, "input_params")
+                        sdb2.commit()
+                    finally:
+                        sdb2.close()
+                db_write(_finish_scan)
             except Exception as e:
-                j = sdb.query(ProcessingJob).get(job_id)
-                j.status = JobStatus.failed
-                j.error_message = str(e)[:2000]
-                j.completed_at = datetime.now(timezone.utc)
-                sdb.commit()
+                _err = str(e)[:2000]
+                def _fail_scan():
+                    sdb2 = SessionLocal()
+                    try:
+                        j = sdb2.query(ProcessingJob).get(job_id)
+                        if j:
+                            j.status = JobStatus.failed
+                            j.error_message = _err
+                            j.completed_at = datetime.now(timezone.utc)
+                        sdb2.commit()
+                    finally:
+                        sdb2.close()
+                try:
+                    db_write(_fail_scan)
+                except Exception:
+                    logger.error(f"Failed to mark scan job {job_id} as failed", exc_info=True)
             finally:
                 sdb.close()
 
-        t = threading.Thread(target=_run_scan, args=(job.id, req.limit, req.include_excluded), daemon=True)
+        t = threading.Thread(target=_run_scan, args=(job.id, req.limit, req.include_excluded,
+                                                        req.skip_cropped, req.skip_trimmed), daemon=True)
         t.start()
 
         return {"status": "scanning", "job_id": job.id}
@@ -567,22 +604,41 @@ def crop_preview(req: CropPreviewRequest, db: Session = Depends(get_db)):
     )
 
 
+def _encode_update_job(job_id: int, **kwargs):
+    """Update an encode job record. Runs inside the write-queue thread."""
+    from app.database import CosmeticSessionLocal
+    sdb = CosmeticSessionLocal()
+    try:
+        j = sdb.query(ProcessingJob).get(job_id)
+        if j:
+            for k, v in kwargs.items():
+                setattr(j, k, v)
+            sdb.commit()
+    finally:
+        sdb.close()
+
+
 def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, target_dar, crf, preset, audio_pt,
                     trim_start=None, trim_end=None, audio_codec=None, audio_bitrate=None):
-    """Execute a single encode job (designed to run in a background thread)."""
+    """Execute a single encode job (designed to run in a background thread).
+
+    All DB writes are routed through the centralised write queue / _apply_lock
+    so that encode jobs never collide with pipeline imports on the SQLite
+    writer lock.
+    """
     from app.services.video_editor import encode_video
     from app.services.media_analyzer import extract_quality_signature
     from app.worker import is_cancelled
+    from app.pipeline_url.write_queue import db_write, db_write_soon
+    from app.db_lock import _apply_lock
     import time as _time
 
-    sdb = SessionLocal()
     temp_output = None
     try:
-        j = sdb.query(ProcessingJob).get(job_id)
-        j.status = JobStatus.remuxing
-        j.started_at = datetime.now(timezone.utc)
-        j.current_step = "Encoding video..."
-        sdb.commit()
+        # Mark job as running — route through write queue
+        db_write_soon(lambda: _encode_update_job(job_id, status=JobStatus.remuxing,
+                                                  started_at=datetime.now(timezone.utc),
+                                                  current_step="Encoding video..."))
 
         # Output to temp file next to original — always use .mp4 for H.264
         base, ext = os.path.splitext(input_path)
@@ -599,10 +655,9 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             if now - _last_db_update[0] < 1.0 and int(pct) < 100:
                 return  # throttle: skip DB write
             _last_db_update[0] = now
-            j2 = sdb.query(ProcessingJob).get(job_id)
-            j2.progress_percent = int(pct)
-            j2.current_step = f"Encoding... {int(pct)}%"
-            sdb.commit()
+            _p = int(pct)
+            db_write_soon(lambda: _encode_update_job(job_id, progress_percent=_p,
+                                                      current_step=f"Encoding... {_p}%"))
 
         stats = encode_video(
             input_path=input_path,
@@ -646,10 +701,36 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             rel = os.path.basename(input_path)
         archive_path = os.path.join(_archive_dir, rel)
         os.makedirs(os.path.dirname(archive_path), exist_ok=True)
-        shutil.move(input_path, archive_path)
 
-        # Write archive manifest for re-linking if archive_dir changes
-        v_pre = sdb.query(VideoItem).get(video_id)
+        # Kill any active streaming processes holding the file
+        from app.routers.playback import kill_streams_for_file
+        kill_streams_for_file(input_path)
+
+        # Retry move in case of transient file lock
+        for _attempt in range(5):
+            try:
+                shutil.move(input_path, archive_path)
+                break
+            except PermissionError:
+                if _attempt < 4:
+                    _time.sleep(0.5)
+                else:
+                    raise RuntimeError(
+                        "Cannot archive original file — it is still in use. "
+                        "Stop playback and try again."
+                    )
+
+        # Read artist/title for manifest before moving into the lock
+        _v_artist = ""
+        _v_title = ""
+        sdb = SessionLocal()
+        try:
+            v_pre = sdb.query(VideoItem).get(video_id)
+            if v_pre:
+                _v_artist = v_pre.artist or ""
+                _v_title = v_pre.title or ""
+        finally:
+            sdb.close()
 
         # Determine archive reason from encode parameters
         has_crop = crop_params is not None
@@ -668,37 +749,21 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             original_library_path=norm_input,
             library_dir=_settings.library_dir,
             video_id=video_id,
-            artist=v_pre.artist if v_pre else "",
-            title=v_pre.title if v_pre else "",
+            artist=_v_artist,
+            title=_v_title,
             archive_reason=reason,
         )
 
         shutil.move(temp_output, final_path)
 
-        # If the extension changed (e.g. .mkv -> .mp4), update DB path
-        v = sdb.query(VideoItem).get(video_id)
-        if final_path != input_path:
-            v.file_path = final_path
-
-        # Re-analyze quality signature
+        # Re-analyze quality signature (CPU-bound, outside lock)
+        new_sig = None
         try:
             new_sig = extract_quality_signature(final_path)
-            qs = sdb.query(QualitySignature).filter(QualitySignature.video_id == video_id).first()
-            if qs:
-                for k, val in new_sig.items():
-                    setattr(qs, k, val)
-            v.file_size_bytes = os.path.getsize(final_path)
-            if new_sig.get("height"):
-                v.resolution_label = f"{new_sig['height']}p"
-            sdb.commit()
         except Exception as e:
             logger.warning(f"Post-encode analysis failed: {e}")
 
-        j = sdb.query(ProcessingJob).get(job_id)
-        j.status = JobStatus.complete
-        j.completed_at = datetime.now(timezone.utc)
-        j.progress_percent = 100
-        j.current_step = "Encode complete"
+        _final_size = os.path.getsize(final_path) if os.path.isfile(final_path) else None
 
         # Build detailed encode summary
         input_bytes = stats['input_size_bytes']
@@ -721,8 +786,65 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             f"",
             f"Original archived to: {archive_path}",
         ])
-        j.log_text = "\n".join(summary_lines)
-        sdb.commit()
+        _summary = "\n".join(summary_lines)
+
+        # Critical DB writes — file path, quality sig, final status —
+        # all in one serialised write through the write queue.
+        def _finish_encode():
+            sdb2 = SessionLocal()
+            try:
+                # Update video record
+                v = sdb2.query(VideoItem).get(video_id)
+                if v:
+                    if final_path != input_path:
+                        v.file_path = final_path
+                    if _final_size is not None:
+                        v.file_size_bytes = _final_size
+                    if new_sig and new_sig.get("height"):
+                        v.resolution_label = f"{new_sig['height']}p"
+                    # Track what type of edit was applied
+                    v.editor_edit_type = reason
+
+                # Update quality signature
+                qs = sdb2.query(QualitySignature).filter(QualitySignature.video_id == video_id).first()
+                if qs:
+                    if new_sig:
+                        for k, val in new_sig.items():
+                            setattr(qs, k, val)
+                    # Clear letterbox scan data — the encoded file is a new video
+                    # and should be re-scanned or excluded, not carry old results.
+                    qs.letterbox_scanned = False
+                    qs.letterbox_detected = False
+                    qs.letterbox_crop_w = None
+                    qs.letterbox_crop_h = None
+                    qs.letterbox_crop_x = None
+                    qs.letterbox_crop_y = None
+                    qs.letterbox_bar_top = None
+                    qs.letterbox_bar_bottom = None
+                    qs.letterbox_bar_left = None
+                    qs.letterbox_bar_right = None
+
+                # Mark job complete
+                j = sdb2.query(ProcessingJob).get(job_id)
+                if j:
+                    j.status = JobStatus.complete
+                    j.completed_at = datetime.now(timezone.utc)
+                    j.progress_percent = 100
+                    j.current_step = "Encode complete"
+                    j.log_text = _summary
+                sdb2.commit()
+
+                # Update sidecar XML to reflect cleared letterbox data
+                if v:
+                    try:
+                        from app.services.playarr_xml import write_playarr_xml
+                        write_playarr_xml(v, sdb2)
+                    except Exception:
+                        pass
+            finally:
+                sdb2.close()
+
+        db_write(_finish_encode)
 
     except Exception as e:
         logger.error(f"Encode job {job_id} failed: {e}", exc_info=True)
@@ -734,25 +856,27 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
                     logger.info(f"Cleaned up partial encode file: {temp_output}")
             except OSError:
                 pass
-        # Use a fresh session to guarantee the failure status is persisted,
-        # even if the original session is in a bad state after a rollback.
-        sdb.close()
-        sdb = SessionLocal()
+        _is_cancel = "cancelled by user" in str(e).lower()
+        _err_msg = str(e)[:2000]
+        _err_detail = str(e)[:1000]
+
+        def _mark_failed():
+            sdb2 = SessionLocal()
+            try:
+                j = sdb2.query(ProcessingJob).get(job_id)
+                if j:
+                    j.status = JobStatus.cancelled if _is_cancel else JobStatus.failed
+                    j.error_message = _err_msg
+                    j.completed_at = datetime.now(timezone.utc)
+                    j.log_text = f"Encode {'cancelled' if _is_cancel else 'failed'} after {j.progress_percent or 0}% progress\n\nError: {_err_detail}"
+                sdb2.commit()
+            finally:
+                sdb2.close()
+
         try:
-            j = sdb.query(ProcessingJob).get(job_id)
-            is_cancel = "cancelled by user" in str(e).lower()
-            j.status = JobStatus.cancelled if is_cancel else JobStatus.failed
-            j.error_message = str(e)[:2000]
-            j.completed_at = datetime.now(timezone.utc)
-            j.log_text = f"Encode {'cancelled' if is_cancel else 'failed'} after {j.progress_percent or 0}% progress\n\nError: {str(e)[:1000]}"
-            sdb.commit()
+            db_write(_mark_failed)
         except Exception:
             logger.error(f"Failed to mark encode job {job_id} as failed", exc_info=True)
-        finally:
-            sdb.close()
-        return
-    finally:
-        sdb.close()
 
 
 @router.post("/encode")
@@ -912,6 +1036,12 @@ def set_exclude_from_scan(req: ExcludeFromScanRequest, db: Session = Depends(get
     db.commit()
     action = "excluded from" if req.exclude else "re-included in"
     logger.info(f"Video {req.video_id} {action} editor scans")
+    # Persist to sidecar XML so flag survives DB changes
+    try:
+        from app.services.playarr_xml import write_playarr_xml
+        write_playarr_xml(video, db)
+    except Exception:
+        pass
     return {"video_id": req.video_id, "exclude_from_scan": req.exclude}
 
 
