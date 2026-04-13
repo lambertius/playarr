@@ -212,9 +212,22 @@ class VideoItem(Base):
     # JSON dict: {"artist": "musicbrainz", "plot": "wikipedia", "album": "tmvdb", ...}
     field_provenance: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Field-level user attribution — tracks which user last set each field
+    # JSON dict: {"artist": "abc123", "plot": "abc123", ...}
+    # Only populated for fields set by a human editor (not automated sources)
+    field_provenance_users: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Last user who manually edited this video's metadata
+    last_edited_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
     # Video editor — exclude from future letterbox scans (false positive suppression)
     exclude_from_editor_scan: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0", nullable=False,
+    )
+
+    # Video editor — what type of edit has been applied: 'crop', 'trim', 'both', or None
+    editor_edit_type: Mapped[Optional[str]] = mapped_column(
+        String(10), nullable=True, default=None,
     )
 
     # Timestamps
@@ -280,6 +293,60 @@ class VideoItem(Base):
         if value.strip().lower() in _SENTINEL_VALUES:
             return None
         return value
+
+
+def clear_stale_enrichment_review(video: "VideoItem", db=None) -> bool:
+    """Clear an ai_partial/ai_pending/scanned/missing_artwork review flag if the underlying steps are now complete.
+
+    Returns True if the flag was cleared.  Caller must commit.
+    """
+    if video.review_status != "needs_human_review":
+        return False
+    rc = video.review_category
+    ps = video.processing_state or {}
+    _ok = lambda s: ps.get(s, {}).get("completed", False)
+    rr = video.review_reason or ""
+    _clear = False
+
+    if rc in ("ai_partial", "ai_pending"):
+        need_ai = "AI metadata" in rr
+        need_scenes = "scene analysis" in rr
+        _clear = (not need_ai or _ok("ai_enriched")) and (not need_scenes or _ok("scenes_analyzed"))
+    elif rc == "scanned":
+        _clear = _ok("metadata_scraped") or _ok("metadata_resolved")
+    elif rc == "import_error":
+        # import_error review items are now redundant (shown in queue skipped tab)
+        _clear = True
+    elif rc in ("missing_artwork", "artwork_incomplete") and db is not None:
+        from app.ai.models import AIThumbnail
+        has_poster = db.query(MediaAsset.id).filter(
+            MediaAsset.video_id == video.id,
+            MediaAsset.asset_type == "poster",
+            MediaAsset.status == "valid",
+        ).first() is not None
+        has_thumb = db.query(AIThumbnail.id).filter(
+            AIThumbnail.video_id == video.id,
+            AIThumbnail.is_selected == True,  # noqa: E712
+        ).first() is not None
+        # Check only what was actually flagged as missing
+        needs_poster = "poster" in rr
+        needs_thumb = "thumbnail" in rr
+        if needs_poster and needs_thumb:
+            _clear = has_poster and has_thumb
+        elif needs_poster:
+            _clear = has_poster
+        elif needs_thumb:
+            _clear = has_thumb
+        else:
+            # Fallback: require both
+            _clear = has_poster and has_thumb
+
+    if _clear:
+        video.review_status = "none"
+        video.review_reason = None
+        video.review_category = None
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +487,9 @@ class MetadataSnapshot(Base):
     # What triggered this snapshot
     reason: Mapped[str] = mapped_column(String(200), nullable=False)  # e.g. "auto_import", "manual_rescan", "manual_edit"
 
+    # Anonymous user ID that triggered this snapshot (NULL for system/automated actions)
+    user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -448,6 +518,7 @@ class MediaAsset(Base):
     width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    crop_position: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # CSS object-position e.g. "50% 30%"
 
     # Validity tracking
     status: Mapped[str] = mapped_column(String(20), default="valid", server_default="valid")  # valid|invalid|missing|pending

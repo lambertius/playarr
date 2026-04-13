@@ -258,8 +258,8 @@ def _get_library_video_ids(db: Session) -> set[str]:
 
 
 def _get_library_artists(db: Session) -> list[dict]:
-    """Return list of {artist, count, has_5star} for artists in the library."""
-    from app.models import VideoItem
+    """Return list of {artist, count, has_5star, avg_rating, play_count} for artists in the library."""
+    from app.models import VideoItem, PlaybackHistory
     from sqlalchemy import case
 
     rows = db.query(
@@ -269,13 +269,35 @@ def _get_library_artists(db: Session) -> list[dict]:
             (VideoItem.song_rating == 5, 1),
             else_=0,
         )),
+        func.avg(case(
+            (VideoItem.song_rating_set == True, VideoItem.song_rating),  # noqa: E712
+            else_=None,
+        )),
     ).filter(
         VideoItem.artist.isnot(None),
         VideoItem.artist != "",
     ).group_by(VideoItem.artist).all()
 
+    # Get play counts per artist from PlaybackHistory
+    play_counts: dict[str, int] = {}
+    ph_rows = (
+        db.query(VideoItem.artist, func.count(PlaybackHistory.id))
+        .join(PlaybackHistory, PlaybackHistory.video_id == VideoItem.id)
+        .filter(VideoItem.artist.isnot(None), VideoItem.artist != "")
+        .group_by(VideoItem.artist)
+        .all()
+    )
+    for artist_name, count in ph_rows:
+        play_counts[artist_name] = count
+
     return [
-        {"artist": r[0], "count": r[1], "has_5star": bool(r[2])}
+        {
+            "artist": r[0],
+            "count": r[1],
+            "has_5star": bool(r[2]),
+            "avg_rating": round(r[3], 2) if r[3] is not None else None,
+            "play_count": play_counts.get(r[0], 0),
+        }
         for r in rows
     ]
 
@@ -572,7 +594,7 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
     Strategy: first check seeds matching library artists, then use yt-dlp
     search to dynamically discover videos by library artists.
     """
-    min_owned = _get_setting(db, "nv_min_owned_for_artist_rec", "2", "int")
+    min_owned = _get_setting(db, "nv_min_owned_for_artist_rec", "1", "int")
     max_per_artist = _get_setting(db, "nv_max_recs_per_artist", "5", "int")
     library_artists = _get_library_artists(db)
     library_ids = _get_library_video_ids(db)
@@ -627,8 +649,8 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
             if info["count"] >= min_owned
         ]
         random.shuffle(eligible_artists)
-        # Limit searches to keep refresh fast (max 5 artist searches)
-        max_searches = min(5, len(eligible_artists))
+        # Limit searches to keep refresh fast (max 8 artist searches)
+        max_searches = min(8, len(eligible_artists))
         for info in eligible_artists[:max_searches]:
             if len(candidates) >= limit:
                 break
@@ -650,28 +672,17 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
     return candidates[:limit]
 
 
-def _generate_taste_candidates(db: Session, limit: int = 10) -> list[RecommendationCandidate]:
-    """Generate taste-based recommendations from 5-star rated artists.
+def _generate_taste_candidates(db: Session, limit: int = 20) -> list[RecommendationCandidate]:
+    """Generate taste-based recommendations from user preferences.
 
-    Strategy: Find artists the user has rated 5 stars and suggest famous/popular
-    videos by the same artists, then search YouTube dynamically.
+    Strategy (multi-signal):
+      1. Artists with 5-star ratings → highest priority
+      2. Artists rated 3-4 stars → medium priority
+      3. Most-played artists (by PlaybackHistory count) → engagement signal
+      4. Genre affinity: find top genres, search for videos in those genres
     """
-    from app.models import VideoItem
+    from app.models import VideoItem, PlaybackHistory, Genre, video_genres
     use_ratings = _get_setting(db, "nv_use_ratings", "true", "bool")
-    if not use_ratings:
-        return []
-
-    # Get artists with 5-star song ratings
-    fav_artists = db.query(VideoItem.artist).filter(
-        VideoItem.song_rating == 5,
-        VideoItem.song_rating_set == True,  # noqa: E712
-        VideoItem.artist.isnot(None),
-    ).distinct().all()
-    fav_artist_names = {r[0] for r in fav_artists if r[0]}
-    fav_artist_lower = {n.lower() for n in fav_artist_names}
-
-    if not fav_artist_lower:
-        return []
 
     library_ids = _get_library_video_ids(db)
     library_titles = _get_library_titles(db)
@@ -679,7 +690,68 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
     exclude_ids = library_ids | dismissed_ids
     candidates = []
 
-    # Phase 1: seed-based matches
+    # ── Build preference-ranked artist list ──────────────────────────────────
+    # Score each artist: rating weight + play count weight
+    artist_scores: dict[str, float] = {}
+    artist_reasons: dict[str, str] = {}
+
+    if use_ratings:
+        # Tier 1: 5-star artists
+        for (name,) in db.query(VideoItem.artist).filter(
+            VideoItem.song_rating == 5,
+            VideoItem.song_rating_set == True,  # noqa: E712
+            VideoItem.artist.isnot(None),
+        ).distinct().all():
+            if name:
+                artist_scores[name] = artist_scores.get(name, 0) + 1.0
+                artist_reasons[name] = "5-star rated"
+
+        # Tier 2: 4-star artists
+        for (name,) in db.query(VideoItem.artist).filter(
+            VideoItem.song_rating == 4,
+            VideoItem.song_rating_set == True,  # noqa: E712
+            VideoItem.artist.isnot(None),
+        ).distinct().all():
+            if name and name not in artist_scores:
+                artist_scores[name] = artist_scores.get(name, 0) + 0.6
+                artist_reasons.setdefault(name, "4-star rated")
+
+        # Tier 3: 3-star artists (only if we still need more)
+        if len(artist_scores) < 8:
+            for (name,) in db.query(VideoItem.artist).filter(
+                VideoItem.song_rating == 3,
+                VideoItem.song_rating_set == True,  # noqa: E712
+                VideoItem.artist.isnot(None),
+            ).distinct().all():
+                if name and name not in artist_scores:
+                    artist_scores[name] = artist_scores.get(name, 0) + 0.3
+                    artist_reasons.setdefault(name, "3-star rated")
+
+    # Engagement signal: most-played artists
+    play_rows = (
+        db.query(VideoItem.artist, func.count(PlaybackHistory.id))
+        .join(PlaybackHistory, PlaybackHistory.video_id == VideoItem.id)
+        .filter(VideoItem.artist.isnot(None), VideoItem.artist != "")
+        .group_by(VideoItem.artist)
+        .order_by(func.count(PlaybackHistory.id).desc())
+        .limit(20)
+        .all()
+    )
+    for artist_name, play_count in play_rows:
+        if play_count >= 3:
+            bonus = min(0.5, play_count * 0.05)
+            artist_scores[artist_name] = artist_scores.get(artist_name, 0) + bonus
+            if artist_name not in artist_reasons:
+                artist_reasons[artist_name] = f"played {play_count} times"
+
+    if not artist_scores:
+        return []
+
+    # Sort by preference score descending
+    ranked_artists = sorted(artist_scores.items(), key=lambda x: x[1], reverse=True)
+    fav_artist_lower = {name.lower() for name, _ in ranked_artists}
+
+    # Phase 1: seed-based matches for preference-ranked artists
     all_seeds = FAMOUS_SEEDS + POPULAR_SEEDS
     for artist, title, vid_id in all_seeds:
         if artist.lower() in fav_artist_lower:
@@ -687,6 +759,7 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
                 continue
             if (_normalize_title(artist), _normalize_title(title)) in library_titles:
                 continue
+            reason_tag = artist_reasons.get(artist, "your preferences")
             candidates.append(RecommendationCandidate(
                 provider="youtube",
                 provider_video_id=vid_id,
@@ -698,19 +771,19 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
                 category="taste",
                 popularity_score=0.80,
                 freshness_score=0.35,
-                reasons=[f"Based on your 5-star rated {artist} videos"],
+                reasons=[f"Based on your {reason_tag} {artist} videos"],
             ))
             if len(candidates) >= limit:
                 break
 
-    # Phase 2: yt-dlp search for favourite artists
+    # Phase 2: yt-dlp search for preference-ranked artists (top 6, not just 3)
     if len(candidates) < limit:
         seen_ids = {c.provider_video_id for c in candidates}
-        fav_list = list(fav_artist_names)
-        random.shuffle(fav_list)
-        for artist_name in fav_list[:3]:
+        max_artist_searches = min(6, len(ranked_artists))
+        for artist_name, _ in ranked_artists[:max_artist_searches]:
             if len(candidates) >= limit:
                 break
+            reason_tag = artist_reasons.get(artist_name, "your preferences")
             results = _search_artist_videos(
                 artist_name, "taste",
                 exclude_ids | seen_ids, library_titles,
@@ -719,7 +792,42 @@ def _generate_taste_candidates(db: Session, limit: int = 10) -> list[Recommendat
             for c in results:
                 if c.provider_video_id in seen_ids:
                     continue
-                c.reasons = [f"Based on your 5-star rated {artist_name} videos"]
+                c.reasons = [f"Based on your {reason_tag} {artist_name} videos"]
+                seen_ids.add(c.provider_video_id)
+                candidates.append(c)
+                if len(candidates) >= limit:
+                    break
+
+    # Phase 3: genre affinity — find top genres and search for videos in them
+    if len(candidates) < limit:
+        seen_ids = {c.provider_video_id for c in candidates}
+        # Get top genres from the user's highest-rated / most-played videos
+        top_genres = (
+            db.query(Genre.name, func.count(video_genres.c.video_id))
+            .join(video_genres, video_genres.c.genre_id == Genre.id)
+            .join(VideoItem, VideoItem.id == video_genres.c.video_id)
+            .filter(
+                or_(
+                    VideoItem.song_rating >= 3,
+                    VideoItem.id.in_(
+                        db.query(PlaybackHistory.video_id).distinct()
+                    ),
+                )
+            )
+            .group_by(Genre.name)
+            .order_by(func.count(video_genres.c.video_id).desc())
+            .limit(3)
+            .all()
+        )
+        for genre_name, _ in top_genres:
+            if len(candidates) >= limit:
+                break
+            query = f"{genre_name} official music video"
+            results = _ytdlp_search(query, max_results=5, category="taste")
+            for c in results:
+                if c.provider_video_id in exclude_ids or c.provider_video_id in seen_ids:
+                    continue
+                c.reasons = [f"Matches your favourite genre: {genre_name}"]
                 seen_ids.add(c.provider_video_id)
                 candidates.append(c)
                 if len(candidates) >= limit:

@@ -431,8 +431,58 @@ def encode_video(
     }
 
 
+def _sync_editor_flags_from_sidecars(db, VideoItem):
+    """Backfill exclude_from_editor_scan and editor_edit_type from sidecar XMLs.
+
+    Only touches videos that currently have flags unset in the DB (i.e.
+    exclude=False or edit_type=None).  Runs once per scan — fast no-op when
+    the DB is already in sync.
+    """
+    import os
+    from sqlalchemy import or_
+    from app.services.playarr_xml import find_playarr_xml, parse_playarr_xml
+
+    candidates = (
+        db.query(VideoItem)
+        .filter(
+            VideoItem.file_path.isnot(None),
+            or_(
+                VideoItem.exclude_from_editor_scan == False,
+                VideoItem.editor_edit_type.is_(None),
+            ),
+        )
+        .all()
+    )
+    updated = 0
+    for v in candidates:
+        if not v.file_path:
+            continue
+        folder = os.path.dirname(v.file_path)
+        xml_path = find_playarr_xml(folder, video_file=v.file_path)
+        if not xml_path:
+            continue
+        try:
+            xd = parse_playarr_xml(xml_path)
+        except Exception:
+            continue
+        changed = False
+        if not v.exclude_from_editor_scan and xd.get("exclude_from_editor_scan"):
+            v.exclude_from_editor_scan = True
+            changed = True
+        et = xd.get("editor_edit_type")
+        if v.editor_edit_type is None and et:
+            v.editor_edit_type = et
+            changed = True
+        if changed:
+            updated += 1
+    if updated:
+        db.commit()
+
+
 def scan_library_for_letterboxing(
     db, limit: int = 500, include_excluded: bool = False, force_rescan: bool = False,
+    skip_cropped: bool = False, skip_trimmed: bool = False,
+    on_progress=None,
 ) -> list:
     """Scan video library for files with letterboxing.
 
@@ -443,8 +493,35 @@ def scan_library_for_letterboxing(
     Args:
         include_excluded: If True, also scan videos marked exclude_from_editor_scan.
         force_rescan: If True, re-run detection even on already-scanned videos.
+        skip_cropped: If True, skip videos previously edited with crop (or both).
+        skip_trimmed: If True, skip videos previously edited with trim (or both).
+        on_progress: Optional callback(current, total, artist, title) called per file.
     """
     from app.models import VideoItem, QualitySignature
+
+    import logging
+    _log = logging.getLogger("playarr")
+    _log.info(f"scan_library_for_letterboxing: include_excluded={include_excluded} skip_cropped={skip_cropped} skip_trimmed={skip_trimmed}")
+
+    # ── Pre-sync editor flags from sidecar XMLs ──────────────────────────
+    # When using a fresh DB, exclude_from_editor_scan and editor_edit_type
+    # may be missing even though the sidecar XML has them.  Do a quick
+    # backfill so the DB filters below work correctly.
+    _sync_editor_flags_from_sidecars(db, VideoItem)
+
+    def _apply_edit_filters(query):
+        """Apply skip_cropped / skip_trimmed filters to a query."""
+        if skip_cropped and skip_trimmed:
+            query = query.filter(VideoItem.editor_edit_type.is_(None))
+        elif skip_cropped:
+            query = query.filter(
+                (VideoItem.editor_edit_type.is_(None)) | (VideoItem.editor_edit_type == "trim")
+            )
+        elif skip_trimmed:
+            query = query.filter(
+                (VideoItem.editor_edit_type.is_(None)) | (VideoItem.editor_edit_type == "crop")
+            )
+        return query
 
     # First, collect all previously-detected letterboxed videos (no limit)
     prev_query = (
@@ -458,9 +535,12 @@ def scan_library_for_letterboxing(
     )
     if not include_excluded:
         prev_query = prev_query.filter(VideoItem.exclude_from_editor_scan == False)
+    prev_query = _apply_edit_filters(prev_query)
 
     results = []
-    for video in prev_query.all():
+    prev_videos = prev_query.all()
+    _log.info(f"scan: prev_query returned {len(prev_videos)} previously-detected videos")
+    for video in prev_videos:
         qs = video.quality_signature
         if not qs:
             continue
@@ -492,20 +572,32 @@ def scan_library_for_letterboxing(
     )
     if not include_excluded:
         scan_query = scan_query.filter(VideoItem.exclude_from_editor_scan == False)
+    scan_query = _apply_edit_filters(scan_query)
     if not force_rescan:
         scan_query = scan_query.filter(
             (QualitySignature.letterbox_scanned == None) | (QualitySignature.letterbox_scanned == False)
         )
 
     videos = scan_query.all()
+    total_to_scan = len(videos)
     newly_detected = 0
+    scanned_count = 0
     for video in videos:
         if not video.file_path or not os.path.isfile(video.file_path):
+            scanned_count += 1
             continue
 
         qs = video.quality_signature
         if not qs:
+            scanned_count += 1
             continue
+
+        scanned_count += 1
+        if on_progress:
+            try:
+                on_progress(scanned_count, total_to_scan, video.artist, video.title)
+            except Exception:
+                pass
 
         try:
             info = detect_letterbox(video.file_path)
@@ -522,6 +614,13 @@ def scan_library_for_letterboxing(
             qs.letterbox_bar_left = info["bar_left"]
             qs.letterbox_bar_right = info["bar_right"]
             db.commit()
+
+            # Persist to sidecar XML so future scans with fresh DB can skip
+            try:
+                from app.services.playarr_xml import write_playarr_xml
+                write_playarr_xml(video, db)
+            except Exception:
+                pass
 
             if info["detected"]:
                 results.append({

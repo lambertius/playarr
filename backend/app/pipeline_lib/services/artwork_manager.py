@@ -300,6 +300,7 @@ def process_artist_album_artwork(
     overwrite: bool = False,
     source: str = "all",
     wiki_album_url: Optional[str] = None,
+    wiki_artist_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the complete artist + album artwork pipeline for a single video import.
@@ -356,7 +357,7 @@ def process_artist_album_artwork(
     # --- Artist ---
     _log(f"Fetching artist artwork for: {artist} (source={source})")
     try:
-        artist_data = _get_artist(artist, mb_artist_id=mb_artist_id)
+        artist_data = _get_artist(artist, mb_artist_id=mb_artist_id, wiki_url=wiki_artist_url) if wiki_artist_url and source != "musicbrainz" else _get_artist(artist, mb_artist_id=mb_artist_id)
         if not artist_data.get("image_url"):
             _log(f"No artist image found for: {artist}")
 

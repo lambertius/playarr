@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { CalendarDays, PartyPopper, ListPlus, Trash2, RefreshCw } from "lucide-react";
 import { useYears, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks/queries";
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
@@ -59,7 +59,10 @@ function groupByDecade(years: YearEntry[], dir: SortDir): DecadeGroup[] {
 
 export function YearsPage() {
   const [filters, setFilters] = useState<FacetFilterParams>({});
-  const { data, isLoading, isError, refetch } = useYears(filters);
+  const [searchParams] = useSearchParams();
+  const searchTerm = searchParams.get("search") ?? "";
+  const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
+  const { data, isLoading, isError, refetch } = useYears(mergedFilters);
   const navigate = useNavigate();
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
@@ -130,6 +133,7 @@ export function YearsPage() {
           if (ok) {
             batchDeleteMutation.mutate(videoIds, {
               onSuccess: (res) => toast({ type: "success", title: `Deleted ${res.count} video(s)` }),
+              onError: (err: any) => toast({ type: "error", title: err?.response?.data?.detail || "Failed to delete videos" }),
             });
           }
           break;
@@ -139,7 +143,14 @@ export function YearsPage() {
     [navigate, batchRescanMutation, normalizeMutation, batchDeleteMutation, toast, confirm],
   );
 
-  const grouped = useMemo(() => (data ? groupByDecade(data, sortDir) : []), [data, sortDir]);
+  // Client-side filter: when searching, only show stacks whose year matches
+  const filtered = useMemo(() => {
+    if (!data || !searchTerm) return data ?? [];
+    const term = searchTerm.toLowerCase();
+    return data.filter((y) => y.year != null && String(y.year).includes(term));
+  }, [data, searchTerm]);
+
+  const grouped = useMemo(() => (filtered.length ? groupByDecade(filtered, sortDir) : []), [filtered, sortDir]);
 
   return (
     <div className="p-4 md:p-6">
@@ -155,7 +166,7 @@ export function YearsPage() {
           {sortDir === "desc" ? "New→Old" : "Old→New"}
         </button>
         <button
-          onClick={() => launchParty(filters)}
+          onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
           className="btn-sm text-xs font-semibold px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 text-white hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 transition-all shadow-lg shadow-purple-500/25 flex items-center gap-1.5"
         >
@@ -180,6 +191,7 @@ export function YearsPage() {
                 });
                 if (ok) batchDeleteMutation.mutate(selectedVideoIds, {
                   onSuccess: (res) => { toast({ type: "success", title: `Deleted ${res.count} video(s)` }); setSelectedYears(new Set()); },
+                  onError: (err: any) => toast({ type: "error", title: err?.response?.data?.detail || "Failed to delete videos" }),
                 });
               }}
               className="btn-danger btn-sm"
@@ -201,8 +213,8 @@ export function YearsPage() {
         </div>
       ) : isError ? (
         <ErrorState message="Failed to load years" onRetry={refetch} />
-      ) : !data || data.length === 0 ? (
-        <EmptyState icon={<CalendarDays size={48} />} title="No years yet" />
+      ) : !filtered || filtered.length === 0 ? (
+        <EmptyState icon={<CalendarDays size={48} />} title={searchTerm ? "No matching years" : "No years yet"} />
       ) : (
         grouped.map(({ decade, decadeStart, items, allVideoIds, totalCount }) => (
           <GroupedSection key={decade} heading={decade}>

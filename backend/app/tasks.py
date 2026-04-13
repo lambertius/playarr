@@ -23,7 +23,7 @@ from app.database import SessionLocal, CosmeticSessionLocal
 from app.models import (
     VideoItem, Source, QualitySignature, ProcessingJob, JobStatus,
     MetadataSnapshot, MediaAsset, Genre, NormalizationHistory,
-    SourceProvider, video_genres,
+    SourceProvider, video_genres, clear_stale_enrichment_review,
 )
 from app.services.url_utils import identify_provider, canonicalize_url
 from app.services.downloader import (
@@ -308,7 +308,7 @@ def _get_setting_bool(db, key: str, default: bool = False) -> bool:
     return val.lower() in ("true", "1", "yes")
 
 
-def _save_metadata_snapshot(db, video_item: VideoItem, reason: str):
+def _save_metadata_snapshot(db, video_item: VideoItem, reason: str, user_id: str = None):
     """Save a snapshot of current metadata for undo."""
     snapshot_data = {
         "artist": video_item.artist,
@@ -325,6 +325,7 @@ def _save_metadata_snapshot(db, video_item: VideoItem, reason: str):
         video_id=video_item.id,
         snapshot_data=snapshot_data,
         reason=reason,
+        user_id=user_id,
     )
     db.add(snapshot)
 
@@ -2027,47 +2028,36 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
 
         # --- A8b: YouTube source matching (network I/O) ---
         if find_source_video:
-            _check_cancelled(job_id)
-            _set_pipeline_step(job_id, "YouTube matching", "running")
-            try:
-                from app.services.youtube_matcher import find_best_youtube_match, verify_youtube_link
-                _yt_match = None
-
-                # If an existing YouTube link is present, verify it first
-                if ctx_existing_yt_url:
-                    _append_job_log(job_id, f"Verifying existing YouTube link: {ctx_existing_yt_url}")
-                    _yt_match = verify_youtube_link(
-                        ctx_existing_yt_url, new_artist, new_title,
-                        duration_seconds=int(ctx_duration) if ctx_duration else None,
-                    )
-                    if _yt_match:
-                        _append_job_log(job_id, f"Existing YouTube link verified (score={_yt_match.overall_score:.3f})")
-                    else:
-                        _append_job_log(job_id, "Existing YouTube link failed verification, searching...")
-
-                # Fall back to general search if no verified link
-                if not _yt_match:
+            # Skip if video already has a YouTube source link
+            if ctx_existing_yt_url:
+                _append_job_log(job_id, f"YouTube matching skipped — existing link: {ctx_existing_yt_url}")
+                _set_pipeline_step(job_id, "YouTube matching", "skipped")
+            else:
+                _check_cancelled(job_id)
+                _set_pipeline_step(job_id, "YouTube matching", "running")
+                try:
+                    from app.services.youtube_matcher import find_best_youtube_match
                     _yt_match = find_best_youtube_match(
                         new_artist, new_title,
                         duration_seconds=int(ctx_duration) if ctx_duration else None,
                     )
 
-                if _yt_match:
-                    source_links["youtube"] = {
-                        "provider": "youtube",
-                        "id": _yt_match.video_id,
-                        "url": _yt_match.url,
-                        "source_type": "video",
-                        "provenance": "rescan",
-                    }
-                    _append_job_log(job_id, f"YouTube match: {_yt_match.url} (score={_yt_match.overall_score:.3f})")
-                    _set_pipeline_step(job_id, "YouTube matching", "success")
-                else:
-                    _append_job_log(job_id, "No YouTube match found above threshold")
-                    _set_pipeline_step(job_id, "YouTube matching", "skipped")
-            except Exception as _yt_err:
-                _append_job_log(job_id, f"YouTube matching warning: {_yt_err}")
-                _set_pipeline_step(job_id, "YouTube matching", "warning")
+                    if _yt_match:
+                        source_links["youtube"] = {
+                            "provider": "youtube",
+                            "id": _yt_match.video_id,
+                            "url": _yt_match.url,
+                            "source_type": "video",
+                            "provenance": "rescan",
+                        }
+                        _append_job_log(job_id, f"YouTube match: {_yt_match.url} (score={_yt_match.overall_score:.3f})")
+                        _set_pipeline_step(job_id, "YouTube matching", "success")
+                    else:
+                        _append_job_log(job_id, "No YouTube match found above threshold")
+                        _set_pipeline_step(job_id, "YouTube matching", "skipped")
+                except Exception as _yt_err:
+                    _append_job_log(job_id, f"YouTube matching warning: {_yt_err}")
+                    _set_pipeline_step(job_id, "YouTube matching", "warning")
 
         _check_cancelled(job_id)
 
@@ -2399,6 +2389,28 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                             _clear = _flag_ok("ai_enriched")
                     elif _rc == "scanned":
                         _clear = _flag_ok("metadata_scraped") or _flag_ok("metadata_resolved")
+                    elif _rc == "artwork_incomplete":
+                        # Rescan dispatches entity_artwork deferred task;
+                        # clear optimistically since artwork will be retried.
+                        _clear = True
+                    elif _rc == "missing_artwork":
+                        # Check if poster/thumbnail now exist after rescan
+                        # NOTE: MediaAsset is already imported at module level
+                        # (line 25).  Do NOT re-import locally — it shadows
+                        # the top-level import and causes "referenced before
+                        # assignment" for every earlier use of MediaAsset in
+                        # this function.
+                        from app.ai.models import AIThumbnail
+                        _has_poster = db.query(MediaAsset.id).filter(
+                            MediaAsset.video_id == video_item.id,
+                            MediaAsset.asset_type == "poster",
+                            MediaAsset.status == "valid",
+                        ).first() is not None
+                        _has_thumb = db.query(AIThumbnail.id).filter(
+                            AIThumbnail.video_id == video_item.id,
+                            AIThumbnail.is_selected == True,  # noqa: E712
+                        ).first() is not None
+                        _clear = _has_poster and _has_thumb
                     if _clear:
                         video_item.review_status = "none"
                         video_item.review_reason = None
@@ -3584,8 +3596,17 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                         _link_page = _url_unquote_art(
                             _linked_artist_url.rsplit("/wiki/", 1)[-1]
                         ).replace("_", " ").strip()
-                        _lp = _link_page.lower()
-                        _ra = _art_artist.lower().strip()
+                        # Normalize for comparison: strip punctuation, ALL
+                        # Unicode dashes/hyphens, and periods so that
+                        # e.g. "Run-DMC" matches "Run–D.M.C."
+                        import unicodedata as _ud_art
+                        def _norm_artist_xlink(s: str) -> str:
+                            s = _ud_art.normalize("NFKD", s).lower()
+                            s = _re.sub(r"[\.\-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]+", "", s)
+                            s = _re.sub(r"\s+", " ", s).strip()
+                            return s
+                        _lp = _norm_artist_xlink(_link_page)
+                        _ra = _norm_artist_xlink(_art_artist)
                         if not (_lp == _ra or _lp in _ra or _ra in _lp):
                             _art_xlink_ok = False
                             _append_job_log(job_id,
@@ -3945,56 +3966,49 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             # YouTube source matching (if enabled)
             if find_source_video:
                 _check_cancelled(job_id)
-                _set_pipeline_step(job_id, "YouTube matching", "running")
-                try:
-                    from app.services.youtube_matcher import find_best_youtube_match, verify_youtube_link
 
-                    _yt_artist = proposed.get("artist") or video_item.artist
-                    _yt_title = proposed.get("title") or video_item.title
-                    _yt_duration = (video_item.quality_signature.duration_seconds
-                                    if video_item.quality_signature else None)
-                    _yt_match = None
+                # Check existing YouTube source first
+                _existing_yt = ""
+                for _s in video_item.sources:
+                    if _s.provider.value == "youtube" and _s.source_type == "video":
+                        _existing_yt = _s.canonical_url or _s.original_url or ""
+                        break
 
-                    # Check existing YouTube source first
-                    _existing_yt = ""
-                    for _s in video_item.sources:
-                        if _s.provider.value == "youtube" and _s.source_type == "video":
-                            _existing_yt = _s.canonical_url or _s.original_url or ""
-                            break
+                # Skip if video already has a YouTube source link
+                if _existing_yt:
+                    _append_job_log(job_id, f"YouTube matching skipped — existing link: {_existing_yt}")
+                    _set_pipeline_step(job_id, "YouTube matching", "skipped")
+                else:
+                    _set_pipeline_step(job_id, "YouTube matching", "running")
+                    try:
+                        from app.services.youtube_matcher import find_best_youtube_match
 
-                    if _existing_yt:
-                        _append_job_log(job_id, f"Verifying existing YouTube link: {_existing_yt}")
-                        _yt_match = verify_youtube_link(
-                            _existing_yt, _yt_artist, _yt_title,
-                            duration_seconds=int(_yt_duration) if _yt_duration else None,
-                        )
-                        if _yt_match:
-                            _append_job_log(job_id, f"Existing YouTube link verified (score={_yt_match.overall_score:.3f})")
-                        else:
-                            _append_job_log(job_id, "Existing YouTube link failed verification, searching...")
+                        _yt_artist = proposed.get("artist") or video_item.artist
+                        _yt_title = proposed.get("title") or video_item.title
+                        _yt_duration = (video_item.quality_signature.duration_seconds
+                                        if video_item.quality_signature else None)
 
-                    if not _yt_match:
                         _yt_match = find_best_youtube_match(
                             _yt_artist, _yt_title,
                             duration_seconds=int(_yt_duration) if _yt_duration else None,
                         )
 
-                    if _yt_match:
-                        proposed_source_list.append({
-                            "provider": "youtube",
-                            "source_video_id": _yt_match.video_id,
-                            "original_url": _yt_match.url,
-                            "source_type": "video",
-                            "provenance": "scrape_metadata",
-                        })
-                        _append_job_log(job_id, f"YouTube match: {_yt_match.url} (score={_yt_match.overall_score:.3f})")
-                        _set_pipeline_step(job_id, "YouTube matching", "success")
-                    else:
-                        _append_job_log(job_id, "No YouTube match found above threshold")
-                        _set_pipeline_step(job_id, "YouTube matching", "skipped")
-                except Exception as _yt_err:
-                    _append_job_log(job_id, f"YouTube matching warning: {_yt_err}")
-                    _set_pipeline_step(job_id, "YouTube matching", "warning")
+                        if _yt_match:
+                            proposed_source_list.append({
+                                "provider": "youtube",
+                                "source_video_id": _yt_match.video_id,
+                                "original_url": _yt_match.url,
+                                "source_type": "video",
+                                "provenance": "scrape_metadata",
+                            })
+                            _append_job_log(job_id, f"YouTube match: {_yt_match.url} (score={_yt_match.overall_score:.3f})")
+                            _set_pipeline_step(job_id, "YouTube matching", "success")
+                        else:
+                            _append_job_log(job_id, "No YouTube match found above threshold")
+                            _set_pipeline_step(job_id, "YouTube matching", "skipped")
+                    except Exception as _yt_err:
+                        _append_job_log(job_id, f"YouTube matching warning: {_yt_err}")
+                        _set_pipeline_step(job_id, "YouTube matching", "warning")
 
             # Ensure all core fields are populated — use current values as
             # fallback so the comparison table always shows every field.
@@ -4209,6 +4223,26 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                     _clear = _flag_done("ai_enriched")
             elif _rc == "scanned":
                 _clear = _flag_done("metadata_scraped") or _flag_done("metadata_resolved")
+            elif _rc == "artwork_incomplete":
+                # Scrape dispatches artwork pipeline; clear optimistically.
+                _clear = True
+            elif _rc == "missing_artwork":
+                # Check if poster/thumbnail now exist after scrape
+                # NOTE: MediaAsset is already imported at module level (line 25).
+                # Do NOT re-import locally — it shadows the top-level import and
+                # causes "referenced before assignment" for every earlier use
+                # of MediaAsset in this function.
+                from app.ai.models import AIThumbnail
+                _has_poster = db.query(MediaAsset.id).filter(
+                    MediaAsset.video_id == video_item.id,
+                    MediaAsset.asset_type == "poster",
+                    MediaAsset.status == "valid",
+                ).first() is not None
+                _has_thumb = db.query(AIThumbnail.id).filter(
+                    AIThumbnail.video_id == video_item.id,
+                    AIThumbnail.is_selected == True,  # noqa: E712
+                ).first() is not None
+                _clear = _has_poster and _has_thumb
             if _clear:
                 video_item.review_status = "none"
                 video_item.review_reason = None
@@ -4511,8 +4545,17 @@ def _collect_wiki_source_proposals(db, video_item, video_id, source_log, _re,
                         _link_page = _url_unquote(
                             _xlink_artist_url.rsplit("/wiki/", 1)[-1]
                         ).replace("_", " ").strip()
-                        _lp = _link_page.lower()
-                        _ra = _wiki_primary.lower().strip()
+                        # Normalize: strip dots, all Unicode dashes/hyphens
+                        # so e.g. "Run-DMC" matches "Run–D.M.C."
+                        import unicodedata as _ud_xlink
+                        import re as _re_xlink
+                        def _norm_xlink(s: str) -> str:
+                            s = _ud_xlink.normalize("NFKD", s).lower()
+                            s = _re_xlink.sub(r"[\.\-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]+", "", s)
+                            s = _re_xlink.sub(r"\s+", " ", s).strip()
+                            return s
+                        _lp = _norm_xlink(_link_page)
+                        _ra = _norm_xlink(_wiki_primary)
                         if not (_lp == _ra or _lp in _ra or _ra in _lp):
                             _xlink_ok = False
                             source_log.append(
@@ -4625,7 +4668,36 @@ def _restore_entity_cached_artwork(
         for art in cached_art:
             kind = art.get("kind")
             source_url = art.get("source_url")
-            if not kind or not source_url:
+            art_status = art.get("status", "valid")
+            if not kind:
+                continue
+
+            # Handle "unavailable" entries — restore the marker without downloading
+            if art_status == "unavailable":
+                existing = db.query(CachedAsset).filter(
+                    CachedAsset.entity_type == entity_type,
+                    CachedAsset.entity_id == entity_id,
+                    CachedAsset.kind == kind,
+                ).first()
+                if not existing:
+                    ca = CachedAsset(
+                        entity_type=entity_type,
+                        entity_id=entity_id,
+                        kind=kind,
+                        local_cache_path="",
+                        status="unavailable",
+                        provenance=art.get("provenance") or "xml_import",
+                        source_provider=art.get("source_provider") or "none",
+                    )
+                    db.add(ca)
+                    db.flush()
+                    _append_job_log(
+                        job_id,
+                        f"  Restored {entity_type} {kind} unavailable marker"
+                    )
+                continue
+
+            if not source_url:
                 continue
 
             # Skip if a valid CachedAsset already exists
@@ -4778,6 +4850,138 @@ def _verify_sidecar_processing_states(db, job_id: int) -> int:
             if has_thumb:
                 _mark("thumbnail_selected")
 
+        # ── entity_artwork_linked: repair missing artist_thumb / album_thumb ──
+        # If the video has entity links but is missing the corresponding
+        # MediaAsset records, look for existing artwork files on disk
+        # (shared _artists/_albums folders) or in the CachedAsset table
+        # and create the MediaAsset.  This self-heals gaps from older
+        # imports that skipped entity_artwork, and works across installs
+        # sharing the same library directory.
+        from app.pipeline_lib.services.artwork_service import validate_file as _vf_scan
+        from app.metadata.models import CachedAsset as _CA_scan
+
+        _entity_checks = []
+        if video.artist_entity_id:
+            _entity_checks.append(("artist_thumb", "artist", video.artist_entity_id, video.artist))
+        if video.album_entity_id:
+            _entity_checks.append(("album_thumb", "album", video.album_entity_id, video.album))
+
+        for _asset_type, _etype, _entity_id, _name_hint in _entity_checks:
+            _has = db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == video.id,
+                MediaAsset.asset_type == _asset_type,
+            ).first()
+            if _has:
+                continue
+
+            _art_path = None
+
+            # Strategy 1: Check the shared _artists / _albums folder on disk
+            try:
+                from app.pipeline_lib.services.artwork_manager import (
+                    _safe_name as _sn_scan, get_artists_dir, get_albums_dir,
+                )
+                if _etype == "artist" and _name_hint:
+                    from app.scraper.source_validation import parse_multi_artist as _pma_scan
+                    _primary, _ = _pma_scan(_name_hint)
+                    _candidate = os.path.join(get_artists_dir(), _sn_scan(_primary), "poster.jpg")
+                    if os.path.isfile(_candidate):
+                        _art_path = _candidate
+                elif _etype == "album" and _name_hint and video.artist:
+                    from app.scraper.source_validation import parse_multi_artist as _pma_scan2
+                    _primary2, _ = _pma_scan2(video.artist)
+                    _candidate = os.path.join(get_albums_dir(), _sn_scan(_primary2), _sn_scan(_name_hint), "poster.jpg")
+                    if os.path.isfile(_candidate):
+                        _art_path = _candidate
+            except Exception:
+                pass
+
+            # Strategy 2: Check CachedAsset table
+            if not _art_path:
+                _ca = db.query(_CA_scan).filter(
+                    _CA_scan.entity_type == _etype,
+                    _CA_scan.entity_id == _entity_id,
+                    _CA_scan.kind == "poster",
+                    _CA_scan.status == "valid",
+                ).first()
+                if _ca and _ca.local_cache_path and os.path.isfile(_ca.local_cache_path):
+                    _art_path = _ca.local_cache_path
+
+            # Strategy 3: Copy path from sibling video with same entity
+            if not _art_path:
+                _sibling = db.query(MediaAsset.file_path).filter(
+                    MediaAsset.asset_type == _asset_type,
+                    MediaAsset.status == "valid",
+                    MediaAsset.video_id != video.id,
+                ).join(VideoItem, MediaAsset.video_id == VideoItem.id).filter(
+                    (VideoItem.artist_entity_id == _entity_id) if _etype == "artist"
+                    else (VideoItem.album_entity_id == _entity_id),
+                ).first()
+                if _sibling and _sibling[0] and os.path.isfile(_sibling[0]):
+                    _art_path = _sibling[0]
+
+            if _art_path:
+                _vr = _vf_scan(_art_path)
+                db.add(MediaAsset(
+                    video_id=video.id,
+                    asset_type=_asset_type,
+                    file_path=_art_path,
+                    provenance="library_scan_repair",
+                    status="valid" if (_vr and _vr.valid) else "invalid",
+                    width=_vr.width if _vr and _vr.valid else None,
+                    height=_vr.height if _vr and _vr.valid else None,
+                    file_size_bytes=_vr.file_size_bytes if _vr and _vr.valid else None,
+                    file_hash=_vr.file_hash if _vr and _vr.valid else None,
+                    last_validated_at=datetime.now(timezone.utc),
+                ))
+                repaired += 1
+                _append_job_log(
+                    job_id,
+                    f"Repaired {_asset_type} for {video.artist} - {video.title}",
+                )
+
+        # After repair attempts, check if entity artwork is still missing.
+        # Flag unresolved videos in the review queue; clear the flag for
+        # videos that are now complete.
+        # Only flag if the entity_artwork deferred task has already run
+        # (marked by processing_state.entity_artwork_linked.completed).
+        # Without this guard, the scan would flag items before the artwork
+        # pipeline has had a chance to download entity artwork, causing
+        # false positive review flags.
+        _artwork_pipeline_ran = state.get("entity_artwork_linked", {}).get("completed", False)
+        if _entity_checks:
+            _still_missing = []
+            for _asset_type, _etype, _entity_id, _name_hint in _entity_checks:
+                _has_now = db.query(MediaAsset.id).filter(
+                    MediaAsset.video_id == video.id,
+                    MediaAsset.asset_type == _asset_type,
+                ).first()
+                if not _has_now:
+                    _still_missing.append(_asset_type)
+
+            if _still_missing:
+                # Only flag if the artwork pipeline has already completed
+                # and no higher-priority review flag is present
+                if _artwork_pipeline_ran and (video.review_status or "none") == "none":
+                    video.review_status = "needs_human_review"
+                    video.review_category = "artwork_incomplete"
+                    video.review_reason = (
+                        f"Missing entity artwork: {', '.join(_still_missing)}"
+                    )
+                    _append_job_log(
+                        job_id,
+                        f"Flagged artwork_incomplete for {video.artist} - {video.title}: {', '.join(_still_missing)}",
+                    )
+            elif video.review_category == "artwork_incomplete":
+                # All entity artwork now present — clear the flag
+                video.review_status = "none"
+                video.review_reason = None
+                video.review_category = None
+                _append_job_log(
+                    job_id,
+                    f"Cleared artwork_incomplete for {video.artist} - {video.title}",
+                )
+
         # ── scenes_analyzed: AISceneAnalysis record with status=complete ──
         if not _is_done("scenes_analyzed"):
             has_scene = db.query(AISceneAnalysis.id).filter(
@@ -4807,6 +5011,15 @@ def _verify_sidecar_processing_states(db, job_id: int) -> int:
                 f"Repaired {', '.join(changed_flags)} for {video.artist} - {video.title}",
             )
 
+        # After repairing processing_state, clear stale review flags that
+        # were set before the underlying steps completed (e.g. ai_partial
+        # "Missing scene analysis" when scenes_analyzed is now True).
+        if clear_stale_enrichment_review(video, db=db):
+            _append_job_log(
+                job_id,
+                f"Cleared stale review flag for {video.artist} - {video.title}",
+            )
+
         # Commit in batches to avoid holding the DB lock too long
         if idx % batch_size == batch_size - 1:
             db.commit()
@@ -4819,8 +5032,223 @@ def _verify_sidecar_processing_states(db, job_id: int) -> int:
 # Library scan task
 # ---------------------------------------------------------------------------
 
+
+def _apply_sidecar_to_existing(db, video_item, xd: dict, job_id: int):
+    """Apply sidecar XML data to an existing VideoItem, updating changed fields.
+
+    This is used by the "update existing" library scan mode to sync DB entries
+    from sidecar XMLs that may have been modified by another Playarr instance.
+    """
+    from app.pipeline.db_apply import _upsert_source
+    from app.models import MediaAsset, QualitySignature
+    from app.metadata.models import ArtistEntity, AlbumEntity, TrackEntity
+
+    changed = []
+
+    # ── Core metadata ──
+    for field in ("artist", "title", "album", "year", "plot", "resolution_label"):
+        xv = xd.get(field)
+        if xv is not None and xv != getattr(video_item, field, None):
+            setattr(video_item, field, xv)
+            changed.append(field)
+
+    # ── Genres ──
+    xml_genres = xd.get("genres") or []
+    if xml_genres:
+        existing_genre_names = {g.name for g in video_item.genres}
+        for genre_name in xml_genres:
+            if genre_name not in existing_genre_names:
+                genre_obj = _get_or_create_genre(db, genre_name)
+                if genre_obj not in video_item.genres:
+                    video_item.genres.append(genre_obj)
+                    changed.append(f"genre:{genre_name}")
+
+    # ── Extended metadata fields ──
+    for field in ("mb_artist_id", "mb_recording_id", "mb_release_id",
+                  "mb_release_group_id", "mb_track_id",
+                  "version_type", "alternate_version_label",
+                  "original_artist", "original_title", "audio_fingerprint",
+                  "acoustid_id", "import_method", "exclude_from_editor_scan",
+                  "editor_edit_type",
+                  "playarr_video_id", "playarr_track_id", "video_phash",
+                  "canonical_provenance"):
+        xv = xd.get(field)
+        if xv is not None and xv != getattr(video_item, field, None):
+            setattr(video_item, field, xv)
+            changed.append(field)
+
+    # ── Processing state, locked fields, field provenance, related versions ──
+    for field in ("processing_state", "locked_fields", "field_provenance",
+                  "related_versions"):
+        xv = xd.get(field)
+        if xv is not None and xv != getattr(video_item, field, None):
+            setattr(video_item, field, xv)
+            changed.append(field)
+
+    # ── Ratings ──
+    if xd.get("song_rating_set"):
+        sr = xd.get("song_rating", 3)
+        if sr != video_item.song_rating:
+            video_item.song_rating = sr
+            video_item.song_rating_set = True
+            changed.append("song_rating")
+    if xd.get("video_rating_set"):
+        vr = xd.get("video_rating", 3)
+        if vr != video_item.video_rating:
+            video_item.video_rating = vr
+            video_item.video_rating_set = True
+            changed.append("video_rating")
+
+    # ── Review state ──
+    # Skip restoring stale duplicate flags from sidecar when the partner
+    # video no longer exists (was deleted/moved).
+    _xml_review_cat = xd.get("review_category")
+    _skip_review_restore = False
+    if _xml_review_cat == "duplicate":
+        _xml_dismissed = xd.get("dismissed_duplicate_ids") or []
+        _xml_reason = xd.get("review_reason") or ""
+        # Extract partner IDs from review_reason like "Potential duplicate of video ID(s): 123, 456"
+        import re as _re_dup
+        _partner_ids = [int(x) for x in _re_dup.findall(r'\b(\d+)\b', _xml_reason.split("ID(s):")[-1])] if "ID(s):" in _xml_reason else []
+        if _partner_ids:
+            _existing_ids = {r[0] for r in db.query(VideoItem.id).filter(VideoItem.id.in_(_partner_ids)).all()}
+            if not _existing_ids:
+                _skip_review_restore = True  # All partners deleted — don't re-flag
+
+    for field in ("review_status", "review_category", "review_reason",
+                  "review_history", "dismissed_duplicate_ids"):
+        if _skip_review_restore and field in ("review_status", "review_category", "review_reason"):
+            continue
+        xv = xd.get(field)
+        if xv is not None and xv != getattr(video_item, field, None):
+            setattr(video_item, field, xv)
+            changed.append(field)
+    if xd.get("rename_dismissed") and not video_item.rename_dismissed:
+        video_item.rename_dismissed = True
+        changed.append("rename_dismissed")
+
+    # ── Quality signature (letterbox, codecs, etc.) ──
+    xml_q = xd.get("quality", {})
+    if xml_q:
+        qs = db.query(QualitySignature).filter(
+            QualitySignature.video_id == video_item.id
+        ).first()
+        if not qs:
+            qs = QualitySignature(video_id=video_item.id)
+            db.add(qs)
+        for qf in ("width", "height", "loudness_lufs", "fps", "video_codec",
+                    "video_bitrate", "hdr", "audio_codec", "audio_bitrate",
+                    "audio_sample_rate", "audio_channels", "container",
+                    "duration_seconds", "letterbox_scanned", "letterbox_detected",
+                    "letterbox_crop_w", "letterbox_crop_h",
+                    "letterbox_crop_x", "letterbox_crop_y",
+                    "letterbox_bar_top", "letterbox_bar_bottom",
+                    "letterbox_bar_left", "letterbox_bar_right"):
+            qv = xml_q.get(qf)
+            if qv is not None and qv != getattr(qs, qf, None):
+                setattr(qs, qf, qv)
+                changed.append(f"quality.{qf}")
+
+    # ── Sources ──
+    xml_sources = xd.get("sources", [])
+    for src_data in xml_sources:
+        _upsert_source(db, video_item.id, {
+            "provider": src_data.get("provider", ""),
+            "source_video_id": src_data.get("source_video_id", ""),
+            "original_url": src_data.get("original_url", ""),
+            "canonical_url": src_data.get("canonical_url", ""),
+            "source_type": src_data.get("source_type", "video"),
+            "provenance": src_data.get("provenance", "xml_import"),
+            "channel_name": src_data.get("channel_name"),
+            "platform_title": src_data.get("platform_title"),
+            "upload_date": src_data.get("upload_date"),
+        })
+
+    # ── Artwork ──
+    xml_art = xd.get("artwork", [])
+    for art in xml_art:
+        art_path = art.get("file_path")
+        if not art_path or not os.path.isfile(art_path):
+            continue
+        # Only add if not already tracked
+        exists = db.query(MediaAsset).filter(
+            MediaAsset.video_id == video_item.id,
+            MediaAsset.asset_type == art["asset_type"],
+            MediaAsset.file_path == art_path,
+        ).first()
+        if not exists:
+            db.add(MediaAsset(
+                video_id=video_item.id,
+                asset_type=art["asset_type"],
+                file_path=art_path,
+                source_url=art.get("source_url"),
+                provenance=art.get("provenance", "xml_import"),
+                source_provider=art.get("source_provider"),
+                file_hash=art.get("file_hash"),
+                status=art.get("status", "valid"),
+                width=art.get("width"),
+                height=art.get("height"),
+                last_validated_at=datetime.now(timezone.utc),
+            ))
+            changed.append(f"artwork:{art['asset_type']}")
+
+    # ── Entity references ──
+    entity_refs = xd.get("entity_refs", {})
+    ar = entity_refs.get("artist")
+    if ar:
+        ae = None
+        if ar.get("mb_artist_id"):
+            ae = db.query(ArtistEntity).filter(
+                ArtistEntity.mb_artist_id == ar["mb_artist_id"]
+            ).first()
+        if not ae and ar.get("name"):
+            ae = db.query(ArtistEntity).filter(
+                ArtistEntity.canonical_name == ar["name"]
+            ).first()
+        if ae and ae.id != video_item.artist_entity_id:
+            video_item.artist_entity_id = ae.id
+            changed.append("artist_entity_id")
+
+    al = entity_refs.get("album")
+    if al:
+        ale = None
+        if al.get("mb_release_id"):
+            ale = db.query(AlbumEntity).filter(
+                AlbumEntity.mb_release_id == al["mb_release_id"]
+            ).first()
+        if not ale and al.get("title") and video_item.artist_entity_id:
+            ale = db.query(AlbumEntity).filter(
+                AlbumEntity.title == al["title"],
+                AlbumEntity.artist_id == video_item.artist_entity_id,
+            ).first()
+        if ale and ale.id != video_item.album_entity_id:
+            video_item.album_entity_id = ale.id
+            changed.append("album_entity_id")
+
+    tr = entity_refs.get("track")
+    if tr:
+        te = None
+        if tr.get("mb_recording_id"):
+            te = db.query(TrackEntity).filter(
+                TrackEntity.mb_recording_id == tr["mb_recording_id"]
+            ).first()
+        if not te and tr.get("title") and video_item.artist_entity_id:
+            te = db.query(TrackEntity).filter(
+                TrackEntity.title == tr["title"],
+                TrackEntity.artist_id == video_item.artist_entity_id,
+            ).first()
+        if te and te.id != video_item.track_id:
+            video_item.track_id = te.id
+            changed.append("track_id")
+
+    if changed:
+        db.commit()
+        _append_job_log(job_id, f"Updated: {video_item.artist} - {video_item.title} ({len(changed)} fields)")
+
+
 @celery_app.task(bind=True)
-def library_scan_task(self, job_id: int, import_new: bool = True):
+def library_scan_task(self, job_id: int, import_new: bool = True,
+                      update_existing: bool = False):
     """Scan library directory for untracked files.
 
     For each folder in the library that isn't already tracked by a VideoItem:
@@ -4829,6 +5257,9 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
     3. Fall back to parsing the folder name (``Artist - Title [Resolution]``).
     4. Create a VideoItem with ``import_method='scanned'``.
     5. Analyse quality signature (resolution, codecs) via ffprobe.
+
+    If ``update_existing`` is True, re-read sidecar XMLs for already-tracked
+    items and update the database entries with any changed fields.
     """
     from app.services.nfo_parser import find_nfo_for_video, parse_nfo_file
     from app.services.playarr_xml import find_playarr_xml, parse_playarr_xml
@@ -4846,6 +5277,7 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
         _append_job_log(job_id, f"Found {total} folders in library")
 
         new_count = 0
+        updated_count = 0
         for i, entry in enumerate(entries):
             _update_job(job_id, progress_percent=int((i / max(total, 1)) * 100))
 
@@ -4873,6 +5305,14 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                             continue
 
             if existing:
+                if update_existing and existing is not True:
+                    # Re-read sidecar XML and update the existing DB entry
+                    xml_path = find_playarr_xml(entry["folder_path"], video_file=entry["file_path"])
+                    if xml_path:
+                        xd = parse_playarr_xml(xml_path)
+                        if xd:
+                            _apply_sidecar_to_existing(db, existing, xd, job_id)
+                            updated_count += 1
                 continue
 
             if import_new:
@@ -4984,6 +5424,7 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                     video_item.processing_state = xml_sidecar_data.get("processing_state")
                     video_item.locked_fields = xml_sidecar_data.get("locked_fields")
                     video_item.exclude_from_editor_scan = xml_sidecar_data.get("exclude_from_editor_scan", False)
+                    video_item.editor_edit_type = xml_sidecar_data.get("editor_edit_type")
                     video_item.field_provenance = xml_sidecar_data.get("field_provenance")
                     video_item.related_versions = xml_sidecar_data.get("related_versions")
                     xml_import_method = xml_sidecar_data.get("import_method")
@@ -5241,6 +5682,7 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                             "thumbnails", str(video_item.id),
                         )
                         os.makedirs(thumb_dir, exist_ok=True)
+                        _discovered_thumbs = []
                         for fn in thumb_files:
                             ts_match = _re.search(r"thumb_([\d.]+)\.jpg$", fn)
                             ts = float(ts_match.group(1)) if ts_match else 0.0
@@ -5249,13 +5691,18 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                             if src != dst:
                                 import shutil
                                 shutil.copy2(src, dst)
-                            db.add(_AT(
+                            _t = _AT(
                                 video_id=video_item.id,
                                 scene_analysis_id=sa.id,
                                 timestamp_sec=ts,
                                 file_path=dst,
                                 provenance="disk_discovery",
-                            ))
+                            )
+                            db.add(_t)
+                            _discovered_thumbs.append(_t)
+                        # Auto-select the first discovered thumbnail
+                        if _discovered_thumbs:
+                            _discovered_thumbs[0].is_selected = True
 
                 # Poster fallback: if no poster asset was created (XML missing
                 # poster, wrong XML picked, or no XML at all), discover a poster
@@ -5326,7 +5773,12 @@ def library_scan_task(self, job_id: int, import_new: bool = True):
                 new_count += 1
                 _append_job_log(job_id, f"Imported: {artist} - {title}")
 
-        _append_job_log(job_id, f"Scan complete. {new_count} new items imported.")
+        _parts = []
+        if new_count:
+            _parts.append(f"{new_count} new items imported")
+        if updated_count:
+            _parts.append(f"{updated_count} existing items updated")
+        _append_job_log(job_id, f"Scan complete. {', '.join(_parts) if _parts else 'No changes.'}")
 
         # ── Phase 2: Verify sidecar processing states for existing videos ──
         _append_job_log(job_id, "Verifying sidecar processing states for existing videos...")
@@ -5904,3 +6356,358 @@ def library_import_video_task(self, job_id: int):
                 celery_task_id=getattr(getattr(self, "request", None), "id", None))
 
     run_library_import_pipeline(job_id)
+
+
+# ---------------------------------------------------------------------------
+# Scan external sources for missing entity artwork
+# ---------------------------------------------------------------------------
+
+@celery_app.task(bind=True)
+def scan_sources_task(self, job_id: int, video_ids: list):
+    """
+    Scan external sources (MusicBrainz, Wikipedia, CAA) for missing entity
+    artwork on the given videos.  Creates CachedAsset + MediaAsset records for
+    found artwork, or marks entities as unavailable.
+    """
+    import os as _os
+    from app.models import VideoItem, MediaAsset
+    from app.metadata.models import CachedAsset
+    from app.pipeline_lib.services.artwork_service import validate_file as _vf
+    from app.pipeline_lib.services.artwork_manager import (
+        _safe_name, get_artists_dir, get_albums_dir,
+        process_artist_album_artwork,
+    )
+    from app.scraper.source_validation import parse_multi_artist
+    from app.services.playarr_xml import write_playarr_xml
+
+    _update_job(job_id, status=JobStatus.analyzing, started_at=datetime.now(timezone.utc),
+                celery_task_id=getattr(getattr(self, "request", None), "id", None),
+                current_step="Scanning sources", progress_percent=5)
+
+    db = SessionLocal()
+    try:
+        items = db.query(VideoItem).filter(
+            VideoItem.id.in_(video_ids),
+            VideoItem.review_category.in_(["artwork_incomplete", "missing_artwork"]),
+        ).all()
+
+        if not items:
+            _append_job_log(job_id, "No eligible items found")
+            _update_job(job_id, status=JobStatus.complete, progress_percent=100,
+                        current_step="Done")
+            return
+
+        _append_job_log(job_id, f"Scanning sources for {len(items)} video(s)")
+
+        repaired = 0
+        already_ok = 0
+        dismissed = 0
+
+        for vi_idx, vi in enumerate(items, 1):
+            label = f"{vi.artist} — {vi.title}" if vi.artist and vi.title else f"Video #{vi.id}"
+            _append_job_log(job_id, f"[{vi_idx}/{len(items)}] {label}")
+            pct = int(5 + 90 * vi_idx / len(items))
+            _update_job(job_id, current_step=f"Scanning {vi_idx}/{len(items)}", progress_percent=pct)
+
+            # Build entity checks
+            entity_checks = []
+            if vi.artist_entity_id:
+                entity_checks.append(("artist_thumb", "artist", vi.artist_entity_id, vi.artist))
+            if vi.album_entity_id:
+                entity_checks.append(("album_thumb", "album", vi.album_entity_id, vi.album))
+
+            still_missing = []
+            for asset_type, etype, entity_id, name_hint in entity_checks:
+                has = db.query(MediaAsset.id).filter(
+                    MediaAsset.video_id == vi.id,
+                    MediaAsset.asset_type == asset_type,
+                ).first()
+                if has:
+                    _append_job_log(job_id, f"  {etype} {asset_type} already exists — skipping")
+                    continue
+
+                art_path = None
+
+                # Strategy 1: disk
+                try:
+                    if etype == "artist" and name_hint:
+                        primary, _ = parse_multi_artist(name_hint)
+                        candidate = _os.path.join(get_artists_dir(), _safe_name(primary), "poster.jpg")
+                        if _os.path.isfile(candidate):
+                            art_path = candidate
+                            _append_job_log(job_id, f"  Found {etype} poster on disk")
+                    elif etype == "album" and name_hint and vi.artist:
+                        primary, _ = parse_multi_artist(vi.artist)
+                        candidate = _os.path.join(
+                            get_albums_dir(), _safe_name(primary),
+                            _safe_name(name_hint), "poster.jpg",
+                        )
+                        if _os.path.isfile(candidate):
+                            art_path = candidate
+                            _append_job_log(job_id, f"  Found {etype} poster on disk")
+                except Exception:
+                    pass
+
+                # Strategy 2: CachedAsset
+                if not art_path:
+                    ca = db.query(CachedAsset).filter(
+                        CachedAsset.entity_type == etype,
+                        CachedAsset.entity_id == entity_id,
+                        CachedAsset.kind == "poster",
+                        CachedAsset.status == "valid",
+                    ).first()
+                    if ca and ca.local_cache_path and _os.path.isfile(ca.local_cache_path):
+                        art_path = ca.local_cache_path
+                        _append_job_log(job_id, f"  Found {etype} poster in asset cache")
+
+                # Strategy 3: sibling
+                if not art_path:
+                    sibling = db.query(MediaAsset.file_path).filter(
+                        MediaAsset.asset_type == asset_type,
+                        MediaAsset.status == "valid",
+                        MediaAsset.video_id != vi.id,
+                    ).join(VideoItem, MediaAsset.video_id == VideoItem.id).filter(
+                        (VideoItem.artist_entity_id == entity_id) if etype == "artist"
+                        else (VideoItem.album_entity_id == entity_id),
+                    ).first()
+                    if sibling and sibling[0] and _os.path.isfile(sibling[0]):
+                        art_path = sibling[0]
+                        _append_job_log(job_id, f"  Found {etype} poster from sibling video")
+
+                if art_path:
+                    vr = _vf(art_path)
+                    db.add(MediaAsset(
+                        video_id=vi.id, asset_type=asset_type, file_path=art_path,
+                        provenance="review_repair",
+                        status="valid" if (vr and vr.valid) else "invalid",
+                        width=vr.width if vr and vr.valid else None,
+                        height=vr.height if vr and vr.valid else None,
+                        file_size_bytes=vr.file_size_bytes if vr and vr.valid else None,
+                        file_hash=vr.file_hash if vr and vr.valid else None,
+                        last_validated_at=datetime.now(timezone.utc),
+                    ))
+                else:
+                    still_missing.append((asset_type, etype, entity_id, name_hint))
+
+            # ── Strategy 4: Fetch from external sources
+            if still_missing:
+                fetched_entities: set = set()
+                newly_resolved = []
+                for asset_type, etype, entity_id, name_hint in still_missing:
+                    entity_key = (etype, entity_id)
+                    if entity_key not in fetched_entities:
+                        fetched_entities.add(entity_key)
+
+                        # Skip if already unavailable
+                        unavail = db.query(CachedAsset).filter(
+                            CachedAsset.entity_type == etype,
+                            CachedAsset.entity_id == entity_id,
+                            CachedAsset.kind == "poster",
+                            CachedAsset.status == "unavailable",
+                        ).first()
+                        if unavail:
+                            _append_job_log(job_id, f"  {etype} poster previously marked unavailable — skipping")
+                            continue
+
+                        # Gather entity metadata
+                        try:
+                            artist_name = vi.artist or ""
+                            album_name = vi.album if etype == "album" else None
+                            mb_artist_id = None
+                            mb_album_release_id = None
+                            mb_album_rg_id = None
+                            wiki_artist_url = None
+                            wiki_album_url = None
+                            if vi.artist_entity:
+                                artist_name = vi.artist_entity.canonical_name or artist_name
+                                mb_artist_id = vi.artist_entity.mb_artist_id
+                            if vi.album_entity:
+                                album_name = album_name or vi.album_entity.title
+                                mb_album_release_id = vi.album_entity.mb_release_id
+                                mb_album_rg_id = vi.album_entity.mb_release_group_id
+
+                            # Look up existing Wikipedia Source records for this video
+                            from app.models import Source
+                            wiki_sources = db.query(Source).filter(
+                                Source.video_id == vi.id,
+                                Source.provider == SourceProvider.wikipedia,
+                            ).all()
+                            for ws in wiki_sources:
+                                src_url = ws.canonical_url or ws.original_url
+                                if not src_url:
+                                    continue
+                                if ws.source_type == "artist" and not wiki_artist_url:
+                                    wiki_artist_url = src_url
+                                elif ws.source_type == "album" and not wiki_album_url:
+                                    wiki_album_url = src_url
+
+                            _append_job_log(job_id, f"  Fetching {etype} artwork from external sources for: {artist_name}" +
+                                            (f" / {album_name}" if album_name and etype == "album" else "") +
+                                            (f" (wiki artist URL: {wiki_artist_url})" if wiki_artist_url else "") +
+                                            (f" (wiki album URL: {wiki_album_url})" if wiki_album_url else ""))
+
+                            result = process_artist_album_artwork(
+                                artist=artist_name, album=album_name,
+                                mb_artist_id=mb_artist_id,
+                                mb_album_release_id=mb_album_release_id,
+                                mb_album_release_group_id=mb_album_rg_id,
+                                wiki_artist_url=wiki_artist_url,
+                                wiki_album_url=wiki_album_url,
+                            )
+
+                            for art_key, ca_etype, ca_kind in [
+                                ("artist_poster", "artist", "poster"),
+                                ("album_poster", "album", "poster"),
+                            ]:
+                                path = result.get(art_key)
+                                if path and _os.path.isfile(path):
+                                    eid = vi.artist_entity_id if ca_etype == "artist" else vi.album_entity_id
+                                    if not eid:
+                                        continue
+                                    vr = _vf(path)
+                                    img_url = result.get(f"{ca_etype}_image_url")
+                                    ca = db.query(CachedAsset).filter(
+                                        CachedAsset.entity_type == ca_etype,
+                                        CachedAsset.entity_id == eid,
+                                        CachedAsset.kind == ca_kind,
+                                    ).first()
+                                    if ca:
+                                        ca.local_cache_path = path
+                                        ca.status = "valid"
+                                        ca.source_url = img_url or ca.source_url
+                                        ca.file_hash = (vr.file_hash if vr and vr.valid else None) or ca.file_hash
+                                        ca.width = (vr.width if vr and vr.valid else None) or ca.width
+                                        ca.height = (vr.height if vr and vr.valid else None) or ca.height
+                                        ca.provenance = "source_scan_repair"
+                                        ca.last_validated_at = datetime.now(timezone.utc)
+                                    else:
+                                        ca = CachedAsset(
+                                            entity_type=ca_etype, entity_id=eid, kind=ca_kind,
+                                            local_cache_path=path, source_url=img_url,
+                                            status="valid", provenance="source_scan_repair",
+                                            source_provider="external",
+                                            file_hash=vr.file_hash if vr and vr.valid else None,
+                                            width=vr.width if vr and vr.valid else None,
+                                            height=vr.height if vr and vr.valid else None,
+                                            last_validated_at=datetime.now(timezone.utc),
+                                        )
+                                        db.add(ca)
+                                    db.flush()
+                                    _append_job_log(job_id, f"  ✓ Downloaded {ca_etype} poster from {img_url or 'external source'}")
+                        except Exception as exc:
+                            _append_job_log(job_id, f"  External fetch failed: {exc}")
+
+                    # Re-check disk
+                    art_path = None
+                    try:
+                        if etype == "artist" and name_hint:
+                            primary, _ = parse_multi_artist(name_hint)
+                            candidate = _os.path.join(get_artists_dir(), _safe_name(primary), "poster.jpg")
+                            if _os.path.isfile(candidate):
+                                art_path = candidate
+                        elif etype == "album" and name_hint and vi.artist:
+                            primary, _ = parse_multi_artist(vi.artist)
+                            candidate = _os.path.join(
+                                get_albums_dir(), _safe_name(primary),
+                                _safe_name(name_hint), "poster.jpg",
+                            )
+                            if _os.path.isfile(candidate):
+                                art_path = candidate
+                    except Exception:
+                        pass
+
+                    if not art_path:
+                        ca = db.query(CachedAsset).filter(
+                            CachedAsset.entity_type == etype,
+                            CachedAsset.entity_id == entity_id,
+                            CachedAsset.kind == "poster",
+                            CachedAsset.status == "valid",
+                        ).first()
+                        if ca and ca.local_cache_path and _os.path.isfile(ca.local_cache_path):
+                            art_path = ca.local_cache_path
+
+                    if art_path:
+                        vr = _vf(art_path)
+                        db.add(MediaAsset(
+                            video_id=vi.id, asset_type=asset_type, file_path=art_path,
+                            provenance="source_scan_repair",
+                            status="valid" if (vr and vr.valid) else "invalid",
+                            width=vr.width if vr and vr.valid else None,
+                            height=vr.height if vr and vr.valid else None,
+                            file_size_bytes=vr.file_size_bytes if vr and vr.valid else None,
+                            file_hash=vr.file_hash if vr and vr.valid else None,
+                            last_validated_at=datetime.now(timezone.utc),
+                        ))
+                        newly_resolved.append(asset_type)
+                        _append_job_log(job_id, f"  ✓ {etype} poster linked to video")
+                    else:
+                        # Strategy 5: Mark unavailable
+                        ca = db.query(CachedAsset).filter(
+                            CachedAsset.entity_type == etype,
+                            CachedAsset.entity_id == entity_id,
+                            CachedAsset.kind == "poster",
+                        ).first()
+                        if ca:
+                            ca.status = "unavailable"
+                            ca.provenance = "source_scan_repair"
+                            ca.last_validated_at = datetime.now(timezone.utc)
+                        else:
+                            db.add(CachedAsset(
+                                entity_type=etype, entity_id=entity_id, kind="poster",
+                                local_cache_path="", status="unavailable",
+                                provenance="source_scan_repair", source_provider="none",
+                                last_validated_at=datetime.now(timezone.utc),
+                            ))
+                        db.flush()
+                        _append_job_log(job_id, f"  ✗ No {etype} poster available — marked unavailable")
+
+                still_missing = [(at, et, eid, nh) for at, et, eid, nh in still_missing
+                                 if at not in newly_resolved]
+
+            # Assess result
+            all_slots_ok = len(still_missing) == 0
+            was_false_positive = all_slots_ok and not any(
+                db.query(MediaAsset.id).filter(
+                    MediaAsset.video_id == vi.id,
+                    MediaAsset.asset_type == at,
+                    MediaAsset.provenance.in_(["review_repair", "source_scan_repair"]),
+                ).first()
+                for at, _, _, _ in entity_checks
+            )
+
+            if was_false_positive:
+                already_ok += 1
+                _append_job_log(job_id, f"  → Already OK (false positive)")
+            elif all_slots_ok:
+                repaired += 1
+                _append_job_log(job_id, f"  → Repaired")
+            else:
+                dismissed += 1
+                _append_job_log(job_id, f"  → No artwork available")
+
+            # Clear review flag
+            from app.routers.resolve import _record_review_history
+            _record_review_history(vi, "repaired" if all_slots_ok else "dismissed", db)
+            vi.review_status = "none"
+            vi.review_reason = None
+            vi.review_category = None
+
+        db.commit()
+
+        # Update XML
+        for vi in items:
+            try:
+                write_playarr_xml(vi, db)
+            except Exception:
+                pass
+
+        summary = f"Done — {repaired} repaired, {already_ok} already OK, {dismissed} unavailable"
+        _append_job_log(job_id, summary)
+        _update_job(job_id, status=JobStatus.complete, progress_percent=100,
+                    current_step=summary)
+    except Exception as exc:
+        logger.error(f"scan_sources_task failed: {exc}", exc_info=True)
+        _append_job_log(job_id, f"Failed: {exc}")
+        _update_job(job_id, status=JobStatus.failed, current_step=f"Failed: {exc}")
+    finally:
+        db.close()

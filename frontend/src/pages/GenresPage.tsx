@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Tags, PartyPopper, EyeOff, CheckSquare, Square, X, ListPlus, Trash2, RefreshCw } from "lucide-react";
 import { useGenres, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks/queries";
 import { useUpdateGenreBlacklist } from "@/hooks/queries";
@@ -39,7 +39,10 @@ function groupByLetter(genres: { genre: string; count: number; video_ids: number
 
 export function GenresPage() {
   const [filters, setFilters] = useState<FacetFilterParams>({});
-  const { data, isLoading, isError, refetch } = useGenres(filters);
+  const [searchParams] = useSearchParams();
+  const searchTerm = searchParams.get("search") ?? "";
+  const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
+  const { data, isLoading, isError, refetch } = useGenres(mergedFilters);
   const navigate = useNavigate();
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
@@ -169,7 +172,14 @@ export function GenresPage() {
     );
   }, [selected, genreIdMap, blacklistMutation, toast, exitSelectMode, refetch]);
 
-  const grouped = useMemo(() => (data ? groupByLetter(data, sortDir) : []), [data, sortDir]);
+  // Client-side filter: when searching, only show stacks whose genre name matches
+  const filtered = useMemo(() => {
+    if (!data || !searchTerm) return data ?? [];
+    const term = searchTerm.toLowerCase();
+    return data.filter((g) => g.genre.toLowerCase().includes(term));
+  }, [data, searchTerm]);
+
+  const grouped = useMemo(() => (filtered.length ? groupByLetter(filtered, sortDir) : []), [filtered, sortDir]);
 
   return (
     <div className="p-4 md:p-6">
@@ -185,7 +195,7 @@ export function GenresPage() {
           {sortDir === "asc" ? "A→Z" : "Z→A"}
         </button>
         <button
-          onClick={() => launchParty(filters)}
+          onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
           className="btn-sm text-xs font-semibold px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 text-white hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 transition-all shadow-lg shadow-purple-500/25 flex items-center gap-1.5"
         >
@@ -259,8 +269,8 @@ export function GenresPage() {
         </div>
       ) : isError ? (
         <ErrorState message="Failed to load genres" onRetry={refetch} />
-      ) : !data || data.length === 0 ? (
-        <EmptyState icon={<Tags size={48} />} title="No genres yet" />
+      ) : !filtered || filtered.length === 0 ? (
+        <EmptyState icon={<Tags size={48} />} title={searchTerm ? "No matching genres" : "No genres yet"} />
       ) : (
         grouped.map(({ letter, items }) => (
           <GroupedSection key={letter} heading={letter}>

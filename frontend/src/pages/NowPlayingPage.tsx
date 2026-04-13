@@ -11,6 +11,88 @@ import type { VideoItemDetail } from "@/types";
 type TransitionKind = "fade" | "flip" | "spin";
 type CellState = { url: string; nextUrl: string | null; transition: TransitionKind };
 
+const ArtworkCell = memo(function ArtworkCell({ cell, size, fadeDuration }: { cell: CellState; size: number; fadeDuration: number }) {
+  return (
+    <div
+      className="overflow-hidden relative"
+      style={{
+        width: size,
+        height: size,
+        perspective: size * 2,
+        contain: "layout paint",
+      }}
+    >
+      {cell.transition === "fade" && (
+        <>
+          <img src={cell.url} alt="" decoding="async" loading="lazy" className="absolute inset-0 w-full h-full object-cover" />
+          {cell.nextUrl && (
+            <img
+              src={cell.nextUrl}
+              alt=""
+              decoding="async"
+              loading="lazy"
+              className="absolute inset-0 w-full h-full object-cover"
+              style={{ animation: `artwork-fade-in ${fadeDuration}s ease-in-out forwards` }}
+            />
+          )}
+        </>
+      )}
+      {cell.transition === "flip" && cell.nextUrl && (
+        <div
+          className="absolute inset-0"
+          style={{ animation: `artwork-flip ${fadeDuration}s ease-in-out forwards`, transformStyle: "preserve-3d" }}
+        >
+          <img
+            src={cell.url}
+            alt=""
+            decoding="async"
+            loading="lazy"
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ opacity: 1, animation: `artwork-flip-hide ${fadeDuration}s step-end forwards` }}
+          />
+          <img
+            src={cell.nextUrl}
+            alt=""
+            decoding="async"
+            loading="lazy"
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ opacity: 0, animation: `artwork-flip-show ${fadeDuration}s step-end forwards` }}
+          />
+        </div>
+      )}
+      {cell.transition === "flip" && !cell.nextUrl && (
+        <img src={cell.url} alt="" decoding="async" loading="lazy" className="absolute inset-0 w-full h-full object-cover" />
+      )}
+      {cell.transition === "spin" && cell.nextUrl && (
+        <div
+          className="absolute inset-0"
+          style={{ animation: `artwork-spin ${fadeDuration}s ease-in-out forwards` }}
+        >
+          <img
+            src={cell.url}
+            alt=""
+            decoding="async"
+            loading="lazy"
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ opacity: 1, animation: `artwork-spin-hide ${fadeDuration}s step-end forwards` }}
+          />
+          <img
+            src={cell.nextUrl}
+            alt=""
+            decoding="async"
+            loading="lazy"
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{ opacity: 0, animation: `artwork-spin-show ${fadeDuration}s step-end forwards` }}
+          />
+        </div>
+      )}
+      {cell.transition === "spin" && !cell.nextUrl && (
+        <img src={cell.url} alt="" decoding="async" loading="lazy" className="absolute inset-0 w-full h-full object-cover" />
+      )}
+    </div>
+  );
+});
+
 const ArtworkBackground = memo(function ArtworkBackground() {
   const artworkSize = useArtworkSettings((s) => s.artworkSize);
   const scrollDuration = useArtworkSettings((s) => s.scrollDuration);
@@ -84,16 +166,37 @@ const ArtworkBackground = memo(function ArtworkBackground() {
     }).catch(() => {});
   }, []);
 
-  // Rebuild grid when pool or cell count changes
+  const [gridReady, setGridReady] = useState(false);
+
+  // Rebuild grid when pool or cell count changes; preload visible images before reveal
   useEffect(() => {
     if (artworkPool.length === 0) return;
+    setGridReady(false);
     const initial: CellState[] = [];
     for (let i = 0; i < CELL_COUNT; i++) {
       initial.push({ url: artworkPool[i % artworkPool.length], nextUrl: null, transition: "fade" });
     }
     setGrid(initial);
     offsetRef.current = CELL_COUNT;
-  }, [artworkPool, CELL_COUNT]);
+
+    // Preload the first screenful of unique images before revealing the grid.
+    // We decode a subset (visible rows * cols) so the browser has pixel data
+    // ready before the scroll animation starts — eliminates pop-in jank.
+    const visibleCount = Math.min(CELL_COUNT, cols * Math.ceil((typeof window !== "undefined" ? window.innerHeight : 800) / artworkSize));
+    const uniqueUrls = [...new Set(initial.slice(0, visibleCount).map((c) => c.url))];
+    let loaded = 0;
+    const threshold = Math.ceil(uniqueUrls.length * 0.6);
+    const reveal = () => setGridReady(true);
+    // Fallback timeout in case images are slow
+    const fallback = setTimeout(reveal, 3000);
+    uniqueUrls.forEach((url) => {
+      const img = new Image();
+      img.src = url;
+      const done = () => { if (++loaded >= threshold) { clearTimeout(fallback); reveal(); } };
+      img.decode().then(done, done);
+    });
+    return () => clearTimeout(fallback);
+  }, [artworkPool, CELL_COUNT, cols, artworkSize]);
 
   // Pick next artwork url using anti-repetition penalty
   const pickNextUrl = useCallback(() => {
@@ -250,86 +353,15 @@ const ArtworkBackground = memo(function ArtworkBackground() {
           gap: "4px",
           justifyContent: "center",
           animationDuration: `${scrollDuration}s`,
+          willChange: "transform",
+          opacity: gridReady ? 1 : 0,
+          transition: "opacity 0.6s ease-in",
+          animationPlayState: gridReady ? "running" : "paused",
         }}
       >
-        {/* Render grid twice for seamless loop */}
         {cells.map((cell, i) =>
           cell ? (
-            <div key={i} className="overflow-hidden relative" style={{ width: artworkSize, height: artworkSize, perspective: artworkSize * 2 }}>
-              {/* Fade transition: new image fades in over old */}
-              {cell.transition === "fade" && (
-                <>
-                  <img
-                    src={cell.url}
-                    alt=""
-                    decoding="async"
-                    className="absolute inset-0 w-full h-full object-cover"
-                  />
-                  {cell.nextUrl && (
-                    <img
-                      src={cell.nextUrl}
-                      alt=""
-                      decoding="async"
-                      className="absolute inset-0 w-full h-full object-cover"
-                      style={{ animation: `artwork-fade-in ${fadeDuration}s ease-in-out forwards` }}
-                    />
-                  )}
-                </>
-              )}
-              {/* Flip transition: card flips on Y axis, showing new art on the back */}
-              {cell.transition === "flip" && cell.nextUrl && (
-                <div
-                  className="absolute inset-0"
-                  style={{
-                    animation: `artwork-flip ${fadeDuration}s ease-in-out forwards`,
-                    transformStyle: "preserve-3d",
-                  }}
-                >
-                  <img
-                    src={cell.url}
-                    alt=""
-                    decoding="async"
-                    className="absolute inset-0 w-full h-full object-cover"
-                    style={{ opacity: 1, animation: `artwork-flip-hide ${fadeDuration}s step-end forwards` }}
-                  />
-                  <img
-                    src={cell.nextUrl}
-                    alt=""
-                    decoding="async"
-                    className="absolute inset-0 w-full h-full object-cover"
-                    style={{ opacity: 0, animation: `artwork-flip-show ${fadeDuration}s step-end forwards` }}
-                  />
-                </div>
-              )}
-              {cell.transition === "flip" && !cell.nextUrl && (
-                <img src={cell.url} alt="" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
-              )}
-              {/* Spin transition: tile spins 360°, art swaps at midpoint */}
-              {cell.transition === "spin" && cell.nextUrl && (
-                <div
-                  className="absolute inset-0"
-                  style={{ animation: `artwork-spin ${fadeDuration}s ease-in-out forwards` }}
-                >
-                  <img
-                    src={cell.url}
-                    alt=""
-                    decoding="async"
-                    className="absolute inset-0 w-full h-full object-cover"
-                    style={{ opacity: 1, animation: `artwork-spin-hide ${fadeDuration}s step-end forwards` }}
-                  />
-                  <img
-                    src={cell.nextUrl}
-                    alt=""
-                    decoding="async"
-                    className="absolute inset-0 w-full h-full object-cover"
-                    style={{ opacity: 0, animation: `artwork-spin-show ${fadeDuration}s step-end forwards` }}
-                  />
-                </div>
-              )}
-              {cell.transition === "spin" && !cell.nextUrl && (
-                <img src={cell.url} alt="" decoding="async" className="absolute inset-0 w-full h-full object-cover" />
-              )}
-            </div>
+            <ArtworkCell key={i} cell={cell} size={artworkSize} fadeDuration={fadeDuration} />
           ) : null,
         )}
       </div>
@@ -435,6 +467,11 @@ export function NowPlayingPage() {
     };
   }, [track?.videoId, overlayDuration]);
 
+  // No manual video src cleanup needed — key={track.videoId} causes React
+  // to destroy the old <video> DOM node and create a fresh one on every
+  // track change. The browser closes HTTP connections when elements are
+  // destroyed, and the server's generator finally-block kills FFmpeg.
+
   // Sync play/pause with store
   useEffect(() => {
     const el = videoRef.current;
@@ -529,7 +566,7 @@ export function NowPlayingPage() {
           <video
             ref={videoRef}
             key={track.videoId}
-            src={playbackApi.streamUrl(track.videoId)}
+            src={playbackApi.videoOnlyStreamUrl(track.videoId)}
             className="h-full w-full object-contain"
             autoPlay={isPlaying}
             controls={false}
@@ -589,7 +626,7 @@ export function NowPlayingPage() {
               <video
                 ref={videoRef}
                 key={track.videoId}
-                src={playbackApi.streamUrl(track.videoId)}
+                src={playbackApi.videoOnlyStreamUrl(track.videoId)}
                 className="w-full h-full object-contain"
                 autoPlay={isPlaying}
                 controls={false}

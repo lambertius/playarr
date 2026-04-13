@@ -29,6 +29,8 @@ import type {
   LogFileEntry, LogReadResponse,
   ArchiveItem, QualityBucket,
   ArtistConflict, MbidStats,
+  ArtworkStats, ArtworkEntitiesResponse, ArtworkRepairResult,
+  EntitySourcesResponse,
 } from "@/types";
 
 const api = axios.create({ baseURL: "/api" });
@@ -204,8 +206,8 @@ export const jobsApi = {
   normalize: (data: NormalizeRequest) =>
     api.post<BatchActionResponse>("/jobs/normalize", data).then(r => r.data),
 
-  libraryScan: (importNew = true) =>
-    api.post<JobSummary>("/jobs/library-scan", { import_new: importNew }).then(r => r.data),
+  libraryScan: (importNew = true, updateExisting = false) =>
+    api.post<JobSummary>("/jobs/library-scan", { import_new: importNew, update_existing: updateExisting }).then(r => r.data),
 
   libraryDuplicateScan: (rescanAll = false) =>
     api.post<JobSummary>("/jobs/library-duplicate-scan", null, { params: { rescan_all: rescanAll } }).then(r => r.data),
@@ -254,6 +256,7 @@ export const jobsApi = {
 // ─── Playback URLs ────────────────────────────────────────
 export const playbackApi = {
   streamUrl: (videoId: number) => `/api/playback/stream/${videoId}`,
+  videoOnlyStreamUrl: (videoId: number) => `/api/playback/stream-video-only/${videoId}`,
   previewUrl: (videoId: number) => `/api/playback/preview/${videoId}`,
   posterUrl: (videoId: number) => `/api/playback/poster/${videoId}`,
   artworkUrl: (videoId: number, assetType: string) => `/api/playback/artwork/${videoId}/${assetType}`,
@@ -274,6 +277,9 @@ export const playbackApi = {
 
   deleteArtwork: (videoId: number, assetType: string) =>
     api.delete(`/playback/artwork/${videoId}/${assetType}`).then(r => r.data),
+
+  updateArtworkCrop: (videoId: number, assetType: string, cropPosition: string | null) =>
+    api.patch(`/playback/artwork/${videoId}/${assetType}/crop`, { crop_position: cropPosition }).then(r => r.data),
 
   artworkIds: () =>
     api.get<{ videoId: number; type: string }[]>("/playback/artwork-ids").then(r => r.data),
@@ -398,6 +404,8 @@ export const reviewApi = {
     api.post<{ status: string; flagged: number }>(`/review/scan-renames?rescan_all=${rescanAll}`).then(r => r.data),
   scanEnrichment: (rescanAll: boolean = false) =>
     api.post<{ status: string; flagged: number }>(`/review/scan-enrichment?rescan_all=${rescanAll}`).then(r => r.data),
+  scanArtwork: (rescanAll: boolean = false) =>
+    api.post<{ status: string; flagged: number }>(`/review/scan-artwork?rescan_all=${rescanAll}`).then(r => r.data),
   applyRename: (videoId: number) =>
     api.post<{ status: string; video_id: number }>(`/review/${videoId}/apply-rename`).then(r => r.data),
   batchApplyRename: (videoIds: number[]) =>
@@ -406,6 +414,8 @@ export const reviewApi = {
     api.post<{ deleted: number[]; errors: number[]; count: number }>("/review/batch/delete", videoIds).then(r => r.data),
   batchScrape: (videoIds: number[], options?: { scrape_wikipedia?: boolean; scrape_musicbrainz?: boolean; ai_auto?: boolean; ai_only?: boolean; scene_analysis?: boolean; normalize?: boolean }) =>
     api.post<{ job_id: number; message: string }>("/review/batch/scrape", { video_ids: videoIds, ...options }).then(r => r.data),
+  batchRepairArtwork: (videoIds: number[]) =>
+    api.post<{ job_id: number; status: string; total: number }>("/review/batch/repair-artwork", videoIds).then(r => r.data),
 };
 
 // ─── Search (MusicBrainz Manual) ─────────────────────────
@@ -554,9 +564,14 @@ export const videoEditorApi = {
       params: { video_id: videoId },
     }).then(r => r.data),
 
-  scanLetterbox: (limit: number = 200, includeExcluded: boolean = false) =>
+  scanLetterbox: (opts: { limit?: number; includeExcluded?: boolean; skipCropped?: boolean; skipTrimmed?: boolean } = {}) =>
     api.post<{ status: string; job_id?: number; results?: LetterboxScanItem[]; total_scanned?: number }>(
-      "/video-editor/scan-letterbox", { limit, include_excluded: includeExcluded },
+      "/video-editor/scan-letterbox", {
+        limit: opts.limit ?? 200,
+        include_excluded: opts.includeExcluded ?? false,
+        skip_cropped: opts.skipCropped ?? false,
+        skip_trimmed: opts.skipTrimmed ?? false,
+      },
     ).then(r => r.data),
 
   getScanResults: (jobId: number) =>
@@ -807,4 +822,42 @@ export const metadataManagerApi = {
     api.post<{ updated: number; master_genre_id: number; master_name: string }>(
       "/metadata/genre-create-tile", { alias_genre_ids, master_genre_name },
     ).then(r => r.data),
+
+  // ─── Artwork Manager ───────────────────────────────────
+
+  artworkStats: () =>
+    api.get<ArtworkStats>("/metadata/artwork-stats").then(r => r.data),
+
+  artworkEntities: (entity_type: string, status?: string, page = 1, per_page = 50, search?: string, sort?: string) =>
+    api.get<ArtworkEntitiesResponse>("/metadata/artwork-entities", {
+      params: { entity_type, status: status || undefined, page, per_page, search: search || undefined, sort: sort || undefined },
+    }).then(r => r.data),
+
+  artworkBulkRepair: (entity_type: string, entity_ids: number[]) =>
+    api.post<ArtworkRepairResult>(
+      "/metadata/artwork-bulk-repair", { entity_type, entity_ids },
+    ).then(r => r.data),
+
+  entityArtworkUrl: (entity_type: string, entity_id: number) =>
+    `/api/metadata/entity-artwork/${entity_type}/${entity_id}`,
+
+  uploadEntityArtwork: (entity_type: string, entity_id: number, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return api.put(`/metadata/entity-artwork/${entity_type}/${entity_id}`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }).then(r => r.data);
+  },
+
+  deleteEntityArtwork: (entity_type: string, entity_id: number) =>
+    api.delete(`/metadata/entity-artwork/${entity_type}/${entity_id}`).then(r => r.data),
+
+  updateEntityCrop: (entity_type: string, entity_id: number, cropPosition: string | null) =>
+    api.patch(`/metadata/entity-artwork/${entity_type}/${entity_id}/crop`, { crop_position: cropPosition }).then(r => r.data),
+
+  getEntitySources: (entity_type: string, entity_id: number) =>
+    api.get<EntitySourcesResponse>(`/metadata/entity-sources/${entity_type}/${entity_id}`).then(r => r.data),
+
+  updateEntitySources: (data: { entity_type: string; entity_id: number; mb_id?: string | null; wiki_url?: string | null }) =>
+    api.put("/metadata/entity-sources", data).then(r => r.data),
 };

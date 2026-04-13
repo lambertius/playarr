@@ -78,6 +78,8 @@ export interface MediaAsset {
   source_url?: string | null;
   provenance?: string | null;
   status?: string | null; // valid|invalid|missing|pending
+  file_hash?: string | null;
+  crop_position?: string | null; // CSS object-position e.g. "50% 30%"
 }
 
 export interface VideoItemDetail {
@@ -299,11 +301,12 @@ export interface OrphanDetectResponse {
 export interface OrphanCleanRequest {
   folder_paths: string[];
   mode: "delete" | "archive";
+  force_permanent?: boolean;
 }
 
 export interface OrphanCleanResult {
   folder: string;
-  status: "deleted" | "archived" | "skipped" | "error";
+  status: "deleted" | "archived" | "skipped" | "error" | "network_confirm_required";
   reason?: string;
   destination?: string;
 }
@@ -422,6 +425,7 @@ export interface MbidStats {
   with_release_group_id: number;
   with_track_id: number;
   with_any_mbid: number;
+  with_complete: number;
   artist_conflicts: number;
   with_playarr_video_id: number;
   with_playarr_track_id: number;
@@ -452,6 +456,87 @@ export interface GenreSuggestion {
   master_id: number;
   aliases: { id: number; name: string; video_count: number }[];
 }
+
+// ─── Artwork Manager types ──────────────────────────────
+
+export interface ArtworkVideoStats {
+  total: number;
+  with_poster: number;
+  poster_from_source: number;
+  poster_from_thumb: number;
+  with_thumbnail: number;
+  with_artist_thumb: number;
+  with_album_thumb: number;
+}
+
+export interface ArtworkEntityStats {
+  total: number;
+  with_art: number;
+  with_source: number;
+  missing_with_source: number;
+  missing_no_source: number;
+}
+
+export interface ArtworkStats {
+  videos: ArtworkVideoStats;
+  artists: ArtworkEntityStats;
+  albums: ArtworkEntityStats;
+}
+
+export interface ArtworkChildVideo {
+  id: number;
+  title: string;
+  artist: string | null;
+}
+
+export interface ArtworkEntityRow {
+  id: number;
+  name: string;
+  entity_type: "artist" | "album" | "poster";
+  has_art: boolean;
+  art_path: string | null;
+  has_source: boolean;
+  source_providers: string[];
+  video_count: number;
+  category: "filled" | "missing" | "unavailable";
+  provenance: string | null;
+  children: ArtworkChildVideo[];
+  created_at: string | null;
+  mb_id: string | null;
+  parent_artist_name: string | null;
+  crop_position?: string | null;
+}
+
+export interface ArtworkEntitiesResponse {
+  items: ArtworkEntityRow[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
+export interface ArtworkRepairResult {
+  status: string;
+  repaired: number;
+  already_ok: number;
+  still_missing: number;
+  total: number;
+}
+
+export interface EntitySourceRow {
+  id: number | null;
+  provider: string;
+  source_type: string;
+  url: string;
+  provenance: string | null;
+}
+
+export interface EntitySourcesResponse {
+  entity_type: string;
+  entity_id: number;
+  mb_id: string | null;
+  sources: EntitySourceRow[];
+}
+
 export interface AlbumBucket {
   album: string | null;
   album_entity_id: number | null;
@@ -475,6 +560,7 @@ export interface FacetFilterParams {
   video_rating?: number;
   genre?: string;
   quality?: string;
+  search?: string;
 }
 
 export interface PartyModeExclusions {
@@ -577,6 +663,7 @@ export interface BatchRescanRequest {
   normalize?: boolean;
   find_source_video?: boolean;
   from_disk?: boolean;
+  scene_analysis?: boolean;
 }
 
 export interface JobsParams {

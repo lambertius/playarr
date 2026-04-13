@@ -1249,6 +1249,20 @@ Building URLs from IDs and adding them as valid resources without querying the A
 
 ---
 
+## Track: Run-D.M.C. — It's Tricky
+
+### FAILED: Identity change detection not normalising Unicode hyphens (Attempt 1)
+- **What was tried:** The identity change detection in `resolve_metadata_unified()` compared pre-review and post-review artist sets using `{name.lower()}`. AI Source Resolution returned `Run–D.M.C.` (U+2013 EN DASH between "Run" and "D"), while AI Final Review normalised to `Run-D.M.C.` (U+002D ASCII HYPHEN-MINUS). The `parse_multi_artist` sets were `{"run–d.m.c."}` vs `{"run-d.m.c."}` — different due to the Unicode en-dash.
+- **Why it failed:** The set comparison treated this as a true identity change (different artist), triggering the full invalidation cascade: all 6 MusicBrainz IDs cleared, IMDB URL cleared, Wikipedia source URL cleared. These were all correctly resolved for Run-D.M.C. and should not have been cleared. After clearing, the re-resolution paths either partially recovered (Wikipedia re-search) or lost data entirely (MB IDs gone). The existing Unicode hyphen normalisation (`_UNICODE_HYPHENS`) was applied in search functions (`search_wikipedia`, `search_wikipedia_artist`, etc.) but NOT in the identity change comparison.
+- **Cascading effects:** MB IDs gone → no `musicbrainz` source record created. Source URL cleared → Wikipedia single source lost. IMDB cleared → IMDB source lost. In the rescan/scan-metadata path, `_source_urls["wikipedia_artist"]` was resolved correctly inside `resolve_metadata_unified` but was never consumed by the source persistence code in `tasks.py` (which independently re-searches). If that independent re-search also failed, the `wikipedia_artist` source was lost entirely.
+- **Lesson:** Unicode hyphen normalisation must be applied consistently in ALL artist name comparison contexts, not just search inputs. The identity change detection compares two artist strings to decide whether to invalidate ALL downstream data — a false positive here is catastrophic. Any comparison that triggers data invalidation must use the same normalisation as search functions.
+- **Fix applied:** Added `_uhyp = re.compile(r'[\u2010\u2011\u2013\u2014\u2212]')` normalisation in the identity change set comparison. Both `_pre_set` and `_post_set` elements are now normalised via `_uhyp.sub('-', s.lower())` before comparison. Applied to both `app/scraper/unified_metadata.py` and `app/services/unified_metadata.py`.
+
+### ANTI-PATTERN: Inconsistent Unicode normalisation across comparison contexts
+When Unicode normalisation is added to search functions but not to identity comparison functions, the search functions correctly find results (normalised input → match), but the identity gate incorrectly treats the same normalisation as a change (un-normalised comparison → mismatch → data cleared). All code paths that compare artist names must share the same normalisation stack.
+
+---
+
 ## Track: Paramore — Decode
 
 ### FAILED: Parsed title preference override not stripping artist-name prefix (Attempt 1)

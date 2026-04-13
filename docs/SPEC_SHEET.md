@@ -377,6 +377,7 @@
 | GET | `/artwork/{video_id}` | Artist/album artwork (in-memory cache, 120s TTL) |
 | GET | `/thumb/{video_id}` | Video thumbnail |
 | GET | `/artwork-ids` | List of video IDs that have real artwork |
+| GET | `/download-audio/{video_id}` | Extract audio as CBR MP3 with ID3 tags (artist, title, album, year, genre, artwork, POPM rating) |
 | POST | `/history` | Record playback history entry |
 | POST | `/kill-streams` | Kill all active FFmpeg streaming processes (called on track change) |
 

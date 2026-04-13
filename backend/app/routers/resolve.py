@@ -51,7 +51,7 @@ from app.models import VideoItem, ProcessingJob, JobStatus
 logger = logging.getLogger(__name__)
 
 
-def _record_review_history(vi: VideoItem, action: str) -> None:
+def _record_review_history(vi: VideoItem, action: str, db: Session = None) -> None:
     """Append a review history entry to the video item."""
     entry = {
         "action": action,
@@ -59,6 +59,13 @@ def _record_review_history(vi: VideoItem, action: str) -> None:
         "reason": vi.review_reason,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    # Silently attach user ID when a DB session is available
+    if db is not None:
+        try:
+            from app.user_identity import get_instance_user_id
+            entry["user_id"] = get_instance_user_id(db)
+        except Exception:
+            pass
     history = vi.review_history or []
     history.append(entry)
     vi.review_history = history
@@ -350,6 +357,7 @@ def batch_resolve(body: BatchResolveRequest, db: Session = Depends(_get_db)):
         status=JobStatus.queued,
         display_name=f"Batch resolve ({len(video_ids)} videos)",
         action_label="Batch Resolve",
+        input_params={"video_ids": video_ids, "force": body.force},
     )
     db.add(job)
     db.commit()
@@ -523,7 +531,12 @@ def _build_review_item(vi: VideoItem, db: Session) -> ReviewItemOut:
     # Duplicate comparison: extract existing video id from review_reason
     dup_summary = None
     if cat == "duplicate" and vi.review_reason:
+        # Handle both formats:
+        #   "Potential duplicate of video ID(s): 123, 456"
+        #   "Possible duplicate of 'Artist - Title' (id=123, existing: live)"
         id_match = re.search(r'ID\(s\):\s*([\d,\s]+)', vi.review_reason)
+        if not id_match:
+            id_match = re.search(r'\(id=(\d+)', vi.review_reason)
         if id_match:
             existing_id = int(id_match.group(1).split(',')[0].strip())
             # Skip self-reference: hard-duplicate flags are placed on the
@@ -622,7 +635,7 @@ def list_review_queue(
     q: Optional[str] = Query(None, description="Search query"),
     sort: str = Query("updated_desc", description="Sort: updated_desc|title_asc|status_asc"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
+    page_size: int = Query(25, ge=0, le=10000),
     db: Session = Depends(_get_db),
 ):
     """Return a paginated list of videos that need review.
@@ -694,9 +707,12 @@ def list_review_queue(
     else:  # updated_desc (default)
         base_q = base_q.order_by(VideoItem.updated_at.desc())
 
-    # Pagination
-    offset = (page - 1) * page_size
-    video_items = base_q.offset(offset).limit(page_size).all()
+    # Pagination (page_size=0 means "all")
+    if page_size > 0:
+        offset = (page - 1) * page_size
+        video_items = base_q.offset(offset).limit(page_size).all()
+    else:
+        video_items = base_q.all()
 
     items = [_build_review_item(vi, db) for vi in video_items]
 
@@ -719,7 +735,7 @@ def batch_approve(
         # For duplicates: persist dismissed_duplicate_ids so pairs aren't re-flagged
         if vi.review_category == "duplicate" and vi.review_reason:
             _persist_duplicate_dismissal(vi, db)
-        _record_review_history(vi, "approved")
+        _record_review_history(vi, "approved", db)
         vi.review_status = "reviewed"
         vi.review_reason = None
         vi.review_category = None
@@ -748,7 +764,7 @@ def batch_dismiss(
         # For renames: persist rename_dismissed so the item isn't re-flagged
         if vi.review_category == "rename":
             vi.rename_dismissed = True
-        _record_review_history(vi, "dismissed")
+        _record_review_history(vi, "dismissed", db)
         vi.review_status = "none"
         vi.review_reason = None
         vi.review_category = None
@@ -761,6 +777,74 @@ def batch_dismiss(
     except Exception:
         pass
     return {"status": "dismissed", "count": len(items)}
+
+
+@review_router.post("/batch/repair-artwork")
+def batch_repair_artwork(
+    video_ids: List[int],
+    db: Session = Depends(_get_db),
+):
+    """Queue external source scan for missing entity artwork.
+
+    Creates a processing job per video and dispatches scan_sources_task
+    so progress and results are visible in the queue.
+    """
+    from app.models import ProcessingJob, JobStatus
+    from app.tasks import scan_sources_task, complete_batch_job_task
+    from app.worker import dispatch_task
+
+    items = db.query(VideoItem).filter(
+        VideoItem.id.in_(video_ids),
+        VideoItem.review_category.in_(["artwork_incomplete", "missing_artwork"]),
+    ).all()
+    if not items:
+        raise HTTPException(404, "No eligible items found")
+
+    ids = [v.id for v in items]
+    display_names = {v.id: f"{v.artist} \u2013 {v.title}" for v in items if v.artist and v.title}
+
+    if len(ids) == 1:
+        # Single item — one job, no batch wrapper
+        vid = ids[0]
+        dn = display_names.get(vid) or f"Video #{vid}"
+        job = ProcessingJob(
+            job_type="scan_sources", status=JobStatus.queued,
+            video_id=vid,
+            display_name=f"{dn} \u203a Scan Sources",
+            action_label="Scan Sources",
+        )
+        db.add(job)
+        db.commit()
+        dispatch_task(scan_sources_task, job_id=job.id, video_ids=[vid])
+        return {"job_id": job.id, "status": "queued", "total": 1}
+
+    # Multiple items — batch parent + one child task
+    parent = ProcessingJob(
+        job_type="batch_scan_sources", status=JobStatus.queued,
+        display_name=f"Scan Sources ({len(ids)} videos)",
+        action_label="Batch Scan Sources",
+        input_params={"video_ids": ids, "count": len(ids)},
+    )
+    db.add(parent)
+    db.flush()
+
+    child = ProcessingJob(
+        job_type="scan_sources", status=JobStatus.queued,
+        display_name=f"Scan Sources ({len(ids)} videos)",
+        action_label="Scan Sources",
+    )
+    db.add(child)
+    db.flush()
+
+    parent.status = JobStatus.analyzing
+    parent.started_at = datetime.now(timezone.utc)
+    parent.current_step = f"Scanning {len(ids)} videos"
+    parent.input_params = {**(parent.input_params or {}), "sub_job_ids": [child.id]}
+    db.commit()
+
+    dispatch_task(scan_sources_task, job_id=child.id, video_ids=ids)
+    dispatch_task(complete_batch_job_task, parent_job_id=parent.id, sub_job_ids=[child.id])
+    return {"job_id": parent.id, "status": "queued", "total": len(ids)}
 
 
 @review_router.post("/batch/apply-rename")
@@ -778,7 +862,7 @@ def batch_apply_rename(
             rename_to_expected(vid, db)
             vi = db.query(VideoItem).filter(VideoItem.id == vid).first()
             if vi:
-                _record_review_history(vi, "approved")
+                _record_review_history(vi, "approved", db)
                 vi.review_status = "reviewed"
                 vi.review_reason = None
                 vi.review_category = None
@@ -881,6 +965,8 @@ def scan_enrichment(
     db: Session = Depends(_get_db),
 ):
     """Scan library for videos with incomplete AI enrichment and flag them for review."""
+    from app.models import clear_stale_enrichment_review
+
     query = db.query(VideoItem).filter(VideoItem.file_path.isnot(None))
     if not rescan_all:
         # Only flag items that haven't been explicitly reviewed/approved.
@@ -907,8 +993,183 @@ def scan_enrichment(
         v.review_reason = f"Missing {', '.join(missing)}"
         flagged += 1
 
+    # Re-evaluate existing enrichment review flags that may now be stale
+    stale_cleared = 0
+    stale_items = db.query(VideoItem).filter(
+        VideoItem.review_status == "needs_human_review",
+        VideoItem.review_category.in_(("ai_partial", "ai_pending", "scanned", "import_error", "missing_artwork", "artwork_incomplete")),
+    ).all()
+    for v in stale_items:
+        if clear_stale_enrichment_review(v, db=db):
+            stale_cleared += 1
+
     db.commit()
-    return {"status": "scanned", "flagged": flagged}
+    return {"status": "scanned", "flagged": flagged, "stale_cleared": stale_cleared}
+
+
+@review_router.post("/scan-artwork")
+def scan_artwork(
+    rescan_all: bool = Query(False, description="Re-scan ALL videos including previously dismissed items"),
+    db: Session = Depends(_get_db),
+):
+    """Scan library for videos with missing artwork and flag them for review.
+
+    Checks four artwork slots: poster, thumbnail, artist_thumb, album_thumb.
+    Uses source-aware false-positive prevention: entity art is only flagged
+    as missing when the entity exists AND has a source that could provide art
+    (MusicBrainz ID, Wikipedia source, etc.).
+    """
+    from sqlalchemy import or_
+    from app.models import MediaAsset, Source, SourceProvider
+    from app.ai.models import AIThumbnail
+    from app.metadata.models import ArtistEntity, AlbumEntity, CachedAsset
+
+    query = db.query(VideoItem).filter(VideoItem.file_path.isnot(None))
+    if not rescan_all:
+        query = query.filter(VideoItem.review_status == "none")
+    else:
+        query = query.filter(
+            or_(
+                VideoItem.review_status == "none",
+                VideoItem.review_category.is_(None),
+                VideoItem.review_category == "missing_artwork",
+            )
+        )
+
+    # Pre-compute which artist/album entities have art sources
+    # Artist has source if: mb_artist_id set, or Source with provider=wikipedia/musicbrainz + source_type=artist
+    artist_ids_with_source: set[int] = set()
+    for row in db.query(ArtistEntity.id).filter(ArtistEntity.mb_artist_id.isnot(None)).all():
+        artist_ids_with_source.add(row[0])
+    for row in (
+        db.query(VideoItem.artist_entity_id)
+        .join(Source, Source.video_id == VideoItem.id)
+        .filter(
+            VideoItem.artist_entity_id.isnot(None),
+            Source.source_type == "artist",
+            Source.provider.in_([SourceProvider.wikipedia, SourceProvider.musicbrainz]),
+        )
+        .distinct()
+        .all()
+    ):
+        if row[0]:
+            artist_ids_with_source.add(row[0])
+
+    album_ids_with_source: set[int] = set()
+    for row in db.query(AlbumEntity.id).filter(
+        or_(AlbumEntity.mb_release_id.isnot(None), AlbumEntity.mb_release_group_id.isnot(None))
+    ).all():
+        album_ids_with_source.add(row[0])
+    for row in (
+        db.query(VideoItem.album_entity_id)
+        .join(Source, Source.video_id == VideoItem.id)
+        .filter(
+            VideoItem.album_entity_id.isnot(None),
+            Source.source_type.in_(["album", "single"]),
+            Source.provider.in_([SourceProvider.wikipedia, SourceProvider.musicbrainz]),
+        )
+        .distinct()
+        .all()
+    ):
+        if row[0]:
+            album_ids_with_source.add(row[0])
+
+    # Exclude entities already marked as artwork-unavailable
+    for row in db.query(CachedAsset.entity_id).filter(
+        CachedAsset.entity_type == "artist",
+        CachedAsset.kind == "poster",
+        CachedAsset.status == "unavailable",
+    ).all():
+        artist_ids_with_source.discard(row[0])
+    for row in db.query(CachedAsset.entity_id).filter(
+        CachedAsset.entity_type == "album",
+        CachedAsset.kind == "poster",
+        CachedAsset.status == "unavailable",
+    ).all():
+        album_ids_with_source.discard(row[0])
+
+    videos = query.all()
+    flagged = 0
+    for v in videos:
+        has_poster = db.query(MediaAsset.id).filter(
+            MediaAsset.video_id == v.id,
+            MediaAsset.asset_type == "poster",
+            MediaAsset.status == "valid",
+        ).first() is not None
+        has_thumb = db.query(AIThumbnail.id).filter(
+            AIThumbnail.video_id == v.id,
+            AIThumbnail.is_selected == True,  # noqa: E712
+        ).first() is not None
+
+        # Artist thumb: only check if entity exists AND has a known art source
+        has_artist_thumb = True  # default: no flag
+        if v.artist_entity_id and v.artist_entity_id in artist_ids_with_source:
+            has_artist_thumb = db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == v.id,
+                MediaAsset.asset_type == "artist_thumb",
+                MediaAsset.status == "valid",
+            ).first() is not None
+
+        # Album thumb: only check if entity exists AND has a known art source
+        has_album_thumb = True  # default: no flag
+        if v.album_entity_id and v.album_entity_id in album_ids_with_source:
+            has_album_thumb = db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == v.id,
+                MediaAsset.asset_type == "album_thumb",
+                MediaAsset.status == "valid",
+            ).first() is not None
+
+        if has_poster and has_thumb and has_artist_thumb and has_album_thumb:
+            continue
+
+        missing = []
+        if not has_poster:
+            missing.append("poster")
+        if not has_thumb:
+            missing.append("thumbnail")
+        if not has_artist_thumb:
+            missing.append("artist_thumb")
+        if not has_album_thumb:
+            missing.append("album_thumb")
+        v.review_status = "needs_human_review"
+        v.review_category = "missing_artwork"
+        v.review_reason = f"Missing video artwork: {', '.join(missing)}"
+        flagged += 1
+
+    # Clear stale missing_artwork flags where artwork now exists
+    stale_cleared = 0
+    stale_items = db.query(VideoItem).filter(
+        VideoItem.review_status == "needs_human_review",
+        VideoItem.review_category == "missing_artwork",
+    ).all()
+    for v in stale_items:
+        rr = v.review_reason or ""
+        all_resolved = True
+        for slot, check_fn in [
+            ("poster", lambda: db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == v.id, MediaAsset.asset_type == "poster",
+                MediaAsset.status == "valid").first() is not None),
+            ("thumbnail", lambda: db.query(AIThumbnail.id).filter(
+                AIThumbnail.video_id == v.id,
+                AIThumbnail.is_selected == True).first() is not None),  # noqa: E712
+            ("artist_thumb", lambda: db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == v.id, MediaAsset.asset_type == "artist_thumb",
+                MediaAsset.status == "valid").first() is not None),
+            ("album_thumb", lambda: db.query(MediaAsset.id).filter(
+                MediaAsset.video_id == v.id, MediaAsset.asset_type == "album_thumb",
+                MediaAsset.status == "valid").first() is not None),
+        ]:
+            if slot in rr and not check_fn():
+                all_resolved = False
+                break
+        if all_resolved:
+            v.review_status = "none"
+            v.review_category = None
+            v.review_reason = None
+            stale_cleared += 1
+
+    db.commit()
+    return {"status": "scanned", "flagged": flagged, "stale_cleared": stale_cleared}
 
 
 @review_router.post("/scan-renames")
@@ -991,7 +1252,7 @@ def approve_review_item(
     if vi.review_category == "duplicate" and vi.review_reason:
         _persist_duplicate_dismissal(vi, db)
 
-    _record_review_history(vi, "approved")
+    _record_review_history(vi, "approved", db)
     vi.review_status = "reviewed"
     vi.review_reason = None
     vi.review_category = None
@@ -1025,7 +1286,7 @@ def dismiss_review_item(
     if vi.review_category == "rename":
         vi.rename_dismissed = True
 
-    _record_review_history(vi, "dismissed")
+    _record_review_history(vi, "dismissed", db)
     vi.review_status = "none"
     vi.review_reason = None
     vi.review_category = None
@@ -1057,8 +1318,19 @@ def set_review_version_type(
         raise HTTPException(404, "Video not found")
     vi.version_type = version_type
     if approve:
+        _record_review_history(vi, "approved", db)
         vi.review_status = "reviewed"
+        vi.review_reason = None
+        vi.review_category = None
     db.commit()
+
+    # Persist to XML sidecar so rescans don't revert the approval
+    try:
+        from app.services.playarr_xml import write_playarr_xml
+        write_playarr_xml(vi, db)
+    except Exception:
+        pass
+
     return {"status": "updated", "video_id": video_id, "version_type": version_type}
 
 

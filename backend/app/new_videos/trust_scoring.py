@@ -41,6 +41,10 @@ _NEGATIVE_TITLE_PATTERNS = [
     (re.compile(r"\bcompilation\b", re.I), "compilation"),
     (re.compile(r"\bmix\s+20\d{2}\b", re.I), "mix"),
     (re.compile(r"\btop\s+\d+\b", re.I), "countdown_list"),
+    (re.compile(r"\b\d+\s+hours?\s+of\b", re.I), "multi_hour_compilation"),
+    (re.compile(r"\bfull\s+album\b", re.I), "full_album"),
+    (re.compile(r"\bnonstop\b", re.I), "nonstop_mix"),
+    (re.compile(r"\bmegamix\b", re.I), "megamix"),
 ]
 
 _VEVO_PATTERN = re.compile(r"vevo", re.I)
@@ -136,11 +140,20 @@ def score_trust(
             break
 
     # ── Negative title signals ────────────────────────────────────────────────
+    _HARD_BLOCK_LABELS = {"multi_hour_compilation", "full_album", "nonstop_mix", "megamix"}
     for pat, label in _NEGATIVE_TITLE_PATTERNS:
         if pat.search(title_str):
-            penalty = 0.20 if label in ("reaction", "parody", "fan_made", "bootleg", "unofficial") else 0.10
-            result.score = max(result.score - penalty, 0.0)
-            result.penalties.append(f"Title indicates {label} (-{penalty:.2f})")
+            if label in _HARD_BLOCK_LABELS:
+                result.score = 0.0
+                result.penalties.append(f"Blocked: title indicates {label}")
+            elif label in ("reaction", "parody", "fan_made", "bootleg", "unofficial", "compilation"):
+                penalty = 0.20
+                result.score = max(result.score - penalty, 0.0)
+                result.penalties.append(f"Title indicates {label} (-{penalty:.2f})")
+            else:
+                penalty = 0.10
+                result.score = max(result.score - penalty, 0.0)
+                result.penalties.append(f"Title indicates {label} (-{penalty:.2f})")
 
     # ── View count signal ─────────────────────────────────────────────────────
     if view_count is not None:
@@ -160,8 +173,12 @@ def score_trust(
             result.score = max(result.score - 0.15, 0.0)
             result.penalties.append("Very short (<60s) — likely clip or preview")
         elif duration_seconds > 900:
-            result.score = max(result.score - 0.10, 0.0)
-            result.penalties.append("Very long (>15min) — possibly compilation or concert")
+            # Hard-block anything over 15 minutes — compilations, concerts, etc.
+            result.score = 0.0
+            result.penalties.append("Blocked: over 15 min — compilation/concert/non-music-video")
+        elif duration_seconds > 480:
+            result.score = max(result.score - 0.25, 0.0)
+            result.penalties.append("Long (>8min) — possibly extended/concert cut")
 
     # ── Uploader/artist mismatch ──────────────────────────────────────────────
     if artist and channel and not is_vevo:

@@ -131,6 +131,8 @@ class MediaAssetOut(BaseModel):
     source_url: Optional[str] = None
     provenance: Optional[str] = None
     status: Optional[str] = "valid"
+    file_hash: Optional[str] = None
+    crop_position: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -315,6 +317,7 @@ class SettingUpdate(BaseModel):
 
 class LibraryScanRequest(BaseModel):
     import_new: bool = Field(True, description="Import files not yet in the database")
+    update_existing: bool = Field(False, description="Re-read sidecar XMLs and update existing database entries")
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +350,7 @@ class BatchRescanRequest(BaseModel):
     normalize: Optional[bool] = None
     find_source_video: Optional[bool] = None
     from_disk: Optional[bool] = None
+    scene_analysis: Optional[bool] = None
 
 
 class BatchActionResponse(BaseModel):

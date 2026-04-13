@@ -609,7 +609,7 @@ function OptionsStep({
           checked={options.find_source_video}
           onChange={(v) => update({ find_source_video: v })}
           label="Find Source Video"
-          description="Search YouTube for the original source video and link it."
+          description="Search YouTube for the original source video and link it. Videos that already have a YouTube link are automatically skipped."
         />
         {options.find_source_video && (
           <div className="ml-6 space-y-3 border-l-2 border-white/10 pl-4">

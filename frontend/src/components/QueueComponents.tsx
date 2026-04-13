@@ -8,7 +8,7 @@ import {
   ChevronDown, ChevronUp, RotateCcw, Copy, Check,
   Activity, Download, Gauge, Clock, AlertTriangle,
   Shield, ShieldAlert, ShieldCheck, Zap, Timer,
-  Layers, CircleStop, ChevronRight, CheckCircle2, XCircle, SkipForward, Tag,
+  Layers, CircleStop, ChevronRight, CheckCircle2, XCircle, SkipForward, Tag, Music,
 } from "lucide-react";
 import type {
   JobSummary, JobTelemetry, AttemptRecord, HealthInfo,
@@ -730,21 +730,52 @@ export function JobCard({
             <JobProgressBars job={job} telemetry={telemetry} />
           )}
 
-          {/* Skip/fail reason — visible without expanding */}
-          {job.status === "skipped" && job.current_step && (
-            <div className="flex items-center gap-1.5 text-[11px] text-orange-400 bg-orange-500/5 border border-orange-500/15 rounded px-2 py-1">
-              <AlertTriangle size={11} className="shrink-0" />
-              <span className="truncate">{job.current_step.replace(/^Skipped:\s*/i, "")}</span>
-              {job.video_id && (
-                <Link
-                  to={`/video/${job.video_id}`}
-                  className="shrink-0 text-[10px] font-medium text-orange-300 hover:text-orange-200 underline underline-offset-2"
-                >
-                  View match
-                </Link>
-              )}
-            </div>
-          )}
+          {/* Skip reason — with poster art for matched library videos */}
+          {job.status === "skipped" && job.current_step && (() => {
+            // Parse "Artist - Title" from skip reason like "URL already imported as 'Artist - Title' (id=123)"
+            const nameMatch = job.current_step.match(/'([^']+)'/);
+            const matchedName = nameMatch?.[1];
+            // Fallback: parse video ID from current_step if job.video_id is null
+            const idMatch = job.current_step.match(/\(id=(\d+)\)/);
+            const linkedVideoId = job.video_id || (idMatch ? Number(idMatch[1]) : null);
+            const cleanReason = job.current_step.replace(/^Skipped:\s*/i, "").replace(/'[^']+'\s*/, "").replace(/\(id=\d+\)\s*/, "").trim();
+            return (
+              <Link
+                to={linkedVideoId ? `/video/${linkedVideoId}` : "#"}
+                className="flex gap-3 bg-orange-500/5 border border-orange-500/15 rounded p-2 hover:bg-orange-500/10 transition-colors group cursor-pointer no-underline"
+              >
+                <div className="shrink-0 w-16 h-16 rounded bg-surface overflow-hidden relative">
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <Music size={20} className="text-text-muted/40" />
+                  </div>
+                  {linkedVideoId && (
+                    <img
+                      src={`/api/playback/poster/${linkedVideoId}`}
+                      alt=""
+                      className="relative w-full h-full object-cover"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0 space-y-0.5">
+                  {matchedName && (
+                    <p className="text-[13px] font-semibold text-text-primary truncate group-hover:text-orange-300 transition-colors">
+                      {matchedName}
+                    </p>
+                  )}
+                  <div className="flex items-center gap-1.5 text-[11px] text-orange-400">
+                    <SkipForward size={11} className="shrink-0" />
+                    <span className="font-medium">Already in library</span>
+                  </div>
+                  {cleanReason && (
+                    <p className="text-[10px] text-text-muted leading-relaxed truncate">
+                      {cleanReason}
+                    </p>
+                  )}
+                </div>
+              </Link>
+            );
+          })()}
           {job.status === "failed" && job.error_message && !isExpanded && (
             <div className="flex items-center gap-1.5 text-[11px] text-red-400 bg-red-500/5 border border-red-500/15 rounded px-2 py-1">
               <AlertTriangle size={11} className="shrink-0" />

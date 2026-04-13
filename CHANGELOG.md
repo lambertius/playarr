@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.9.14] - 2026-04-12
+
+### Added
+- **Audio Download** — new Music icon button on the video detail page extracts audio as a CBR MP3 file; FFmpeg detects source bitrate and channel count, snaps to nearest standard bitrate (64–320 kbps), and streams the result with a busy spinner; ID3 tags include artist, title, album, year, genre, poster artwork (APIC), and Windows Media Player–compliant POPM star rating via mutagen
+- **Live Search on Facet Pages** — typing in the global search bar now live-filters the current facet page (Artists, Albums, Years, Genres, Ratings, Quality) with 250 ms debounce; the query syncs to the URL as `?search=` so results persist on refresh; a clear (×) button resets the filter; on non-facet routes, Enter still navigates to the Library page
+- **New Videos: Preference-Based Recommendations** — "Songs You Might Like" now uses a multi-signal scoring engine: 5-star artists (weight 1.0), 4-star (0.6), 3-star (0.3 if fewer than 8 artists from higher tiers), plus a play-count engagement bonus from PlaybackHistory (0.05 per play, capped at 0.5); a new Phase 3 discovers videos in the user's top 3 genres via yt-dlp search
+- **New Videos: Personalized Sections First** — "Songs You Might Like" and "Recommended By Artist" are now the first two sections on the New Videos page, ahead of Famous/Popular/New/Rising
+
+### Fixed
+- **URL Import Fails During Finalising** — adding a video by URL while other imports were in the Finalising stage could silently fail (spinner would spin then revert, URL stayed in the input field); root cause was the import endpoint's `db.commit()` contending with the write queue's `_apply_lock` at the SQLite level until `busy_timeout` (30 s) expired; job-creation commits in `import_by_url`, `_import_playlist`, `redownload_video`, and `rescan_metadata` now acquire `_apply_lock` before committing, serializing correctly with pipeline writes
+- **New Videos: Junk Filtering** — videos longer than 15 minutes are now hard-blocked (trust score = 0.0) instead of receiving a trivial −0.10 penalty; videos 8–15 minutes receive a −0.25 penalty; new hard-block title patterns for "N hours of", "full album", "nonstop", and "megamix" compilations; "compilation" keyword penalty increased from −0.10 to −0.20
+- **New Videos: Sparse Suggestion Lists** — each category now displays up to 20 suggestions (was 12); the "Recommended By Artist" section lowered its minimum-owned threshold from 2 to 1 video so it works with smaller libraries, and searches up to 8 artists (was 5); the taste engine searches up to 6 artists (was 3) with a generation limit of 20 (was 10)
+- **Scan Metadata: Unicode Hyphen False Identity Change** — AI Source Resolution returning artist names with Unicode hyphens (en-dash U+2013, etc.) and AI Final Review normalising to ASCII hyphens was falsely detected as an artist identity change, triggering invalidation of all MusicBrainz IDs, IMDB URL, and Wikipedia sources; identity change set comparison now normalises Unicode hyphens to ASCII before comparing, matching the normalisation already used in search functions
+- **Schema Upgrade: Missing crop_position Column** — `crop_position` on `media_assets` and `cached_assets` had an Alembic migration (017) but was not included in `_apply_schema_upgrades()`, causing silent failures on existing databases upgraded in-place by the bundled installer
+- **Now Playing: Muted Background Stream** — MKV files used for the muted background artwork grid were being served with full audio tracks, wasting bandwidth; new `/stream-video-only` endpoint remuxes MKV to fragmented MP4 with audio stripped for muted playback contexts
+
+## [1.9.13] - 2026-04-11
+
+### Added
+- **Artwork Manager** — new tab in Metadata Manager with pie chart breakdowns of poster art sources (source art vs thumbnail fallback), artist/album coverage stats, searchable entity browser with pagination, upload/delete/refresh artwork for artists, albums, and video posters, artwork crop position adjustment via focal point selector lightbox, and entity sources editor for MusicBrainz IDs and Wikipedia URLs
+- **Artwork Crop Position** — clickable focal point selector on artwork lightbox sets CSS `object-position` for artist, album, and video poster art; persisted to `crop_position` column on `media_assets` and `cached_assets`
+- **Review Queue: Artwork Categories** — two new review categories (`artwork_incomplete`, `missing_artwork`) with "Scan Artwork" button, filter pills, and "Scan Sources" bulk action to repair missing entity artwork
+- **Safe Delete (Recycle Bin)** — deleted files are now sent to the OS recycle bin instead of permanent deletion; network/UNC paths where recycle bin is unavailable raise a confirmation prompt before falling back to permanent delete
+- **Queue: History Sorting** — completed jobs in the Queue history tab can now be sorted by Date Added, Date Completed, Artist, or Title with ascending/descending toggle; sort preference persisted to localStorage
+- **Party Mode: Pre-Rendered Fireworks** — fireworks celebration animation is pre-rendered to a WebM blob via `captureStream` + `MediaRecorder` on settings change, then played back as a video element for zero-CPU animation playback
+- **Library Scan: Update Existing Mode** — new scan mode that re-reads sidecar XMLs for already-tracked items and syncs changed fields (metadata, ratings, quality/letterbox, sources, artwork, entity refs, processing state) back into the DB; designed for multi-install setups sharing the same library
+- **Library Scan: Mode Selector** — Scan Library in Settings now has radio options (Import New / Update Existing / Both) matching the Export Library UI pattern
+- **Startup: Zombie Record Cleanup** — on launch, DB records whose video files no longer exist on disk are automatically detected and removed, along with their child rows, cached assets, thumbnails, and orphaned entity folders
+- **User Edit Provenance** — anonymous instance user ID (auto-generated UUID) silently tracks who made each edit; `field_provenance_users` JSON on VideoItem and entity models maps each field to the user who last set it; `last_edited_by` on VideoItem, `user_id` on MetadataSnapshot, and `user_id` in review history entries enable future per-user trust scoring for the musicvideo DB
+- **Queue: Skipped Job Art Cards** — skipped duplicate jobs now show an art card with the matched library video's poster, parsed title, and a link to the existing entry instead of a plain text line
+
+### Fixed
+- **Video Editor: Scan/Scan All Merged** — consolidated two separate scan buttons into a single button with a popup dialog offering Scan (selected) and Scan All options
+- **Video Editor: Scan Progress Bar** — fixed missing per-file progress; now shows "Scanning 47/854: Artist — Title" with percentage
+- **Video Editor: Sidecar XML Persistence** — letterbox scan results are now written to `.playarr.xml` sidecar after scanning
+- **Video Editor: Post-Encode Cleanup** — letterbox fields are cleared and sidecar XML updated after encoding completes
+- **Video Editor: Manual Tag + Filtering** — manually-added tracks show a blue "Manual" badge; new dropdown filter for All/Letterboxed/Manual
+- **Video Editor: Skip Already-Processed Filter** — new scan options to skip videos that have already been cropped or trimmed
+- **Sidebar: Review Count Not Updating** — the Review badge count only fetched once on mount; added 15-second auto-polling to match the Queue badge behaviour
+- **Duplicate Check: Zombie Records Blocking Imports** — duplicate detection now ignores DB records whose files are missing from disk, preventing ghost entries from blocking re-imports
+- **Duplicate Skip: Job Not Linked to Match** — skipped duplicate jobs now link `video_id` to the existing matched video so the UI can show poster art and a direct link
+- **Review Queue: Stale AI/Scene Flags Not Clearing** — scene analysis and AI enrichment deferred tasks in all three pipelines now call `clear_stale_enrichment_review()` after completing, so review items auto-clear without requiring a manual refresh
+- **Review Queue: Removed Unused Import Error Category** — the `import_error` review category filter pill was removed since no code path generates this category
+- **Delete Error Feedback** — delete operations across Library, Artists, Albums, Years, Queue, and ActionsPanel now show error toasts instead of failing silently
+- **Playback: Video Source Cleanup on Unmount** — VideoPlayer and NowPlayingPage now release the video `src` attribute on unmount/track-change, causing the browser to drop the HTTP connection and terminate the backend FFmpeg streaming process
+- **XML Sidecar: Canonical Tracking Parity** — `canonical_provenance` and `canonical_confidence` are now written at the identity level (not nested in `<version>`) and round-trip correctly through export/import; `editor_edit_type` also persisted
+- **Settings: Export Mode Tooltips** — library export radio options now have tooltip descriptions matching the scan mode selector
+
 ## [1.9.12] - 2026-04-10
 
 ### Fixed

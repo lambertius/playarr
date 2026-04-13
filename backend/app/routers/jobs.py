@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.db_lock import _apply_lock
 from app.models import ProcessingJob, JobStatus, VideoItem, Source, SourceProvider, AppSetting
 from app.schemas import (
     VideoItemCreate, JobOut, JobLogOut, NormalizeRequest,
@@ -134,7 +135,8 @@ def import_by_url(req: VideoItemCreate, db: Session = Depends(get_db)):
                       "alternate_version_label": req.alternate_version_label},
     )
     db.add(job)
-    db.commit()
+    with _apply_lock:
+        db.commit()
     db.refresh(job)
 
     # Dispatch task (Celery or in-process thread)
@@ -180,7 +182,8 @@ def _import_playlist(req: VideoItemCreate, db: Session) -> JobOut:
         started_at=datetime.now(timezone.utc),
     )
     db.add(parent)
-    db.commit()
+    with _apply_lock:
+        db.commit()
     db.refresh(parent)
 
     # Extract playlist entries (this blocks briefly)
@@ -190,7 +193,8 @@ def _import_playlist(req: VideoItemCreate, db: Session) -> JobOut:
         parent.status = JobStatus.failed
         parent.error_message = f"Failed to extract playlist: {e}"
         parent.completed_at = datetime.now(timezone.utc)
-        db.commit()
+        with _apply_lock:
+            db.commit()
         db.refresh(parent)
         return parent
 
@@ -198,7 +202,8 @@ def _import_playlist(req: VideoItemCreate, db: Session) -> JobOut:
         parent.status = JobStatus.failed
         parent.error_message = "Playlist is empty or could not be read"
         parent.completed_at = datetime.now(timezone.utc)
-        db.commit()
+        with _apply_lock:
+            db.commit()
         db.refresh(parent)
         return parent
 
@@ -207,7 +212,7 @@ def _import_playlist(req: VideoItemCreate, db: Session) -> JobOut:
 
     # Collect video IDs already in the library so we can skip them
     from app.services.url_utils import identify_provider as _identify
-    existing_video_ids: set[str] = set()
+    existing_entries: dict[str, int | None] = {}  # entry_id → video_id
     for entry in entries:
         try:
             _prov, _vid = _identify(entry["url"])
@@ -216,58 +221,75 @@ def _import_playlist(req: VideoItemCreate, db: Session) -> JobOut:
                 Source.source_video_id == _vid,
             ).first()
             if hit:
-                existing_video_ids.add(entry["id"])
+                existing_entries[entry["id"]] = hit.video_id
         except Exception:
             pass
 
     sub_job_ids = []
     child_specs = []
     skipped = 0
-    for entry in entries:
-        if entry["id"] in existing_video_ids:
-            skipped += 1
-            continue
-        video_url = entry["url"]
-        video_title = entry.get("title", video_url)
-        child = ProcessingJob(
-            job_type="import_url",
-            status=JobStatus.queued,
-            input_url=video_url,
-            display_name=video_title or video_url,
-            action_label=_child_label,
-            input_params={"artist": req.artist, "title": req.title,
-                          "normalize": req.normalize, "scrape": req.scrape,
-                          "scrape_musicbrainz": req.scrape_musicbrainz,
-                          "is_cover": req.is_cover, "is_live": req.is_live,
-                          "is_alternate": req.is_alternate,
-                          "is_uncensored": req.is_uncensored,
-                          "alternate_version_label": req.alternate_version_label},
-        )
-        db.add(child)
-        db.flush()
-        sub_job_ids.append(child.id)
-        child_specs.append({
-            'job_id': child.id,
-            'url': video_url,
-            'artist': req.artist,
-            'title': req.title,
-            'normalize': req.normalize,
-            'scrape': req.scrape,
-            'scrape_musicbrainz': req.scrape_musicbrainz,
-            'hint_cover': req.is_cover,
-            'hint_live': req.is_live,
-            'hint_alternate': req.is_alternate,
-            'hint_uncensored': req.is_uncensored,
-            'hint_alternate_label': req.alternate_version_label,
-            'ai_auto_analyse': req.ai_auto_analyse,
-            'ai_auto_fallback': req.ai_auto_fallback,
-        })
+    # Hold _apply_lock for the entire child-creation batch so that
+    # db.flush() (which acquires SQLite's write lock) and db.commit()
+    # are under the same application-level lock — prevents AB/BA
+    # deadlock with the write-queue thread.
+    with _apply_lock:
+        for entry in entries:
+            if entry["id"] in existing_entries:
+                # Create a visible skipped job so it appears in the Skipped tab
+                skip_child = ProcessingJob(
+                    job_type="import_url",
+                    status=JobStatus.skipped,
+                    input_url=entry["url"],
+                    display_name=entry.get("title") or entry["url"],
+                    action_label=_child_label,
+                    current_step="Skipped: already in library",
+                    video_id=existing_entries[entry["id"]],
+                    progress_percent=100,
+                )
+                db.add(skip_child)
+                skipped += 1
+                continue
+            video_url = entry["url"]
+            video_title = entry.get("title", video_url)
+            child = ProcessingJob(
+                job_type="import_url",
+                status=JobStatus.queued,
+                input_url=video_url,
+                display_name=video_title or video_url,
+                action_label=_child_label,
+                input_params={"artist": req.artist, "title": req.title,
+                              "normalize": req.normalize, "scrape": req.scrape,
+                              "scrape_musicbrainz": req.scrape_musicbrainz,
+                              "is_cover": req.is_cover, "is_live": req.is_live,
+                              "is_alternate": req.is_alternate,
+                              "is_uncensored": req.is_uncensored,
+                              "alternate_version_label": req.alternate_version_label},
+            )
+            db.add(child)
+            db.flush()
+            sub_job_ids.append(child.id)
+            child_specs.append({
+                'job_id': child.id,
+                'url': video_url,
+                'artist': req.artist,
+                'title': req.title,
+                'normalize': req.normalize,
+                'scrape': req.scrape,
+                'scrape_musicbrainz': req.scrape_musicbrainz,
+                'hint_cover': req.is_cover,
+                'hint_live': req.is_live,
+                'hint_alternate': req.is_alternate,
+                'hint_uncensored': req.is_uncensored,
+                'hint_alternate_label': req.alternate_version_label,
+                'ai_auto_analyse': req.ai_auto_analyse,
+                'ai_auto_fallback': req.ai_auto_fallback,
+            })
 
-    parent.input_params = {**(parent.input_params or {}), "sub_job_ids": sub_job_ids,
-                           "count": len(entries), "skipped": skipped}
-    if skipped:
-        parent.display_name = f"Playlist ({len(entries)} videos, {skipped} already in library)"
-    db.commit()
+        parent.input_params = {**(parent.input_params or {}), "sub_job_ids": sub_job_ids,
+                               "count": len(entries), "skipped": skipped}
+        if skipped:
+            parent.display_name = f"Playlist ({len(entries)} videos, {skipped} already in library)"
+        db.commit()
 
     # Dispatch parallel batch import (downloads overlap, DB writes serialize)
     dispatch_task(batch_import_task, parent_job_id=parent.id, child_specs=child_specs)
@@ -345,7 +367,8 @@ def redownload_video(video_id: int, format_spec: Optional[str] = Query(None),
         video_id=video_id,
     )
     db.add(job)
-    db.commit()
+    with _apply_lock:
+        db.commit()
     db.refresh(job)
 
     dispatch_task(
@@ -374,7 +397,8 @@ def rescan_metadata(video_id: int, from_disk: bool = False, db: Session = Depend
         display_name=f"{item.artist} \u2013 {item.title} \u203a {_label}" if item.artist and item.title else None,
     )
     db.add(job)
-    db.commit()
+    with _apply_lock:
+        db.commit()
     db.refresh(job)
 
     dispatch_task(rescan_metadata_task, job_id=job.id, video_id=video_id, from_disk=from_disk)
@@ -436,6 +460,7 @@ def rescan_batch(req: BatchRescanRequest, db: Session = Depends(get_db)):
             "normalize": req.normalize,
             "find_source_video": req.find_source_video,
             "from_disk": req.from_disk,
+            "scene_analysis": req.scene_analysis,
         }.items() if v is not None
     }
     # Pre-fetch display names for all videos in the batch
@@ -513,13 +538,14 @@ def scan_library(req: LibraryScanRequest = LibraryScanRequest(), db: Session = D
         status=JobStatus.queued,
         display_name="Library Scan",
         action_label="Library Scan",
-        input_params={"import_new": req.import_new},
+        input_params={"import_new": req.import_new, "update_existing": req.update_existing},
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    dispatch_task(library_scan_task, job_id=job.id, import_new=req.import_new)
+    dispatch_task(library_scan_task, job_id=job.id, import_new=req.import_new,
+                  update_existing=req.update_existing)
     return job
 
 
@@ -537,6 +563,7 @@ def scan_duplicates(rescan_all: bool = False, db: Session = Depends(get_db)):
         status=JobStatus.queued,
         display_name="Duplicate Scan" + (" (Full Rescan)" if rescan_all else ""),
         action_label="Duplicate Scan",
+        input_params={"rescan_all": rescan_all},
     )
     db.add(job)
     db.commit()
@@ -936,6 +963,8 @@ def retry_job(job_id: int, db: Session = Depends(get_db)):
     job.progress_percent = 0
     job.current_step = None
     job.log_text = None
+    job.started_at = None
+    job.completed_at = None
     job.retry_count += 1
     db.commit()
 
@@ -994,6 +1023,189 @@ def retry_job(job_id: int, db: Session = Depends(get_db)):
         job.status = JobStatus.failed
         job.error_message = "Playlist imports cannot be retried directly. Please re-submit the URL."
         db.commit()
+    elif job.job_type == "metadata_scrape" and job.video_id:
+        from app.tasks import scrape_metadata_task
+        params = job.input_params or {}
+        # Reconstruct scrape options from action_label if input_params not stored
+        ai_auto = "AI Auto" in (job.action_label or "")
+        ai_only = "AI Only" in (job.action_label or "")
+        dispatch_task(scrape_metadata_task, job_id=job.id, video_id=job.video_id,
+                      ai_auto_analyse=params.get("ai_auto_analyse", ai_auto),
+                      ai_only=params.get("ai_only", ai_only),
+                      scrape_wikipedia=params.get("scrape_wikipedia", False),
+                      scrape_musicbrainz=params.get("scrape_musicbrainz", False),
+                      scrape_tmvdb=params.get("scrape_tmvdb", False))
+    elif job.job_type == "library_import":
+        # Retry a parent library import: reset failed children, then
+        # re-dispatch them in background threads (same pattern as the
+        # original library_import_task).
+        from app.tasks import library_import_video_task
+        sub_job_ids = (job.input_params or {}).get("sub_job_ids", [])
+        if not sub_job_ids:
+            job.status = JobStatus.failed
+            job.error_message = "No child jobs found to retry"
+            db.commit()
+        else:
+            # Reset failed/cancelled children inline (fast DB writes)
+            retried = []
+            for sid in sub_job_ids:
+                child = db.query(ProcessingJob).get(sid)
+                if child and child.status in (JobStatus.failed, JobStatus.cancelled):
+                    child.status = JobStatus.queued
+                    child.error_message = None
+                    child.progress_percent = 0
+                    child.current_step = None
+                    child.log_text = None
+                    child.started_at = None
+                    child.completed_at = None
+                    child.retry_count += 1
+                    retried.append(sid)
+            db.commit()
+            if not retried:
+                job.status = JobStatus.failed
+                job.error_message = "No failed or cancelled child jobs to retry"
+                db.commit()
+            else:
+                # Spawn children + watcher in daemon threads (mirrors
+                # library_import_task's non-Celery dispatch pattern).
+                import threading
+                _retried = list(retried)
+                _all_sids = list(sub_job_ids)
+                _parent_id = job.id
+
+                def _run_children():
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    max_workers = min(len(_retried), 3)
+                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                        futures = {
+                            pool.submit(library_import_video_task.run, job_id=sid): sid
+                            for sid in _retried
+                        }
+                        for future in as_completed(futures):
+                            try:
+                                future.result()
+                            except Exception:
+                                pass
+
+                def _run_watcher():
+                    try:
+                        complete_batch_job_task.run(parent_job_id=_parent_id, sub_job_ids=_all_sids)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_run_children, daemon=True).start()
+                threading.Thread(target=_run_watcher, daemon=True).start()
+    elif job.job_type == "library_import_video":
+        from app.tasks import library_import_video_task
+        dispatch_task(library_import_video_task, job_id=job.id)
+    elif job.job_type in ("batch_rescan", "batch_normalize", "batch_metadata_refresh"):
+        # Retry a parent batch job: reset failed children, re-dispatch them
+        _batch_task_map = {
+            "batch_rescan": ("rescan", "rescan_metadata_task"),
+            "batch_normalize": ("normalize", "normalize_task"),
+            "batch_metadata_refresh": ("metadata_refresh", "metadata_refresh_task"),
+        }
+        _child_type, _task_name = _batch_task_map[job.job_type]
+        sub_job_ids = (job.input_params or {}).get("sub_job_ids", [])
+        if not sub_job_ids:
+            job.status = JobStatus.failed
+            job.error_message = "No child jobs found to retry"
+            db.commit()
+        else:
+            retried = []
+            for sid in sub_job_ids:
+                child = db.query(ProcessingJob).get(sid)
+                if child and child.status in (JobStatus.failed, JobStatus.cancelled):
+                    child.status = JobStatus.queued
+                    child.error_message = None
+                    child.progress_percent = 0
+                    child.current_step = None
+                    child.log_text = None
+                    child.started_at = None
+                    child.completed_at = None
+                    child.retry_count += 1
+                    retried.append(child)
+            db.commit()
+            if not retried:
+                job.status = JobStatus.failed
+                job.error_message = "No failed or cancelled child jobs to retry"
+                db.commit()
+            else:
+                import importlib
+                _tasks_mod = importlib.import_module("app.tasks")
+                _task_fn = getattr(_tasks_mod, _task_name)
+                for child in retried:
+                    kwargs = {"job_id": child.id}
+                    if child.video_id:
+                        kwargs["video_id"] = child.video_id
+                    if _child_type == "normalize":
+                        kwargs["target_lufs"] = (job.input_params or {}).get("target_lufs")
+                    elif _child_type == "metadata_refresh":
+                        kwargs["force"] = True
+                    dispatch_task(_task_fn, **kwargs)
+                dispatch_task(complete_batch_job_task, parent_job_id=job.id, sub_job_ids=sub_job_ids)
+    elif job.job_type == "batch_resolve":
+        from app.tasks import batch_resolve_task
+        params = job.input_params or {}
+        video_ids = params.get("video_ids", [])
+        if not video_ids:
+            job.status = JobStatus.failed
+            job.error_message = "No video IDs found to retry"
+            db.commit()
+        else:
+            dispatch_task(batch_resolve_task, job_id=job.id,
+                          video_ids=video_ids, force=params.get("force", False))
+    elif job.job_type == "library_scan":
+        params = job.input_params or {}
+        dispatch_task(library_scan_task, job_id=job.id,
+                      import_new=params.get("import_new", True),
+                      update_existing=params.get("update_existing", False))
+    elif job.job_type == "duplicate_scan":
+        params = job.input_params or {}
+        dispatch_task(duplicate_scan_task, job_id=job.id,
+                      rescan_all=params.get("rescan_all", False))
+    elif job.job_type == "library_export":
+        params = job.input_params or {}
+        dispatch_task(library_export_task, job_id=job.id,
+                      mode=params.get("mode", "skip_existing"))
+    elif job.job_type == "metadata_refresh" and job.video_id:
+        from app.tasks import metadata_refresh_task
+        dispatch_task(metadata_refresh_task, job_id=job.id,
+                      video_id=job.video_id, force=True)
+    elif job.job_type == "kodi_export":
+        from app.tasks import kodi_export_task as _kodi_task
+        dispatch_task(_kodi_task, job_id=job.id)
+    elif job.job_type == "video_editor_scan":
+        # Video editor scans run in a thread, not via dispatch_task
+        import threading
+        params = job.input_params or {}
+        def _run_scan_retry(jid, limit, include_excluded):
+            from app.services.video_editor import scan_library_for_letterboxing
+            from app.database import SessionLocal
+            from app.pipeline_url.write_queue import db_write_soon
+            sdb = SessionLocal()
+            try:
+                from app.routers.video_editor import _encode_update_job
+                db_write_soon(lambda: _encode_update_job(jid, status=JobStatus.analyzing,
+                                                          started_at=datetime.now(timezone.utc),
+                                                          current_step="Scanning for letterboxing..."))
+                results = scan_library_for_letterboxing(sdb, limit=limit, include_excluded=include_excluded)
+                db_write_soon(lambda: _encode_update_job(jid, status=JobStatus.complete,
+                                                          completed_at=datetime.now(timezone.utc),
+                                                          progress_percent=100,
+                                                          current_step="Scan complete",
+                                                          input_params={"limit": limit, "results": results}))
+            except Exception as exc:
+                db_write_soon(lambda: _encode_update_job(jid, status=JobStatus.failed,
+                                                          completed_at=datetime.now(timezone.utc),
+                                                          error_message=str(exc)))
+            finally:
+                sdb.close()
+        threading.Thread(
+            target=_run_scan_retry,
+            args=(job.id, params.get("limit", 100), params.get("include_excluded", False)),
+            daemon=True,
+        ).start()
 
     db.refresh(job)
     return job

@@ -233,6 +233,12 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     // Only accept finite, positive values — streaming endpoints often
     // report NaN/Infinity/0 until the full file is buffered.
     if (!Number.isFinite(dur) || dur <= 0) return;
+    // Don't shrink duration — the DB value set by replaceQueue/next/prev
+    // is authoritative.  Piped FFmpeg streams report partial durations
+    // that grow as data buffers; accepting smaller values would make the
+    // progress bar jump.
+    const current = get().duration;
+    if (current > 0 && dur < current * 0.95) return;
     set({ duration: dur });
   },
 

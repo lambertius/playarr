@@ -18,3 +18,5 @@ natsort>=8.4.0
 Pillow>=10.1.0
 pystray>=0.19.5
 python-dotenv>=1.0.0
+mutagen>=1.47.0
+send2trash>=1.8.0

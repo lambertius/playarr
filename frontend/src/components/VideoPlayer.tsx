@@ -39,6 +39,19 @@ export function VideoPlayer({ videoId, className, style, poster, durationSeconds
   // Use stored duration if available, else fall back to element-reported duration
   const duration = (durationSeconds && durationSeconds > 0) ? durationSeconds : elDuration;
 
+  // Release video src on unmount so the browser drops the HTTP connection
+  // and the backend streaming process (ffmpeg) is terminated.
+  useEffect(() => {
+    const el = videoRef.current;
+    return () => {
+      if (el) {
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
+      }
+    };
+  }, []);
+
   // Record playback on pause/end
   const reportPlayback = useCallback(() => {
     const el = videoRef.current;

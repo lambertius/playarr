@@ -207,6 +207,7 @@ export function LibraryPage() {
           if (ok) {
             deleteMutation.mutate(videoId, {
               onSuccess: () => toast({ type: "success", title: "Video deleted" }),
+              onError: (err: any) => toast({ type: "error", title: err?.response?.data?.detail || "Failed to delete video" }),
             });
           }
           break;
@@ -573,6 +574,7 @@ export function LibraryPage() {
             normalize: opts.normalize,
             find_source_video: opts.find_source_video,
             from_disk: opts.from_disk,
+            scene_analysis: opts.scene_analysis,
           }, {
             onSuccess: (res) => {
               setRescanDialogOpen(false);

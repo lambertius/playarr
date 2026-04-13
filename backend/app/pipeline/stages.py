@@ -101,9 +101,18 @@ def run_library_import_pipeline(job_id: int) -> None:
         _coarse_update(job_id, JobStatus.skipped,
                        step=f"Skipped: {_dup_reason[:200]}",
                        progress=100)
+        # Link the skipped job to the existing video so UI can show poster/link
         if dup.existing_video_id:
-            _flag_existing_for_duplicate_review(
-                dup.existing_video_id, job_id, _dup_reason)
+            from app.database import CosmeticSessionLocal as _SkipSL
+            from app.models import ProcessingJob as _SkipPJ
+            _skip_db = _SkipSL()
+            try:
+                _skip_job = _skip_db.query(_SkipPJ).get(job_id)
+                if _skip_job:
+                    _skip_job.video_id = dup.existing_video_id
+                    _skip_db.commit()
+            finally:
+                _skip_db.close()
         ws.sync_logs_to_db()
         ws.cleanup_on_success()
     except Exception as e:
@@ -196,9 +205,18 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
         _coarse_update(job_id, JobStatus.skipped,
                        step=f"Skipped: {_dup_reason[:200]}",
                        progress=100)
+        # Link the skipped job to the existing video so UI can show poster/link
         if dup.existing_video_id:
-            _flag_existing_for_duplicate_review(
-                dup.existing_video_id, job_id, _dup_reason)
+            from app.database import CosmeticSessionLocal as _SkipSL2
+            from app.models import ProcessingJob as _SkipPJ2
+            _skip_db2 = _SkipSL2()
+            try:
+                _skip_job2 = _skip_db2.query(_SkipPJ2).get(job_id)
+                if _skip_job2:
+                    _skip_job2.video_id = dup.existing_video_id
+                    _skip_db2.commit()
+            finally:
+                _skip_db2.close()
         ws.sync_logs_to_db()
         ws.cleanup_on_success()
     except Exception as e:
@@ -613,6 +631,11 @@ def _step_duplicate_precheck(ws: ImportWorkspace, artist: str, title: str) -> No
                 if dp_lower == qp_lower or qp_lower.startswith(dp_lower) or dp_lower.startswith(qp_lower):
                     existing = candidate
                     break
+        if existing:
+            # Guard: if the matched item's file is missing, it's a zombie record — ignore it
+            if existing.file_path and not os.path.exists(existing.file_path):
+                ws.log(f"Ignoring zombie record id={existing.id} (file missing: {existing.file_path})")
+                existing = None
         if existing:
             existing_version = getattr(existing, "version_type", "normal") or "normal"
 
@@ -1141,6 +1164,16 @@ def _step_duplicate_check(ws: ImportWorkspace, artist: str, title: str,
                     break
 
         if not existing:
+            ws.write_artifact("duplicate_check", {
+                "is_duplicate": False,
+                "is_possible_duplicate": False,
+            })
+            ws.update_stage("duplicate_check", "complete")
+            return
+
+        # Guard: if the matched item's file is missing, it's a zombie record — ignore it
+        if existing.file_path and not os.path.exists(existing.file_path):
+            ws.log(f"Ignoring zombie record id={existing.id} (file missing: {existing.file_path})")
             ws.write_artifact("duplicate_check", {
                 "is_duplicate": False,
                 "is_possible_duplicate": False,
