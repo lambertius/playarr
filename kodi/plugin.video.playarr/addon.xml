@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.video.playarr"
+       name="Playarr"
+       version="1.9.33"
+       provider-name="Playarr">
+  <requires>
+    <import addon="xbmc.python" version="3.0.0"/>
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="default.py">
+    <provides>video</provides>
+  </extension>
+  <extension point="xbmc.addon.metadata">
+    <summary lang="en_GB">Play Party Mode from your Playarr music video library</summary>
+    <description lang="en_GB">A deliberately minimal, streaming-first Kodi front-end for Playarr, the self-hosted music video manager. It does one thing — play Party Mode — in Theatre (video over a scrolling artwork wall, composited on the server) or Fullscreen (native decode). It shows a read-only summary of the server's exclusions before playing; all library and party settings are managed in Playarr on the server.</description>
+    <platform>all</platform>
+    <license>MIT</license>
+    <forum></forum>
+    <website>https://github.com/</website>
+    <source></source>
+    <assets>
+      <icon>icon.png</icon>
+      <fanart>fanart.jpg</fanart>
+    </assets>
+  </extension>
+</addon>

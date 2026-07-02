@@ -2,6 +2,8 @@ import { useRef, useEffect, useCallback, useState, type CSSProperties } from "re
 import { Play, Pause, Volume2, VolumeX, Maximize } from "lucide-react";
 import { playbackApi } from "@/lib/api";
 import { usePlaybackStore } from "@/stores/playbackStore";
+import { useArtworkSettings } from "@/stores/artworkSettingsStore";
+import { usePlaybackDiagnostics } from "@/hooks/usePlaybackDiagnostics";
 
 interface VideoPlayerProps {
   videoId: number;
@@ -35,6 +37,9 @@ export function VideoPlayer({ videoId, className, style, poster, durationSeconds
   const [muted, setMuted] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [buffered, setBuffered] = useState(0);
+
+  const browserTranscode = useArtworkSettings((s) => s.browserTranscode);
+  usePlaybackDiagnostics(videoRef, { videoId, mode: "browser" });
 
   // Use stored duration if available, else fall back to element-reported duration
   const duration = (durationSeconds && durationSeconds > 0) ? durationSeconds : elDuration;
@@ -213,7 +218,7 @@ export function VideoPlayer({ videoId, className, style, poster, durationSeconds
     >
       <video
         ref={videoRef}
-        src={playbackApi.streamUrl(videoId)}
+        src={playbackApi.streamUrl(videoId, browserTranscode)}
         poster={poster}
         className="w-full h-full object-contain rounded-xl cursor-pointer"
         playsInline

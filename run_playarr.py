@@ -24,6 +24,7 @@ import argparse
 import logging
 import os
 import shutil
+import signal
 import sys
 import subprocess
 import time
@@ -186,6 +187,169 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Supervisor / server-child model
+# ---------------------------------------------------------------------------
+# The server runs as a *child* process supervised by the parent.  If the server
+# dies for any reason (crash, native fault, external kill of the child) the
+# supervisor relaunches it, so a transient failure can't leave Playarr dead.
+# Exit codes the child returns tell the supervisor what to do:
+#   RESTART_EXIT_CODE (75)  -> intentional restart (e.g. /settings/restart)
+#   0 or 15 (SIGTERM)       -> clean shutdown / tray Quit -> stop, do not relaunch
+#   anything else           -> crash/kill -> relaunch (with crash-loop guard)
+SHUTDOWN_EXIT_CODES = (0, 15)
+
+_child_proc = None             # current server child (subprocess.Popen)
+_supervisor_stopping = False   # set when the supervisor is intentionally stopping
+
+
+def _watch_parent(parent_pid: int):
+    """Run in a supervised child: exit if the supervisor process dies, so a
+    killed supervisor can never leave an orphaned server holding the port."""
+    if sys.platform != "win32" or not parent_pid:
+        return
+    try:
+        import ctypes
+        import threading
+        from ctypes import wintypes
+
+        SYNCHRONIZE = 0x00100000
+        WAIT_OBJECT_0 = 0x0
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(parent_pid))
+        if not handle:
+            return
+
+        def _watch():
+            while True:
+                if kernel32.WaitForSingleObject(handle, 2000) == WAIT_OBJECT_0:
+                    try:
+                        from app.crash_diagnostics import record
+                        record(f"supervisor (pid {parent_pid}) exited — child stopping to avoid orphan")
+                    except Exception:
+                        pass
+                    os._exit(0)
+
+        threading.Thread(target=_watch, daemon=True, name="parent-watch").start()
+    except Exception:
+        logger.exception("Could not start parent-watch (continuing without it)")
+
+
+def _run_server(args):
+    """Run the FastAPI server in-process — the supervised child (and the
+    in-process fallback if a child can't be spawned)."""
+    # Arm crash diagnostics so a hard death leaves a record in logs/crash.log.
+    try:
+        from app.runtime_dirs import get_runtime_dirs
+        from app.crash_diagnostics import install_crash_handlers
+        install_crash_handlers(str(get_runtime_dirs().log_dir))
+    except Exception:
+        logger.exception("Could not arm crash diagnostics")
+
+    if getattr(args, "parent_pid", 0):
+        _watch_parent(args.parent_pid)
+
+    import uvicorn
+    try:
+        uvicorn.run("app.main:app", host=args.host, port=args.port, log_level="info")
+    except BaseException:
+        # Anything that propagates out of uvicorn.run ends the process; the
+        # windowed build's stderr is devnull, so record it before exiting.
+        import traceback as _traceback
+        try:
+            from app.crash_diagnostics import record
+            record("uvicorn.run exited via exception:\n" + _traceback.format_exc())
+        except Exception:
+            pass
+        raise
+
+
+def _child_command(args) -> list:
+    """Command line that relaunches this program as a supervised server child."""
+    cmd = [sys.executable]
+    if not _IS_FROZEN:
+        cmd.append(os.path.abspath(__file__))
+    cmd += [
+        "--server-child",
+        "--host", args.host,
+        "--port", str(args.port),
+        "--parent-pid", str(os.getpid()),
+    ]
+    return cmd
+
+
+def _supervise(args):
+    """Keep the server child alive: relaunch on crash/abnormal exit, stop on a
+    clean shutdown or an explicit restart loop."""
+    global _child_proc, _supervisor_stopping
+
+    def _stop(_signum, _frame):
+        global _supervisor_stopping
+        _supervisor_stopping = True
+        p = _child_proc
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+    for _sig in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        if hasattr(signal, _sig):
+            try:
+                signal.signal(getattr(signal, _sig), _stop)
+            except Exception:
+                pass
+
+    spawn_flags = {}
+    if sys.platform == "win32":
+        spawn_flags["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    crash_times: list[float] = []
+    while True:
+        try:
+            _child_proc = subprocess.Popen(_child_command(args), cwd=_BACKEND_DIR, **spawn_flags)
+        except Exception:
+            logger.exception("Could not spawn server child — running in-process instead")
+            _run_server(args)
+            return
+
+        code = _child_proc.wait()
+        _child_proc = None
+
+        if _supervisor_stopping or code in SHUTDOWN_EXIT_CODES:
+            logger.info("Server stopped (exit %s) — supervisor exiting.", code)
+            break
+        if code == RESTART_EXIT_CODE:
+            logger.info("Server requested a restart — relaunching...")
+            continue
+
+        # Abnormal exit (crash or external kill of the child): relaunch, but if
+        # it's failing repeatedly fall back to running the server in-process —
+        # so a supervisor-side problem can never leave Playarr unable to start.
+        now = time.monotonic()
+        crash_times[:] = [t for t in crash_times if now - t < 60]
+        crash_times.append(now)
+        if len(crash_times) >= 5:
+            logger.error(
+                "Server child exited abnormally %d times within 60s (last code %s) — "
+                "falling back to in-process server. Check logs/crash.log.",
+                len(crash_times), code,
+            )
+            _run_server(args)
+            return
+        delay = min(15, 2 * len(crash_times))
+        logger.warning(
+            "Server child exited abnormally (code %s) — relaunching in %ds (attempt %d).",
+            code, delay, len(crash_times),
+        )
+        time.sleep(delay)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -201,9 +365,19 @@ def main():
                         help="Host to bind to (default: 0.0.0.0)")
     parser.add_argument("--headless", action="store_true",
                         help="No tray icon or auto-browser")
+    # Internal: launched by the supervisor to run the actual server.
+    parser.add_argument("--server-child", dest="server_child", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--parent-pid", dest="parent_pid", type=int, default=0,
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    # Banner
+    # ---- Supervised child: just run the server ----
+    if args.server_child:
+        _run_server(args)
+        return
+
+    # ---- Supervisor / parent ----
     print("=" * 50)
     print("  Playarr — Music Video Manager")
     print(f"  http://localhost:{args.port}")
@@ -234,14 +408,21 @@ def main():
     # First-run setup (directories, DB)
     ensure_first_run_setup()
 
-    # System tray
+    # Arm crash diagnostics in the supervisor too (records supervisor-side issues).
+    try:
+        from app.runtime_dirs import get_runtime_dirs
+        from app.crash_diagnostics import install_crash_handlers
+        install_crash_handlers(str(get_runtime_dirs().log_dir))
+    except Exception:
+        logger.exception("Could not arm crash diagnostics")
+
+    # Tray + browser live in the supervisor so they persist across server
+    # restarts (and the tray Quit stops the whole supervisor).
     if not args.headless:
-        minimize_to_tray = _read_db_bool("minimize_to_tray", "true")
-        if minimize_to_tray:
+        if _read_db_bool("minimize_to_tray", "true"):
             start_tray(port=args.port)
 
-        auto_open = _read_db_bool("auto_open_browser", "true")
-        if auto_open:
+        if _read_db_bool("auto_open_browser", "true"):
             import threading
             import webbrowser
 
@@ -251,26 +432,9 @@ def main():
 
             threading.Thread(target=_open, daemon=True).start()
 
-    # Run uvicorn
-    if _IS_FROZEN:
-        # PyInstaller bundle — run uvicorn in-process (subprocess won't work)
-        import uvicorn
-        uvicorn.run("app.main:app", host=args.host, port=args.port, log_level="info")
-    else:
-        # Development / non-frozen — subprocess allows restart via exit code
-        while True:
-            result = subprocess.run([
-                sys.executable, "-m", "uvicorn", "app.main:app",
-                "--host", args.host,
-                "--port", str(args.port),
-            ], cwd=_BACKEND_DIR)
-
-            if result.returncode == RESTART_EXIT_CODE:
-                print("[Playarr] Restart requested — relaunching...")
-                stop_tray()
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            else:
-                break
+    # Supervise the server child (self-healing).  Falls back to in-process if a
+    # child can't be spawned.
+    _supervise(args)
 
     stop_tray()
     print("[Playarr] Stopped.")

@@ -1,22 +1,28 @@
 """
 Settings API — Read/write global and per-user settings.
 """
+import io
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
+import zipfile
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import AppSetting, NormalizationHistory
 from app.schemas import SettingOut, SettingUpdate, NormalizationHistoryOut
+from app.version import APP_VERSION
 
 router = APIRouter(prefix="/api/settings", tags=["Settings"])
 
@@ -617,6 +623,26 @@ def restart_server():
     threading.Thread(target=_do_exit, daemon=True).start()
     return {"status": "restarting"}
 
+
+# Exit code the supervisor treats as a clean stop (do not relaunch).
+SHUTDOWN_EXIT_CODE = 0
+
+
+@router.post("/shutdown")
+def shutdown_server():
+    """Cleanly stop Playarr (used by the installer to release the executable
+    before an update, and available for a graceful stop).  Exits with code 0 so
+    the supervisor stops rather than relaunching."""
+    logger.info("Server shutdown requested via API")
+
+    def _do_exit():
+        import time
+        time.sleep(0.5)  # Allow response to flush
+        os._exit(SHUTDOWN_EXIT_CODE)
+
+    threading.Thread(target=_do_exit, daemon=True).start()
+    return {"status": "shutting down"}
+
     return NamingPreviewResponse(examples=examples)
 
 
@@ -978,37 +1004,55 @@ def configure_startup(db: Session = Depends(get_db)):
 
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
-    if enabled:
-        # Use pythonw.exe (no console window) if available, else python.exe
+    try:
+        if enabled:
+            cmd = _startup_command(delay)
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE,
+            ) as key:
+                winreg.SetValueEx(key, "Playarr", 0, winreg.REG_SZ, cmd)
+            logger.info("Registered Playarr in Windows startup (delay=%ss): %s", delay, cmd)
+        else:
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE,
+                ) as key:
+                    winreg.DeleteValue(key, "Playarr")
+                logger.info("Removed Playarr from Windows startup")
+            except FileNotFoundError:
+                pass  # Value already absent — nothing to remove
+    except OSError as exc:
+        logger.exception("Failed to configure Windows startup")
+        raise HTTPException(status_code=500, detail=f"Could not update Windows startup entry: {exc}")
+
+    return {"status": "ok", "startup_enabled": enabled, "delay": delay}
+
+
+def _startup_command(delay: int) -> str:
+    """Build the command line written to the HKCU Run key.
+
+    In an installed (PyInstaller-frozen) build ``sys.executable`` is Playarr.exe,
+    which is the real launcher — invoke it directly.  When running from source we
+    invoke ``run_playarr.py`` (the same production launcher) with pythonw.exe so
+    no console window appears.  Either way the target is the supervised launcher
+    in ``run_playarr.py`` — never the dev-only ``_start_server.py``, which is not
+    shipped in the installer.
+    """
+    if getattr(sys, "frozen", False):
+        cmd = f'"{sys.executable}"'
+    else:
         python_exe = sys.executable
         pythonw = python_exe.replace("python.exe", "pythonw.exe")
         if os.path.exists(pythonw):
             python_exe = pythonw
-
-        script = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "_start_server.py")
+        # settings.py -> app -> backend -> repo root (where run_playarr.py lives)
+        launcher = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "run_playarr.py")
         )
-        cmd = f'"{python_exe}" "{script}"'
-        if delay > 0:
-            cmd += f" --delay {delay}"
-
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.SetValueEx(key, "Playarr", 0, winreg.REG_SZ, cmd)
-
-        logger.info(f"Registered Playarr in Windows startup (delay={delay}s)")
-    else:
-        try:
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE,
-            ) as key:
-                winreg.DeleteValue(key, "Playarr")
-            logger.info("Removed Playarr from Windows startup")
-        except OSError:
-            pass  # Already absent
-
-    return {"status": "ok", "startup_enabled": enabled, "delay": delay}
+        cmd = f'"{python_exe}" "{launcher}"'
+    if delay > 0:
+        cmd += f" --delay {delay}"
+    return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -1100,3 +1144,86 @@ def create_genre(body: GenreCreateRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(genre)
     return GenreBlacklistItem(id=genre.id, name=genre.name, blacklisted=False, video_count=0, master_genre_id=None, alias_count=0)
+
+
+# ── Kodi add-on download ──────────────────────────────────
+# The Kodi plugin source is bundled with the server, so the plugin a user
+# installs always matches the server version it talks to.  The zip is built on
+# demand and its addon.xml version is stamped to APP_VERSION so the two can
+# never drift.
+
+KODI_ADDON_ID = "plugin.video.playarr"
+
+
+def _kodi_plugin_src_dir() -> Optional[Path]:
+    """Locate the bundled Kodi add-on source folder (frozen bundle or repo)."""
+    candidates: List[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(Path(meipass) / "kodi" / KODI_ADDON_ID)
+    here = Path(__file__).resolve()
+    # backend/app/routers/settings.py → repo root is parents[3]; in a frozen
+    # bundle backend is _MEIPASS so parents[2] also resolves correctly.
+    candidates.append(here.parents[3] / "kodi" / KODI_ADDON_ID)
+    candidates.append(here.parents[2] / "kodi" / KODI_ADDON_ID)
+    for cand in candidates:
+        if cand.is_dir() and (cand / "addon.xml").is_file():
+            return cand
+    return None
+
+
+def _build_kodi_zip(src: Path) -> bytes:
+    """Zip the add-on folder (Kodi expects the addon id folder at the zip root)
+    and stamp addon.xml's version to APP_VERSION."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(src.rglob("*")):
+            if path.is_dir():
+                continue
+            if "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            arcname = path.relative_to(src.parent).as_posix()
+            data = path.read_bytes()
+            if path.name == "addon.xml":
+                text = data.decode("utf-8")
+                text = re.sub(
+                    r'(<addon\b[^>]*?\bversion=")[^"]*(")',
+                    lambda m: m.group(1) + APP_VERSION + m.group(2),
+                    text,
+                    count=1,
+                )
+                data = text.encode("utf-8")
+            zf.writestr(arcname, data)
+    return buf.getvalue()
+
+
+@router.get("/kodi-plugin/info")
+def kodi_plugin_info():
+    """Whether the Kodi add-on is bundled, and the matched download filename."""
+    src = _kodi_plugin_src_dir()
+    return {
+        "available": src is not None,
+        "version": APP_VERSION,
+        "addon_id": KODI_ADDON_ID,
+        "filename": f"{KODI_ADDON_ID}-{APP_VERSION}.zip",
+    }
+
+
+@router.get("/kodi-plugin")
+def download_kodi_plugin():
+    """Download the Kodi add-on zip, version-matched to this server."""
+    src = _kodi_plugin_src_dir()
+    if src is None:
+        raise HTTPException(status_code=404, detail="Kodi add-on is not bundled with this build")
+    try:
+        data = _build_kodi_zip(src)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to build Kodi add-on zip")
+        raise HTTPException(status_code=500, detail=f"Failed to build Kodi add-on: {exc}")
+    filename = f"{KODI_ADDON_ID}-{APP_VERSION}.zip"
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

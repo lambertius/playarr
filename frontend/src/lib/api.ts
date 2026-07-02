@@ -31,9 +31,34 @@ import type {
   ArtistConflict, MbidStats,
   ArtworkStats, ArtworkEntitiesResponse, ArtworkRepairResult,
   EntitySourcesResponse,
+  ContributionEnvelope, ContributionLogEntry,
 } from "@/types";
 
 const api = axios.create({ baseURL: "/api" });
+
+// ─── TMVDB (The Music Video DB) contribution ─────────────────
+export const tmvdbApi = {
+  test: () =>
+    api.get<{ connected: boolean; message: string; version?: string }>("/tmvdb/test").then(r => r.data),
+
+  preview: (videoId: number) =>
+    api.get<ContributionEnvelope>(`/tmvdb/preview/${videoId}`).then(r => r.data),
+
+  push: (videoId: number, force = false) =>
+    api.post<{ status: string; tmvdb_id?: string; message: string }>(
+      "/tmvdb/push", { video_id: videoId }, { params: { force } },
+    ).then(r => r.data),
+
+  pushBulk: (videoIds: number[], force = false) =>
+    api.post<{ submitted: number; failed: number; skipped: number; not_found: number }>(
+      "/tmvdb/push/bulk", { video_ids: videoIds }, { params: { force } },
+    ).then(r => r.data),
+
+  contributions: (videoId?: number, limit = 100) =>
+    api.get<ContributionLogEntry[]>("/tmvdb/contributions", {
+      params: { ...(videoId != null ? { video_id: videoId } : {}), limit },
+    }).then(r => r.data),
+};
 
 export interface FormatResolution {
   height: number;
@@ -82,6 +107,9 @@ export const libraryApi = {
 
   snapshots: (videoId: number) =>
     api.get<MetadataSnapshot[]>(`/library/${videoId}/snapshots`).then(r => r.data),
+
+  confirmFields: (videoId: number, fields?: string[]) =>
+    api.post<{ verified: string[] }>(`/library/${videoId}/confirm-fields`, { fields }).then(r => r.data),
 
   nav: (videoId: number, sort?: { sort_by?: string; sort_dir?: string }) =>
     api.get<{ prev_id: number | null; next_id: number | null; random_id: number | null }>(
@@ -255,14 +283,22 @@ export const jobsApi = {
 
 // ─── Playback URLs ────────────────────────────────────────
 export const playbackApi = {
-  streamUrl: (videoId: number) => `/api/playback/stream/${videoId}`,
-  videoOnlyStreamUrl: (videoId: number) => `/api/playback/stream-video-only/${videoId}`,
+  streamUrl: (videoId: number, transcode = false) =>
+    `/api/playback/stream/${videoId}${transcode ? "?transcode=1" : ""}`,
+  videoOnlyStreamUrl: (videoId: number, transcode = false) =>
+    `/api/playback/stream-video-only/${videoId}${transcode ? "?transcode=1" : ""}`,
   previewUrl: (videoId: number) => `/api/playback/preview/${videoId}`,
   posterUrl: (videoId: number) => `/api/playback/poster/${videoId}`,
   artworkUrl: (videoId: number, assetType: string) => `/api/playback/artwork/${videoId}/${assetType}`,
 
   recordHistory: (videoId: number, durationWatched: number) =>
     api.post(`/playback/history/${videoId}`, null, { params: { duration_watched: durationWatched } }).then(r => r.data),
+
+  clientMetrics: (m: {
+    video_id?: number | null; mode?: string;
+    dropped?: number; total?: number; stalls?: number; waiting_ms?: number;
+    buffered_ahead?: number | null;
+  }) => api.post("/playback/client-metrics", m).then(r => r.data),
 
   killStreams: () =>
     api.post("/playback/kill-streams").then(r => r.data),
@@ -283,6 +319,17 @@ export const playbackApi = {
 
   artworkIds: () =>
     api.get<{ videoId: number; type: string }[]>("/playback/artwork-ids").then(r => r.data),
+};
+
+// ─── Preferences (server-stored client UI prefs) ──────────
+export const prefApi = {
+  /** Fetch all preference groups as { name: value }. */
+  getAll: () =>
+    api.get<Record<string, unknown>>("/preferences").then(r => r.data),
+
+  /** Create/replace a single preference group with an arbitrary JSON value. */
+  set: (name: string, value: unknown) =>
+    api.put<{ name: string; value: unknown }>(`/preferences/${name}`, { value }).then(r => r.data),
 };
 
 // ─── Settings ─────────────────────────────────────────────
@@ -347,6 +394,13 @@ export const settingsApi = {
 
   archiveStreamUrl: (path: string) =>
     `/api/playback/stream-archive?path=${encodeURIComponent(path)}`,
+
+  kodiPluginInfo: () =>
+    api.get<{ available: boolean; version: string; addon_id: string; filename: string }>(
+      "/settings/kodi-plugin/info",
+    ).then(r => r.data),
+
+  kodiPluginDownloadUrl: () => "/api/settings/kodi-plugin",
 };
 
 // ─── Stats ────────────────────────────────────────────────

@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -64,17 +64,44 @@ def _quality_bucket_range(bucket: str) -> tuple[int, int] | None:
     return None
 
 
-def _weighted_shuffle(tracks: list[dict]) -> list[dict]:
+# "Party like it's…" era weighting.  A video's weight halves for every
+# ERA_HALFLIFE_YEARS it sits before the target year, giving a gradual fall-off
+# so era-appropriate tracks cluster at the front of the queue.  Videos with no
+# known year stay in the pool but at a low fixed weight.
+ERA_HALFLIFE_YEARS = 10.0
+ERA_NULL_YEAR_WEIGHT = 0.05
+
+
+def _era_weight(year: Optional[int], target_year: int) -> float:
+    """Weight a video by how close its year is to *target_year* (older = lower).
+
+    Future videos are filtered out before this runs, so distance is clamped to
+    ``>= 0``.  Unknown years get a small constant weight.
+    """
+    if year is None:
+        return ERA_NULL_YEAR_WEIGHT
+    distance = max(0, target_year - year)
+    return 0.5 ** (distance / ERA_HALFLIFE_YEARS)
+
+
+def _weighted_shuffle(tracks: list[dict], era_weights: Optional[dict[int, float]] = None) -> list[dict]:
     """Weighted shuffle: items with higher playCount are pushed toward the end.
 
-    Weight = 1 / (1 + playCount).  At each step we pick from the remaining
+    Base weight = 1 / (1 + playCount).  At each step we pick from the remaining
     items using these weights, so unplayed tracks are strongly favoured for
-    early positions.
+    early positions.  When *era_weights* is supplied (the "party like it's…"
+    feature), each track's weight is multiplied by its era weight so videos
+    closest to the target year are favoured for the front of the queue.
     """
     remaining = list(tracks)
     result: list[dict] = []
     while remaining:
-        weights = [1.0 / (1 + t.get("playCount", 0)) for t in remaining]
+        weights = []
+        for t in remaining:
+            w = 1.0 / (1 + t.get("playCount", 0))
+            if era_weights is not None:
+                w *= era_weights.get(t["videoId"], 1.0)
+            weights.append(w)
         # random.choices returns a list; we pick one item per iteration
         chosen = random.choices(remaining, weights=weights, k=1)[0]
         result.append(chosen)
@@ -101,8 +128,8 @@ def list_videos(
     song_rating: Optional[int] = Query(None, description="Filter by song rating value"),
     video_rating: Optional[int] = Query(None, description="Filter by video rating value"),
     quality: Optional[str] = Query(None, description="Filter by quality bucket: 360p, 480p, 720p, 1080p, 2K, 4K"),
-    sort_by: str = Query("artist", pattern="^(artist|title|year|created_at|updated_at)$"),
-    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
+    sort_by: Optional[str] = Query(None, pattern="^(artist|title|year|created_at|updated_at)$"),
+    sort_dir: Optional[str] = Query(None, pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
     """List video items with pagination, search, and filters."""
@@ -190,7 +217,15 @@ def list_videos(
     total = query.count()
     total_pages = math.ceil(total / page_size) if total > 0 else 1
 
-    # Sorting
+    # Sorting — when the client omits sort, fall back to the saved library
+    # preference so a fresh browser and the Kodi add-on order alike.
+    if sort_by is None or sort_dir is None:
+        from app.routers.preferences import get_preference
+        _lib = get_preference(db, "library", {}) or {}
+        sort_by = sort_by or _lib.get("sort") or "artist"
+        sort_dir = sort_dir or _lib.get("dir") or "asc"
+    if sort_by not in ("artist", "title", "year", "created_at", "updated_at"):
+        sort_by = "artist"
     sort_col = getattr(VideoItem, sort_by, VideoItem.artist)
     if sort_dir == "desc":
         sort_col = sort_col.desc()
@@ -318,10 +353,11 @@ def party_mode(
     exclude_albums: Optional[str] = Query(None, description="Comma-separated album names to exclude"),
     min_song_rating: Optional[int] = Query(None, description="Minimum song rating (inclusive)"),
     min_video_rating: Optional[int] = Query(None, description="Minimum video rating (inclusive)"),
+    party_year: Optional[int] = Query(None, description="\"Party like it's…\" target year: exclude videos newer than this and weight the queue toward this era"),
     db: Session = Depends(get_db),
 ):
     """Return all matching video IDs shuffled randomly for party mode queue."""
-    query = db.query(VideoItem.id, VideoItem.artist, VideoItem.title, VideoItem.version_type, QualitySignature.duration_seconds).outerjoin(QualitySignature, QualitySignature.video_id == VideoItem.id)
+    query = db.query(VideoItem.id, VideoItem.artist, VideoItem.title, VideoItem.version_type, VideoItem.year, QualitySignature.duration_seconds).outerjoin(QualitySignature, QualitySignature.video_id == VideoItem.id)
 
     # --- Inclusion filters (same as list_videos) ---
     if search:
@@ -349,37 +385,59 @@ def party_mode(
         query = query.filter(VideoItem.video_rating == video_rating)
 
     # --- Exclusion filters ---
-    if exclude_version_types:
-        excluded = [v.strip() for v in exclude_version_types.split(",") if v.strip()]
-        if excluded:
-            query = query.filter(~VideoItem.version_type.in_(excluded))
-    if exclude_artists:
-        for a in exclude_artists.split(","):
-            a = a.strip()
-            if a:
-                query = query.filter(~VideoItem.artist.ilike(f"%{a}%"))
-    if exclude_genres:
-        excluded_genres = [g.strip() for g in exclude_genres.split(",") if g.strip()]
-        if excluded_genres:
-            from sqlalchemy import select
-            excluded_ids = (
-                select(video_genres.c.video_id)
-                .join(Genre, Genre.id == video_genres.c.genre_id)
-                .where(Genre.name.in_(excluded_genres))
-            )
-            query = query.filter(~VideoItem.id.in_(excluded_ids))
-    if exclude_albums:
-        for alb in exclude_albums.split(","):
-            alb = alb.strip()
-            if alb:
-                query = query.filter(~VideoItem.album.ilike(f"%{alb}%"))
-    if min_song_rating is not None:
-        query = query.filter(
-            or_(VideoItem.song_rating >= min_song_rating, VideoItem.song_rating.is_(None))
+    # When the client omits an exclusion param, fall back to the saved
+    # party-mode preference so every client (incl. the Kodi add-on) inherits
+    # the filters configured in the web UI.  An explicit param always wins.
+    from app.routers.preferences import get_preference
+    _saved = get_preference(db, "partyExclusions", {}) or {}
+
+    # "Party like it's…" — an explicit party_year always wins; otherwise fall
+    # back to the saved partyEra preference so the Kodi add-on inherits it too.
+    eff_party_year = party_year
+    if eff_party_year is None:
+        _era = get_preference(db, "partyEra", {}) or {}
+        if _era.get("enabled") and _era.get("year"):
+            try:
+                eff_party_year = int(_era["year"])
+            except (TypeError, ValueError):
+                eff_party_year = None
+
+    if eff_party_year is not None:
+        # Never play anything past the target year; unknown years stay in the
+        # pool (we can't confirm they're newer) but get a low era weight below.
+        query = query.filter(or_(VideoItem.year <= eff_party_year, VideoItem.year.is_(None)))
+
+    def _csv(val):
+        return [v.strip() for v in val.split(",") if v.strip()]
+
+    ex_version_types = _csv(exclude_version_types) if exclude_version_types else list(_saved.get("version_types") or [])
+    ex_artists = _csv(exclude_artists) if exclude_artists else list(_saved.get("artists") or [])
+    ex_genres = _csv(exclude_genres) if exclude_genres else list(_saved.get("genres") or [])
+    ex_albums = _csv(exclude_albums) if exclude_albums else list(_saved.get("albums") or [])
+    eff_min_song = min_song_rating if min_song_rating is not None else _saved.get("min_song_rating")
+    eff_min_video = min_video_rating if min_video_rating is not None else _saved.get("min_video_rating")
+
+    if ex_version_types:
+        query = query.filter(~VideoItem.version_type.in_(ex_version_types))
+    for a in ex_artists:
+        query = query.filter(~VideoItem.artist.ilike(f"%{a}%"))
+    if ex_genres:
+        from sqlalchemy import select
+        excluded_ids = (
+            select(video_genres.c.video_id)
+            .join(Genre, Genre.id == video_genres.c.genre_id)
+            .where(Genre.name.in_(ex_genres))
         )
-    if min_video_rating is not None:
+        query = query.filter(~VideoItem.id.in_(excluded_ids))
+    for alb in ex_albums:
+        query = query.filter(~VideoItem.album.ilike(f"%{alb}%"))
+    if eff_min_song is not None:
         query = query.filter(
-            or_(VideoItem.video_rating >= min_video_rating, VideoItem.video_rating.is_(None))
+            or_(VideoItem.song_rating >= eff_min_song, VideoItem.song_rating.is_(None))
+        )
+    if eff_min_video is not None:
+        query = query.filter(
+            or_(VideoItem.video_rating >= eff_min_video, VideoItem.video_rating.is_(None))
         )
 
     items = query.all()
@@ -414,11 +472,18 @@ def party_mode(
         for item in items
     ]
 
+    # When "party like it's…" is active, bias the queue toward the target era:
+    # videos closest to the target year are favoured for the front, with a
+    # gradual fall-off the further back they go.
+    era_weights = None
+    if eff_party_year is not None:
+        era_weights = {item.id: _era_weight(item.year, eff_party_year) for item in items}
+
     # Weighted shuffle: tracks with higher play counts get lower weight
     # (less likely to appear early in the queue).
     # Weight = 1 / (1 + play_count) so unplayed tracks have weight 1.0,
     # a track played 12 times has weight ~0.077.
-    tracks = _weighted_shuffle(tracks)
+    tracks = _weighted_shuffle(tracks, era_weights=era_weights)
     return {"tracks": tracks, "total": len(tracks)}
 
 
@@ -1502,12 +1567,18 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
         item.original_title = update.original_title
     if update.review_status is not None:
         item.review_status = update.review_status
+    from datetime import datetime as _dt, timezone as _tz
+    _now = _dt.now(_tz.utc)
     if update.song_rating is not None:
         item.song_rating = update.song_rating
         item.song_rating_set = True if update.song_rating_set is None else update.song_rating_set
+        item.song_rating_by = _uid
+        item.song_rating_at = _now
     if update.video_rating is not None:
         item.video_rating = update.video_rating
         item.video_rating_set = True if update.video_rating_set is None else update.video_rating_set
+        item.video_rating_by = _uid
+        item.video_rating_at = _now
 
     # MusicBrainz IDs
     _id_fields_changed = []
@@ -1581,6 +1652,22 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
             fpu[f] = _uid
         item.field_provenance_users = fpu
         _fp_flag(item, "field_provenance_users")
+
+        # Track when each field was last set
+        fpa = dict(item.field_provenance_at or {})
+        _now_iso = _now.isoformat()
+        for f in _manually_changed:
+            fpa[f] = _now_iso
+        item.field_provenance_at = fpa
+        _fp_flag(item, "field_provenance_at")
+
+        # A manual edit supersedes any prior verification of those fields
+        if item.field_verifications:
+            fv = dict(item.field_verifications)
+            for f in _manually_changed:
+                fv.pop(f, None)
+            item.field_verifications = fv
+            _fp_flag(item, "field_verifications")
 
         item.last_edited_by = _uid
 
@@ -1687,6 +1774,29 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
 
     # Return the same rich response as GET /{video_id}
     return get_video(video_id, db)
+
+
+@router.post("/{video_id}/confirm-fields")
+def confirm_fields(video_id: int, body: dict = Body(default={}), db: Session = Depends(get_db)):
+    """Mark fields as human-verified (confirming auto values without editing).
+
+    Body: {"fields": ["artist", "title", ...]} — omit to confirm all core fields.
+    This records the strong "human_verified" trust signal for contributions.
+    """
+    item = db.query(VideoItem).get(video_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    from app.provenance import mark_fields_verified
+    from app.user_identity import get_instance_user_id
+    from sqlalchemy.orm.attributes import flag_modified
+
+    fields = body.get("fields") if isinstance(body, dict) else None
+    marked = mark_fields_verified(item, get_instance_user_id(db), fields=fields)
+    if marked:
+        flag_modified(item, "field_verifications")
+        db.commit()
+    return {"verified": marked}
 
 
 @router.get("/{video_id}/snapshots", response_model=List[MetadataSnapshotOut])

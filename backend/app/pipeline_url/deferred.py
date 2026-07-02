@@ -255,6 +255,17 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
                                 _AT_ma.video_id == video_id,
                                 _AT_ma.is_selected == True,
                             ).first() is not None
+                            # Auto-select best thumbnail if thumbnails exist but none selected
+                            if not _has_thumb:
+                                _best_t = (
+                                    _fdb.query(_AT_ma)
+                                    .filter(_AT_ma.video_id == video_id)
+                                    .order_by(_AT_ma.score_overall.desc())
+                                    .first()
+                                )
+                                if _best_t:
+                                    _best_t.is_selected = True
+                                    _has_thumb = True
                             if _needs_poster and _needs_thumb:
                                 _clear = _has_poster and _has_thumb
                             elif _needs_poster:
@@ -427,6 +438,7 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
         db = SessionLocal()
         try:
             from app.pipeline_url.ai.scene_analysis import analyze_scenes
+            from app.models import VideoItem
             analyze_scenes(db, video_id)
             _mark_processing_state(db, video_id, "scenes_analyzed", method="scene_analysis")
             _mark_processing_state(db, video_id, "thumbnail_selected", method="scene_analysis")
@@ -440,7 +452,6 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
             # a library clear + re-scan cycle (fallback discovery).
             try:
                 import os as _os
-                from app.models import VideoItem
                 from app.ai.models import AIThumbnail
                 import shutil as _shutil
 

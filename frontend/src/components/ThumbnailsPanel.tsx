@@ -8,6 +8,7 @@ import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
 import { aiApi, playbackApi } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
+import { getPanelPrefs, patchPanelPrefs } from "@/lib/panelPrefs";
 
 interface ThumbnailsPanelProps {
   videoId: number;
@@ -17,8 +18,8 @@ interface ThumbnailsPanelProps {
 export function ThumbnailsPanel({ videoId, processingState }: ThumbnailsPanelProps) {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [expanded, setExpandedRaw] = useState(() => localStorage.getItem("thumbnails_expanded") === "true");
-  const setExpanded = useCallback((v: boolean) => { localStorage.setItem("thumbnails_expanded", String(v)); setExpandedRaw(v); }, []);
+  const [expanded, setExpandedRaw] = useState(() => getPanelPrefs().thumbnailsExpanded);
+  const setExpanded = useCallback((v: boolean) => { patchPanelPrefs({ thumbnailsExpanded: v }); setExpandedRaw(v); }, []);
   const [applyToPoster, setApplyToPoster] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);

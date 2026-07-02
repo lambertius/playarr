@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useRef, useState, memo } from "react";
-import { Play, Monitor, Maximize, X } from "lucide-react";
+import ReactDOM from "react-dom";
+import { Play, Monitor, Maximize, X, ListPlus, Star } from "lucide-react";
 import { Tooltip } from "@/components/Tooltip";
 import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
 import { playbackApi, libraryApi } from "@/lib/api";
+import { usePlaybackDiagnostics } from "@/hooks/usePlaybackDiagnostics";
+import { useUpdateVideo } from "@/hooks/queries";
+import { PlaylistPicker } from "@/components/PlaylistPicker";
+import { useToast } from "@/components/Toast";
 import { FullscreenControls } from "@/components/FullscreenControls";
 import type { VideoItemDetail } from "@/types";
 
@@ -93,7 +98,17 @@ const ArtworkCell = memo(function ArtworkCell({ cell, size, fadeDuration }: { ce
   );
 });
 
-const ArtworkBackground = memo(function ArtworkBackground() {
+export type PlaybackProfile = "browser" | "tv" | "cast";
+
+const ArtworkBackground = memo(function ArtworkBackground({ profile = "browser" }: { profile?: PlaybackProfile }) {
+  // Per-context motion budget.  Chrome tab-casting re-encodes the whole rendered
+  // tab, so any background motion becomes CPU + bandwidth — the cast profile
+  // therefore renders a STATIC grid (no scroll, no tile swaps).  TVs have weak
+  // GPUs that handle 3D transforms (flip/spin) poorly, so the tv profile keeps
+  // the cheap translateY scroll + swaps but forces plain opacity fades.
+  const staticGrid = profile === "cast";
+  const forceFade = profile !== "browser";
+
   const artworkSize = useArtworkSettings((s) => s.artworkSize);
   const scrollDuration = useArtworkSettings((s) => s.scrollDuration);
   const changeRate = useArtworkSettings((s) => s.changeRate);
@@ -103,22 +118,29 @@ const ArtworkBackground = memo(function ArtworkBackground() {
   const artChangeCount = useArtworkSettings((s) => s.artChangeCount);
   const artChangeStyle = useArtworkSettings((s) => s.artChangeStyle);
 
-  // Compute columns to fill viewport width
+  // Measure the grid container (not the window) so the grid fills whatever
+  // canvas it's rendered into — including TV mode's fixed 16:9 render canvas
+  // that's CSS-scaled to the screen.  ResizeObserver also reacts to the TV
+  // resolution changing without a window resize.
   const containerRef = useRef<HTMLDivElement>(null);
-  const [cols, setCols] = useState(6);
+  const [gridDims, setGridDims] = useState({
+    w: typeof window !== "undefined" ? window.innerWidth : 1280,
+    h: typeof window !== "undefined" ? window.innerHeight : 800,
+  });
 
   useEffect(() => {
-    const update = () => {
-      const w = containerRef.current?.clientWidth ?? window.innerWidth;
-      setCols(Math.max(1, Math.ceil(w / artworkSize)));
-    };
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () =>
+      setGridDims({ w: el.clientWidth || window.innerWidth, h: el.clientHeight || window.innerHeight });
     update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, [artworkSize]);
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
-  // Rows: fill viewport height, then double for seamless loop
-  const viewH = typeof window !== "undefined" ? window.innerHeight : 800;
+  const cols = Math.max(1, Math.ceil(gridDims.w / artworkSize));
+  const viewH = gridDims.h;
   const rowsNeeded = Math.max(4, Math.ceil(viewH / artworkSize) + 2);
   const CELL_COUNT = cols * rowsNeeded;
 
@@ -182,7 +204,7 @@ const ArtworkBackground = memo(function ArtworkBackground() {
     // Preload the first screenful of unique images before revealing the grid.
     // We decode a subset (visible rows * cols) so the browser has pixel data
     // ready before the scroll animation starts — eliminates pop-in jank.
-    const visibleCount = Math.min(CELL_COUNT, cols * Math.ceil((typeof window !== "undefined" ? window.innerHeight : 800) / artworkSize));
+    const visibleCount = Math.min(CELL_COUNT, cols * Math.ceil(viewH / artworkSize));
     const uniqueUrls = [...new Set(initial.slice(0, visibleCount).map((c) => c.url))];
     let loaded = 0;
     const threshold = Math.ceil(uniqueUrls.length * 0.6);
@@ -231,6 +253,7 @@ const ArtworkBackground = memo(function ArtworkBackground() {
   // Pauses when the tab is hidden to avoid wasted CPU/GPU work.
   useEffect(() => {
     if (artworkPool.length === 0) return;
+    if (staticGrid) return;  // cast profile: no tile swaps (minimise cast-encode motion)
     let alive = true;
     let outerTimeout: ReturnType<typeof setTimeout>;
     const fadeTimeouts = new Set<ReturnType<typeof setTimeout>>();
@@ -280,6 +303,7 @@ const ArtworkBackground = memo(function ArtworkBackground() {
         // Resolve transition style
         const styleChoices: TransitionKind[] = ["fade", "flip", "spin"];
         const pickTransition = (): TransitionKind => {
+          if (forceFade) return "fade";  // tv/cast: avoid heavy 3D flip/spin
           const s = artChangeStyleRef.current;
           if (s === "random") return styleChoices[Math.floor(Math.random() * styleChoices.length)];
           return s;
@@ -336,42 +360,59 @@ const ArtworkBackground = memo(function ArtworkBackground() {
       clearInterval(decayInterval);
       fadeTimeouts.forEach(clearTimeout);
     };
-  }, [artworkPool, pickNextUrl]);
+  }, [artworkPool, pickNextUrl, staticGrid, forceFade]);
 
-  if (grid.length === 0) return <div className="absolute inset-0 bg-black" />;
-
-  const cells = [...grid, ...grid];
+  // The container (with containerRef) must ALWAYS render — even before any
+  // artwork has loaded — so the ResizeObserver attaches and measures the real
+  // canvas.  Returning a different element in the empty state meant the
+  // observer never ran and the grid stayed sized to the initial window, which
+  // is wrong inside TV mode's scaled render canvas.
+  // The static (cast) grid only needs a single screenful — the doubled copy
+  // exists solely to make the translateY scroll seamless, which cast doesn't use.
+  const cells = grid.length > 0 ? (staticGrid ? grid : [...grid, ...grid]) : [];
 
   return (
     <div ref={containerRef} className="absolute inset-0 overflow-hidden bg-black">
-      <div
-        className="animate-scroll-down"
-        style={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${cols}, ${artworkSize}px)`,
-          gridAutoRows: `${artworkSize}px`,
-          gap: "4px",
-          justifyContent: "center",
-          animationDuration: `${scrollDuration}s`,
-          willChange: "transform",
-          opacity: gridReady ? 1 : 0,
-          transition: "opacity 0.6s ease-in",
-          animationPlayState: gridReady ? "running" : "paused",
-        }}
-      >
-        {cells.map((cell, i) =>
-          cell ? (
-            <ArtworkCell key={i} cell={cell} size={artworkSize} fadeDuration={fadeDuration} />
-          ) : null,
-        )}
-      </div>
+      {cells.length > 0 && (
+        <div
+          className={staticGrid ? undefined : "animate-scroll-down"}
+          style={{
+            display: "grid",
+            gridTemplateColumns: `repeat(${cols}, ${artworkSize}px)`,
+            gridAutoRows: `${artworkSize}px`,
+            gap: "4px",
+            justifyContent: "center",
+            ...(staticGrid
+              ? {}
+              : {
+                  animationDuration: `${scrollDuration}s`,
+                  willChange: "transform",
+                  animationPlayState: gridReady ? "running" : "paused",
+                }),
+            opacity: gridReady ? 1 : 0,
+            transition: "opacity 0.6s ease-in",
+          }}
+        >
+          {cells.map((cell, i) =>
+            cell ? (
+              <ArtworkCell key={i} cell={cell} size={artworkSize} fadeDuration={fadeDuration} />
+            ) : null,
+          )}
+        </div>
+      )}
       {/* Dark overlay to keep content readable */}
       <div className="absolute inset-0 bg-black/60" />
     </div>
   );
 });
 
-export function NowPlayingPage() {
+export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0 }: { profile?: PlaybackProfile; tvCanvasHeight?: number } = {}) {
+  // TV and Cast both drive the <video> as a single combined (self-clocked)
+  // stream; only the browser profile uses the dual audio-master/video-only split.
+  const tvMode = profile !== "browser";
+  // backdrop-filter blur is extremely expensive on TV GPUs and forces a full
+  // re-encode of the casting tab — disable it outside the browser profile.
+  const allowBlur = profile === "browser";
   const videoRef = useRef<HTMLVideoElement>(null);
   const outerRef = useRef<HTMLDivElement>(null);
   const queue = usePlaybackStore((s) => s.queue);
@@ -390,11 +431,112 @@ export function NowPlayingPage() {
   const overlayDuration = useArtworkSettings((s) => s.overlayDuration);
   const overlaySize = useArtworkSettings((s) => s.overlaySize);
   const queueClock = useArtworkSettings((s) => s.queueClock);
+  const queueHideMode = useArtworkSettings((s) => s.queueHideMode);
+  const queueHideDelay = useArtworkSettings((s) => s.queueHideDelay);
+  const tvTranscode = useArtworkSettings((s) => s.tvTranscode);
+  const browserTranscode = useArtworkSettings((s) => s.browserTranscode);
+  const castTranscode = useArtworkSettings((s) => s.castTranscode);
+  // On-the-fly compatibility transcode is selected per profile, so the PC only
+  // pays the encode cost for the context actually in use.
+  const transcode = profile === "cast" ? castTranscode : profile === "tv" ? tvTranscode : browserTranscode;
   const currentTime = usePlaybackStore((s) => s.currentTime);
   const fullscreenMode = usePlaybackStore((s) => s.fullscreenMode);
   const setFullscreenMode = usePlaybackStore((s) => s.setFullscreenMode);
   const individualTrack = usePlaybackStore((s) => s.individualTrack);
   const stopIndividual = usePlaybackStore((s) => s.stopIndividual);
+
+  // TV/kiosk mode: the <video> plays a single combined stream (its own audio),
+  // is its own master clock, and advances the queue itself.
+  const next = usePlaybackStore((s) => s.next);
+  const repeat = usePlaybackStore((s) => s.repeat);
+  const setCurrentTime = usePlaybackStore((s) => s.setCurrentTime);
+  const setDuration = usePlaybackStore((s) => s.setDuration);
+  const [needsGesture, setNeedsGesture] = useState(false);
+
+  const videoSrc = (videoId: number) =>
+    tvMode
+      ? playbackApi.streamUrl(videoId, transcode)
+      : playbackApi.videoOnlyStreamUrl(videoId, transcode);
+
+  // Playback-health diagnostics → server log (frame drops, stalls, buffer).
+  usePlaybackDiagnostics(videoRef, { videoId: track?.videoId ?? null, mode: profile });
+
+  // Attempt autoplay-with-sound; only a genuine autoplay block needs the
+  // one-tap prompt — transient AbortErrors during a fresh load() are retried
+  // by onCanPlay.
+  const tryTvPlay = useCallback(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    el.play()
+      .then(() => setNeedsGesture(false))
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === "NotAllowedError") setNeedsGesture(true);
+      });
+  }, []);
+
+  const handleTvCanPlay = useCallback(() => {
+    if (tvMode) tryTvPlay();
+  }, [tvMode, tryTvPlay]);
+
+  const handleTvTimeUpdate = useCallback(() => {
+    const el = videoRef.current;
+    if (el) setCurrentTime(el.currentTime);
+  }, [setCurrentTime]);
+
+  const handleTvEnded = useCallback(() => {
+    // TV/cast owns the clock, so it must replicate AudioManager's repeat-one
+    // handling itself — store.next() always advances and would otherwise turn
+    // "repeat one" into "play next" (and stop a single-track queue entirely).
+    const el = videoRef.current;
+    if (repeat === "one" && el) {
+      el.currentTime = 0;
+      el.play().catch(() => {});
+      return;
+    }
+    const activeId = (s: ReturnType<typeof usePlaybackStore.getState>) =>
+      s.individualTrack?.videoId ??
+      (s.currentIndex >= 0 && s.currentIndex < s.queue.length
+        ? s.queue[s.currentIndex]?.videoId ?? null
+        : null);
+    const prevId = activeId(usePlaybackStore.getState());
+    next();
+    // If next() didn't change the media (single-track queue, a duplicate videoId,
+    // or a re-pick) the src effect — keyed on videoId — won't re-fire, so the
+    // video would freeze on its last frame. Replay imperatively. But only if
+    // next() chose to keep playing: when it stops at the end of a queue
+    // (isPlaying:false), respect that and let playback end.
+    const after = usePlaybackStore.getState();
+    if (el && after.isPlaying && activeId(after) === prevId) {
+      el.currentTime = 0;
+      el.play().catch(() => {});
+    }
+  }, [next, repeat]);
+
+  const startTv = useCallback(() => { tryTvPlay(); }, [tryTvPlay]);
+
+  // TV mode drives the persistent <video> imperatively so tracks advance
+  // continuously: kill the previous stream, load the next, and play — mirroring
+  // AudioManager's proven desktop transition.  The element is NOT keyed by
+  // track in TV mode, so it keeps its autoplay permission across tracks.
+  const prevTvVideoIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!tvMode) {
+      prevTvVideoIdRef.current = null;
+      return;
+    }
+    const el = videoRef.current;
+    if (!el || !track) return;
+    if (track.videoId === prevTvVideoIdRef.current) return;
+    // Changing src aborts the previous request, which the server cleans up on
+    // disconnect (the old track's FFmpeg is killed when its generator ends).
+    // We deliberately do NOT call killStreams() here: it kills *all* active
+    // streams and races with the stream we're about to start, killing the new
+    // track's FFmpeg and stalling playback (the next track re-requests).
+    prevTvVideoIdRef.current = track.videoId;
+    el.src = playbackApi.streamUrl(track.videoId, transcode);
+    el.load();
+    tryTvPlay();
+  }, [tvMode, track?.videoId, tryTvPlay, transcode]);
 
   const [videoHovered, setVideoHovered] = useState(false);
   const [_videoAspect, setVideoAspect] = useState("16 / 9");
@@ -412,6 +554,57 @@ export function NowPlayingPage() {
 
   const isFullscreen = fullscreenMode !== "off";
   const isVideoOnly = fullscreenMode === "video";
+
+  // ── Queue auto-hide (Now Playing, all layouts) ──
+  // "per-song": fades out after a delay, reappears at the start of each track.
+  // "auto": fades out after a delay, only mouse movement brings it back.
+  // Both reveal on mouse movement and re-arm the timer (like the play bar).
+  const [queueVisible, setQueueVisible] = useState(true);
+  const queueHideTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const lastMousePosRef = useRef<{ x: number; y: number } | null>(null);
+  const queueHideActive = queueHideMode !== "off";
+
+  const scheduleQueueHide = useCallback(() => {
+    if (!queueHideActive) {
+      setQueueVisible(true);
+      return;
+    }
+    setQueueVisible(true);
+    if (queueHideTimerRef.current) clearTimeout(queueHideTimerRef.current);
+    queueHideTimerRef.current = setTimeout(
+      () => setQueueVisible(false),
+      Math.max(1, queueHideDelay) * 1000,
+    );
+  }, [queueHideActive, queueHideDelay]);
+
+  useEffect(() => {
+    if (!queueHideActive) {
+      setQueueVisible(true);
+      return;
+    }
+    const onMove = (e: MouseEvent) => {
+      // Only treat it as real movement if the pointer actually changed
+      // position. Browsers fire synthetic mousemove events when animated
+      // content (the scrolling artwork grid) moves under a stationary cursor —
+      // without this guard those reset the timer and the queue never auto-hides
+      // on a TV (where the cursor never moves).
+      const last = lastMousePosRef.current;
+      if (last && last.x === e.clientX && last.y === e.clientY) return;
+      lastMousePosRef.current = { x: e.clientX, y: e.clientY };
+      scheduleQueueHide();
+    };
+    window.addEventListener("mousemove", onMove);
+    scheduleQueueHide();
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      if (queueHideTimerRef.current) clearTimeout(queueHideTimerRef.current);
+    };
+  }, [queueHideActive, scheduleQueueHide]);
+
+  // Per-song mode: reveal again at the start of every new track.
+  useEffect(() => {
+    if (queueHideActive && queueHideMode === "per-song") scheduleQueueHide();
+  }, [track?.videoId, queueHideActive, queueHideMode, scheduleQueueHide]);
 
   // ── Sync store when native fullscreen is exited via Escape / browser chrome ──
   useEffect(() => {
@@ -472,19 +665,25 @@ export function NowPlayingPage() {
   // track change. The browser closes HTTP connections when elements are
   // destroyed, and the server's generator finally-block kills FFmpeg.
 
-  // Sync play/pause with store
+  // Sync play/pause with store. Needed in both modes (browser: video follows the
+  // audio master; tv/cast: remote/store pause must stop the self-clocked video).
+  // In tv/cast a fresh track is started by the imperative src-swap effect
+  // (load()+play()); calling play() here while that load is in flight produces a
+  // spurious AbortError, so resume only when the element is actually paused —
+  // this effect then handles pause→resume without racing the load.
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
     if (isPlaying) {
-      el.play().catch(() => {});
+      if (el.paused) el.play().catch(() => {});
     } else {
       el.pause();
     }
   }, [isPlaying]);
 
-  // Sync seek position
+  // Sync seek position (desktop only — in TV mode the video is the master)
   useEffect(() => {
+    if (tvMode) return;
     const unsub = usePlaybackStore.subscribe((state) => {
       const el = videoRef.current;
       if (!el) return;
@@ -493,17 +692,18 @@ export function NowPlayingPage() {
       }
     });
     return unsub;
-  }, []);
+  }, [tvMode]);
 
-  // Immediate sync when video starts playing
+  // Immediate sync when video starts playing (desktop only)
   const handleVideoPlaying = useCallback(() => {
+    if (tvMode) return;
     const el = videoRef.current;
     if (!el) return;
     const audioTime = usePlaybackStore.getState().currentTime;
     if (Math.abs(el.currentTime - audioTime) > 0.05) {
       el.currentTime = audioTime;
     }
-  }, []);
+  }, [tvMode]);
 
   // Detect native video aspect ratio from metadata
   const handleLoadedMetadata = useCallback(() => {
@@ -512,7 +712,11 @@ export function NowPlayingPage() {
     setVideoAspect(`${el.videoWidth} / ${el.videoHeight}`);
     setNativeWidth(el.videoWidth);
     setNativeHeight(el.videoHeight);
-  }, []);
+    // In TV mode the video carries audio and owns the clock — seed duration.
+    if (tvMode && Number.isFinite(el.duration) && el.duration > 0) {
+      setDuration(el.duration);
+    }
+  }, [tvMode, setDuration]);
 
   // ── Playlist/individual track conflict: stop individual when it ends ──
   useEffect(() => {
@@ -558,6 +762,21 @@ export function NowPlayingPage() {
     ? boxSize.w / videoAR   // wide video: fills box width, shorter
     : boxSize.h;            // narrow or 16:9: fills box height
 
+  // One-tap start prompt — only shown in TV mode when the browser blocked
+  // autoplay-with-sound (no kiosk flag / no prior gesture).
+  const tvGate = tvMode && needsGesture ? (
+    <button
+      autoFocus
+      onClick={startTv}
+      className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-6 bg-black/90 text-white focus:outline-none group"
+    >
+      <span className="flex h-28 w-28 items-center justify-center rounded-full bg-accent/20 border-2 border-accent transition-transform group-hover:scale-105 group-focus:scale-105">
+        <Play size={56} className="text-accent translate-x-1" fill="currentColor" />
+      </span>
+      <span className="text-2xl font-semibold tracking-wide">Press OK to start the party</span>
+    </button>
+  ) : null;
+
   // ── Mode 2: Video-only fullscreen ──
   if (isVideoOnly) {
     return (
@@ -565,15 +784,18 @@ export function NowPlayingPage() {
         {track ? (
           <video
             ref={videoRef}
-            key={track.videoId}
-            src={playbackApi.videoOnlyStreamUrl(track.videoId)}
+            key={tvMode ? "tv-video" : track.videoId}
+            src={tvMode ? undefined : videoSrc(track.videoId)}
             className="h-full w-full object-contain"
             autoPlay={isPlaying}
             controls={false}
             disablePictureInPicture
-            muted
+            muted={!tvMode}
             onPlaying={handleVideoPlaying}
             onLoadedMetadata={handleLoadedMetadata}
+            onCanPlay={tvMode ? handleTvCanPlay : undefined}
+            onTimeUpdate={tvMode ? handleTvTimeUpdate : undefined}
+            onEnded={tvMode ? handleTvEnded : undefined}
           />
         ) : (
           <div className="flex items-center justify-center text-white/50 text-lg">
@@ -590,8 +812,11 @@ export function NowPlayingPage() {
             opacity={queueOpacity}
             overlaySize={overlaySize}
             overlayDuration={overlayDuration}
+            allowBlur={allowBlur}
           />
         )}
+
+        {tvGate}
 
         <FullscreenControls />
       </div>
@@ -603,7 +828,7 @@ export function NowPlayingPage() {
   return (
     <div className="relative flex h-full overflow-hidden">
       {/* Animated artwork grid behind everything */}
-      <ArtworkBackground />
+      <ArtworkBackground profile={profile} />
 
       {/* Content layer — centres video + queue as a single block */}
       <div className="relative z-10 flex items-center justify-center h-full w-full p-6">
@@ -612,28 +837,42 @@ export function NowPlayingPage() {
           ref={outerRef}
           className="flex items-center justify-center w-full"
           style={{
-            height: `calc((${isFullscreen ? "100vh - 48px" : "100vh - 160px"}) * ${playbackRatio / 100})`,
+            // In TV mode the page lays out on a fixed canvas (then CSS-scaled),
+            // so size relative to the canvas height — `vh` would point at the
+            // smaller real viewport and collapse the video into a narrow band.
+            height: tvMode && tvCanvasHeight
+              ? `calc(${tvCanvasHeight}px * ${playbackRatio / 100})`
+              : `calc((${isFullscreen ? "100vh - 48px" : "100vh - 160px"}) * ${playbackRatio / 100})`,
           }}
         >
           {/* ── 16:9 bounding box — pixel-sized to always fit ── */}
           <div
-            className="relative flex items-center justify-center rounded-l-lg overflow-hidden flex-shrink-0"
-            style={{ width: boxSize.w, height: boxSize.h }}
+            className="relative flex items-center justify-center rounded-l-lg overflow-hidden flex-shrink-0 transition-transform duration-700 ease-in-out"
+            style={{
+              width: boxSize.w,
+              height: boxSize.h,
+              // When the queue hides, glide the video to screen centre (it sits
+              // left-of-centre because the queue occupies half the block width).
+              transform: queueVisible ? undefined : `translateX(${QUEUE_WIDTH / 2}px)`,
+            }}
             onMouseEnter={() => setVideoHovered(true)}
             onMouseLeave={() => setVideoHovered(false)}
           >
             {track ? (
               <video
                 ref={videoRef}
-                key={track.videoId}
-                src={playbackApi.videoOnlyStreamUrl(track.videoId)}
+                key={tvMode ? "tv-video" : track.videoId}
+                src={tvMode ? undefined : videoSrc(track.videoId)}
                 className="w-full h-full object-contain"
                 autoPlay={isPlaying}
                 controls={false}
                 disablePictureInPicture
-                muted
+                muted={!tvMode}
                 onPlaying={handleVideoPlaying}
                 onLoadedMetadata={handleLoadedMetadata}
+                onCanPlay={tvMode ? handleTvCanPlay : undefined}
+                onTimeUpdate={tvMode ? handleTvTimeUpdate : undefined}
+                onEnded={tvMode ? handleTvEnded : undefined}
               />
             ) : (
               <div className="flex items-center justify-center text-white/50 text-lg h-full w-full">
@@ -650,6 +889,7 @@ export function NowPlayingPage() {
                 opacity={queueOpacity}
                 overlaySize={overlaySize}
                 overlayDuration={overlayDuration}
+                allowBlur={allowBlur}
               />
             )}
 
@@ -680,12 +920,18 @@ export function NowPlayingPage() {
 
           {/* ── Queue panel — attached to video edge, matches video height ── */}
           <div
-            className="flex flex-col border-l border-white/10 rounded-r-lg overflow-hidden flex-shrink-0"
+            className="flex flex-col border-l border-white/10 rounded-r-lg overflow-hidden flex-shrink-0 ease-in-out"
             style={{
               width: QUEUE_WIDTH,
               height: videoRenderH,
               backgroundColor: `rgba(0, 0, 0, ${queueOpacity / 100})`,
-              backdropFilter: "blur(8px)",
+              backdropFilter: allowBlur ? "blur(8px)" : undefined,
+              opacity: queueVisible ? 1 : 0,
+              // Slide out to the right as it fades, so it clears the now-centred
+              // video; slides back in when restored.
+              transform: queueVisible ? undefined : "translateX(100%)",
+              transition: "opacity 700ms ease-in-out, transform 700ms ease-in-out",
+              pointerEvents: queueVisible ? "auto" : "none",
             }}
           >
             {/* Queue header */}
@@ -718,6 +964,8 @@ export function NowPlayingPage() {
           </div>
         </div>
       </div>
+
+      {tvGate}
 
       {/* Fullscreen hover controls (theater mode only) */}
       {isFullscreen && <FullscreenControls />}
@@ -773,9 +1021,19 @@ function ScrollingText({ text, className, overlayDuration = 30 }: { text: string
     if (!outer || !inner) return;
 
     let anim: Animation | null = null;
+    let lastOv = -1;
 
     const start = () => {
       const ov = inner.scrollHeight - outer.clientHeight;
+      // Re-run only when the measured overflow actually changes — the font size
+      // is set asynchronously (ResizeObserver in MetadataOverlay), so on a large
+      // TV canvas the first measurement happens at the default 16px before the
+      // text has grown to its final size. Without re-measuring, the one-shot
+      // check would see "fits" and never scroll.
+      if (ov === lastOv) return;
+      lastOv = ov;
+      anim?.cancel();
+      anim = null;
       if (ov <= 5) return;
 
       // Hold 5s at top, scroll for (duration - 10)s, hold 5s at bottom
@@ -793,10 +1051,14 @@ function ScrollingText({ text, className, overlayDuration = 30 }: { text: string
       );
     };
 
-    // Wait a frame for layout to settle
+    // Recompute whenever the box or text reflows (font size settles late on TV).
+    const ro = new ResizeObserver(start);
+    ro.observe(outer);
+    ro.observe(inner);
     const raf = requestAnimationFrame(start);
     return () => {
       cancelAnimationFrame(raf);
+      ro.disconnect();
       anim?.cancel();
     };
   }, [text, overlayDuration]);
@@ -818,6 +1080,7 @@ function MetadataOverlay({
   opacity,
   overlaySize,
   overlayDuration,
+  allowBlur = true,
 }: {
   detail: VideoItemDetail;
   track: PlaybackTrack;
@@ -825,6 +1088,7 @@ function MetadataOverlay({
   opacity: number;
   overlaySize: number;
   overlayDuration: number;
+  allowBlur?: boolean;
 }) {
   const artUrl = getOverlayArtworkUrl(detail);
   const genres = detail.genres?.map((g) => g.name) ?? [];
@@ -864,7 +1128,7 @@ function MetadataOverlay({
         className="flex items-stretch h-full mx-4 mb-4 rounded-lg overflow-hidden border border-white/10"
         style={{
           backgroundColor: `rgba(0, 0, 0, ${opacity / 100})`,
-          backdropFilter: "blur(12px)",
+          backdropFilter: allowBlur ? "blur(12px)" : undefined,
           fontSize: `${baseFontPx}px`,
         }}
       >
@@ -1028,6 +1292,31 @@ function QueueList({
 
 import { forwardRef } from "react";
 
+// ── Interactive 5-star rating row used inside the queue context menu ──
+function MenuStars({ value, onRate }: { value: number; onRate: (rating: number) => void }) {
+  const [hover, setHover] = useState(0);
+  const shown = hover || value;
+  return (
+    <span className="inline-flex gap-0.5" onMouseLeave={() => setHover(0)}>
+      {[1, 2, 3, 4, 5].map((s) => (
+        <button
+          key={s}
+          onClick={(e) => { e.stopPropagation(); onRate(s); }}
+          onMouseEnter={() => setHover(s)}
+          className="p-0.5 leading-none"
+          aria-label={`${s} star${s > 1 ? "s" : ""}`}
+        >
+          <Star
+            size={15}
+            className={shown >= s ? "text-accent" : "text-white/25"}
+            fill={shown >= s ? "currentColor" : "none"}
+          />
+        </button>
+      ))}
+    </span>
+  );
+}
+
 const QueueRow = forwardRef<
   HTMLDivElement,
   {
@@ -1039,13 +1328,46 @@ const QueueRow = forwardRef<
     startTime?: Date;
   }
 >(function QueueRow({ track, index, isCurrent, onPlay, onRemove, startTime }, ref) {
+  const { toast } = useToast();
+  const rate = useUpdateVideo(track.videoId);
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [playlistOpen, setPlaylistOpen] = useState(false);
+  // Current ratings, fetched lazily when the menu opens.
+  const [ratings, setRatings] = useState<{ song: number; video: number }>({ song: 0, video: 0 });
+
+  const openMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Clamp to the viewport so the menu never opens off-screen.
+    const x = Math.min(e.clientX, window.innerWidth - 232);
+    const y = Math.min(e.clientY, window.innerHeight - 150);
+    setMenuPos({ x, y });
+    setRatings({ song: 0, video: 0 });
+    libraryApi
+      .get(track.videoId)
+      .then((d) => setRatings({ song: d.song_rating ?? 0, video: d.video_rating ?? 0 }))
+      .catch(() => { /* ratings stay at 0 — user can still set them */ });
+  };
+
+  const applyRating = (kind: "song" | "video", value: number) => {
+    setRatings((r) => ({ ...r, [kind]: value }));
+    rate.mutate(
+      kind === "song"
+        ? { song_rating: value, song_rating_set: true }
+        : { video_rating: value, video_rating_set: true },
+      { onSuccess: () => toast({ type: "success", title: `${kind === "song" ? "Song" : "Video"} rating saved` }) },
+    );
+  };
+
   return (
+    <>
     <div
       ref={ref}
       className={`flex items-center gap-2 px-2 py-2 group cursor-pointer hover:bg-white/10 transition-colors ${
         isCurrent ? "bg-white/15 border-l-2 border-accent" : ""
       }`}
       onClick={onPlay}
+      onContextMenu={openMenu}
     >
       {/* Index / play icon */}
       <span className="w-5 text-center text-xs text-white/50 flex-shrink-0">
@@ -1095,5 +1417,44 @@ const QueueRow = forwardRef<
         </span>
       )}
     </div>
+
+    {/* Right-click context menu */}
+    {menuPos && ReactDOM.createPortal(
+      <div className="fixed inset-0 z-[60]" onClick={() => setMenuPos(null)} onContextMenu={(e) => { e.preventDefault(); setMenuPos(null); }}>
+        <div
+          className="absolute w-56 rounded-lg border border-white/10 bg-neutral-900/95 backdrop-blur-md py-1 shadow-xl"
+          style={{ top: menuPos.y, left: menuPos.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="px-3 py-1.5 text-[11px] text-white/40 truncate border-b border-white/10 mb-1">
+            {track.artist}{track.title ? ` — ${track.title}` : ""}
+          </div>
+          <button
+            onClick={() => { setMenuPos(null); setPlaylistOpen(true); }}
+            className="w-full px-3 py-1.5 text-left text-sm text-white/80 hover:bg-white/10 hover:text-white flex items-center gap-2"
+          >
+            <ListPlus size={14} />
+            Add to playlist…
+          </button>
+          <div className="my-1 border-t border-white/10" />
+          <div className="flex items-center justify-between px-3 py-1.5 text-sm text-white/80">
+            <span>Rate song</span>
+            <MenuStars value={ratings.song} onRate={(v) => applyRating("song", v)} />
+          </div>
+          <div className="flex items-center justify-between px-3 py-1.5 text-sm text-white/80">
+            <span>Rate video</span>
+            <MenuStars value={ratings.video} onRate={(v) => applyRating("video", v)} />
+          </div>
+        </div>
+      </div>,
+      document.body,
+    )}
+
+    <PlaylistPicker
+      open={playlistOpen}
+      videoIds={[track.videoId]}
+      onClose={() => setPlaylistOpen(false)}
+    />
+    </>
   );
 });

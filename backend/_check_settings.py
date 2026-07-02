@@ -1,5 +1,6 @@
+import os
 import sqlite3
-db = r"C:\Users\user\AppData\Roaming\Playarr\data\playarr.db"
+db = os.path.join(os.environ["APPDATA"], "Playarr", "data", "playarr.db")
 conn = sqlite3.connect(db)
 
 # List tables

@@ -11,7 +11,30 @@ import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { Tooltip } from "@/components/Tooltip";
 import { cn, formatBytes, timeAgo } from "@/lib/utils";
+import { getPref, setPref } from "@/lib/preferences";
 import type { ArchiveItem } from "@/types";
+
+// ── Archive page preferences (server-backed) ─────────────
+interface ArchivePrefs {
+  pageSize: number;
+}
+
+const K_ARCHIVE_PAGE_SIZE = "archive_page_size";
+
+function archiveLegacy(): ArchivePrefs {
+  let pageSize = 25;
+  try { const n = Number(localStorage.getItem(K_ARCHIVE_PAGE_SIZE)); if (n) pageSize = n; } catch { /* ignore */ }
+  return { pageSize };
+}
+
+function getArchivePrefs(): ArchivePrefs {
+  const fallback = archiveLegacy();
+  return { ...fallback, ...getPref<Partial<ArchivePrefs>>("archive", fallback) };
+}
+
+function patchArchivePrefs(patch: Partial<ArchivePrefs>): void {
+  setPref("archive", { ...getArchivePrefs(), ...patch });
+}
 
 // ── Reason config ───────────────────────────────────────
 type ArchiveReason = "all" | "redownload" | "trim" | "crop" | "both";
@@ -288,10 +311,7 @@ export function ArchivePage() {
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
   const [comparisonItem, setComparisonItem] = useState<ArchiveItem | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(() => {
-    const saved = localStorage.getItem("archive_page_size");
-    return saved ? Number(saved) : 25;
-  });
+  const [pageSize, setPageSize] = useState(() => getArchivePrefs().pageSize);
 
   // Filtered items
   const filtered = useMemo(() => {
@@ -458,7 +478,7 @@ export function ArchivePage() {
   }, []);
 
   const handlePageSizeChange = useCallback((size: number) => {
-    localStorage.setItem("archive_page_size", String(size));
+    patchArchivePrefs({ pageSize: size });
     setPageSize(size);
     setPage(1);
   }, []);

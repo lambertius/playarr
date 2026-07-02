@@ -217,8 +217,28 @@ class VideoItem(Base):
     # Only populated for fields set by a human editor (not automated sources)
     field_provenance_users: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Field-level timestamps — when each field was last set (ISO-8601 UTC).
+    # JSON dict: {"artist": "2026-06-20T...", "plot": "2026-06-20T...", ...}
+    # Populated for both automated and human edits so contributions carry recency.
+    field_provenance_at: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Field-level human verification — a human *confirmed* an existing value
+    # without changing it (a strong trust signal, distinct from editing).
+    # JSON dict: {"artist": {"by": "abc123", "at": "2026-06-20T...", "from": "musicbrainz"}}
+    field_verifications: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     # Last user who manually edited this video's metadata
     last_edited_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+    # Rating provenance — who set each rating and when (for cross-instance weighting)
+    song_rating_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    song_rating_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    video_rating_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    video_rating_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Fast content signature — SHA-256 of sampled file chunks + size.
+    # Cheap, deterministic exact-content key for integrity / cross-instance dedup.
+    file_checksum: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     # Video editor — exclude from future letterbox scans (false positive suppression)
     exclude_from_editor_scan: Mapped[bool] = mapped_column(
@@ -328,6 +348,17 @@ def clear_stale_enrichment_review(video: "VideoItem", db=None) -> bool:
             AIThumbnail.video_id == video.id,
             AIThumbnail.is_selected == True,  # noqa: E712
         ).first() is not None
+        # Auto-select best thumbnail if thumbnails exist but none is selected
+        if not has_thumb:
+            best = (
+                db.query(AIThumbnail)
+                .filter(AIThumbnail.video_id == video.id)
+                .order_by(AIThumbnail.score_overall.desc())
+                .first()
+            )
+            if best:
+                best.is_selected = True
+                has_thumb = True
         # Check only what was actually flagged as missing
         needs_poster = "poster" in rr
         needs_thumb = "thumbnail" in rr
@@ -495,6 +526,46 @@ class MetadataSnapshot(Base):
     )
 
     video_item: Mapped["VideoItem"] = relationship(back_populates="metadata_snapshots")
+
+
+# ---------------------------------------------------------------------------
+# ContributionLog — outbound record of metadata shared with external DBs (TMVDB)
+# ---------------------------------------------------------------------------
+
+class ContributionLog(Base):
+    """Audit trail of metadata contributions pushed to an external database.
+
+    Enables idempotency (skip re-pushing unchanged data), a trust feedback
+    loop (record what the remote accepted / what id it assigned), and dedup.
+    """
+    __tablename__ = "contribution_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # Nullable + SET NULL so the log survives deletion of the source video.
+    video_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("video_items.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+
+    # Anonymous instance identity that made the contribution (the trust anchor).
+    instance_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+
+    target: Mapped[str] = mapped_column(String(40), default="tmvdb", nullable=False)  # external DB name
+    operation: Mapped[str] = mapped_column(String(20), nullable=False)  # push | push_bulk
+
+    # Stable identity keys captured at push time (survive video deletion).
+    playarr_track_id: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    playarr_video_id: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+
+    # SHA-256 of the canonical contribution payload — used for idempotency.
+    payload_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+    status: Mapped[str] = mapped_column(String(20), nullable=False)  # submitted | failed | skipped
+    remote_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # id assigned by remote
+    response: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # raw remote response / error
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), index=True,
+    )
 
 
 # ---------------------------------------------------------------------------

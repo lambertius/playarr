@@ -1100,6 +1100,17 @@ def scan_artwork(
             AIThumbnail.video_id == v.id,
             AIThumbnail.is_selected == True,  # noqa: E712
         ).first() is not None
+        # Auto-select best thumbnail if thumbnails exist but none is selected
+        if not has_thumb:
+            best = (
+                db.query(AIThumbnail)
+                .filter(AIThumbnail.video_id == v.id)
+                .order_by(AIThumbnail.score_overall.desc())
+                .first()
+            )
+            if best:
+                best.is_selected = True
+                has_thumb = True
 
         # Artist thumb: only check if entity exists AND has a known art source
         has_artist_thumb = True  # default: no flag
@@ -1145,13 +1156,29 @@ def scan_artwork(
     for v in stale_items:
         rr = v.review_reason or ""
         all_resolved = True
+
+        def _check_thumb():
+            has = db.query(AIThumbnail.id).filter(
+                AIThumbnail.video_id == v.id,
+                AIThumbnail.is_selected == True,  # noqa: E712
+            ).first() is not None
+            if not has:
+                best = (
+                    db.query(AIThumbnail)
+                    .filter(AIThumbnail.video_id == v.id)
+                    .order_by(AIThumbnail.score_overall.desc())
+                    .first()
+                )
+                if best:
+                    best.is_selected = True
+                    return True
+            return has
+
         for slot, check_fn in [
             ("poster", lambda: db.query(MediaAsset.id).filter(
                 MediaAsset.video_id == v.id, MediaAsset.asset_type == "poster",
                 MediaAsset.status == "valid").first() is not None),
-            ("thumbnail", lambda: db.query(AIThumbnail.id).filter(
-                AIThumbnail.video_id == v.id,
-                AIThumbnail.is_selected == True).first() is not None),  # noqa: E712
+            ("thumbnail", _check_thumb),
             ("artist_thumb", lambda: db.query(MediaAsset.id).filter(
                 MediaAsset.video_id == v.id, MediaAsset.asset_type == "artist_thumb",
                 MediaAsset.status == "valid").first() is not None),
@@ -1253,6 +1280,19 @@ def approve_review_item(
         _persist_duplicate_dismissal(vi, db)
 
     _record_review_history(vi, "approved", db)
+
+    # Approving a review item is a human confirming the displayed metadata —
+    # record per-field verification of any automated values (a trust signal).
+    try:
+        from app.provenance import mark_fields_verified
+        from app.user_identity import get_instance_user_id
+        from sqlalchemy.orm.attributes import flag_modified
+        marked = mark_fields_verified(vi, get_instance_user_id(db))
+        if marked:
+            flag_modified(vi, "field_verifications")
+    except Exception:
+        pass
+
     vi.review_status = "reviewed"
     vi.review_reason = None
     vi.review_category = None

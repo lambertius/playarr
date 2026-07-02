@@ -6,10 +6,12 @@ import {
 } from "@/hooks/queries";
 import { VideoPlayer } from "@/components/VideoPlayer";
 import { playbackApi } from "@/lib/api";
+import { getLibraryPrefs } from "@/lib/libraryPrefs";
 import { MetadataEditorForm } from "@/components/MetadataEditorForm";
 import { VersionBadge, ReviewStatusBadge } from "@/components/Badges";
 import { ArtworkTiles } from "@/components/ArtworkTiles";
 import { FilePanel } from "@/components/FilePanel";
+import { ProvenancePanel } from "@/components/ProvenancePanel";
 import { ActionsPanel } from "@/components/ActionsPanel";
 import { ThumbnailsPanel } from "@/components/ThumbnailsPanel";
 import { TrackHistory } from "@/components/TrackHistory";
@@ -29,15 +31,9 @@ export function VideoDetailPage() {
   const { data: snapshots } = useSnapshots(id);
   const { data: jobs } = useJobs({ limit: 20 });
 
-  // Read library sort from localStorage so nav respects the user's chosen order
-  const libSort = (() => {
-    try {
-      return {
-        sort_by: localStorage.getItem("playarr:library:sort") ?? "artist",
-        sort_dir: localStorage.getItem("playarr:library:dir") ?? "asc",
-      };
-    } catch { return { sort_by: "artist", sort_dir: "asc" }; }
-  })();
+  // Read library sort from server prefs so nav respects the user's chosen order
+  const _libPrefs = getLibraryPrefs();
+  const libSort = { sort_by: _libPrefs.sort, sort_dir: _libPrefs.dir };
   const { data: nav } = useVideoNav(id, libSort);
 
   const videoJobs = jobs?.filter((j) => j.video_id === id) ?? [];
@@ -347,9 +343,10 @@ export function VideoDetailPage() {
           />
         </div>
 
-        {/* Right: File details */}
-        <div className="lg:col-span-1">
+        {/* Right: File details + provenance/trust */}
+        <div className="lg:col-span-1 flex flex-col gap-6">
           <FilePanel video={video} />
+          <ProvenancePanel video={video} />
         </div>
       </div>
 

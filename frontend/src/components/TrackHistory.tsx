@@ -10,6 +10,7 @@ import { ProcessingSteps } from "@/components/ProcessingSteps";
 import { PipelineStepsView, LogViewer } from "@/components/QueueComponents";
 import { useJobLog } from "@/hooks/queries";
 import { cn, timeAgo, isActiveJob } from "@/lib/utils";
+import { getPanelPrefs, patchPanelPrefs } from "@/lib/panelPrefs";
 
 interface TrackHistoryProps {
   jobs: JobSummary[];
@@ -247,8 +248,8 @@ function SnapshotTimelineEntry({
 }
 
 export function TrackHistory({ jobs, snapshots = [], processingState }: TrackHistoryProps) {
-  const [expanded, setExpandedRaw] = useState(() => localStorage.getItem("track_history_expanded") === "true");
-  const setExpanded = (v: boolean) => { localStorage.setItem("track_history_expanded", String(v)); setExpandedRaw(v); };
+  const [expanded, setExpandedRaw] = useState(() => getPanelPrefs().trackHistoryExpanded);
+  const setExpanded = (v: boolean) => { patchPanelPrefs({ trackHistoryExpanded: v }); setExpandedRaw(v); };
   const [showAll, setShowAll] = useState(false);
   const timeline = buildTimeline(jobs, snapshots);
 

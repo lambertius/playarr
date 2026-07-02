@@ -14,6 +14,7 @@ import { Tooltip } from "@/components/Tooltip";
 import { useJobTelemetry } from "@/hooks/useJobTelemetry";
 import { JobCard } from "@/components/QueueComponents";
 import { isActiveJob } from "@/lib/utils";
+import { getPref, setPref } from "@/lib/preferences";
 import type { JobSummary } from "@/types";
 
 type QueueTab = "active" | "history";
@@ -23,6 +24,41 @@ type HistorySortBy = "date_added" | "date_completed" | "artist" | "title";
 type HistorySortDir = "asc" | "desc";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+
+// ── Queue page preferences (server-backed) ──────────────
+interface QueuePrefs {
+  tab: QueueTab;
+  sourceFilter: SourceFilter;
+  historyFilter: HistoryFilter;
+  statusFilter: string | null;
+  historySortBy: HistorySortBy;
+  historySortDir: HistorySortDir;
+  activePageSize: number;
+  historyPageSize: number;
+}
+
+function queueLegacy(): QueuePrefs {
+  const g = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
+  return {
+    tab: (g("queue_tab") as QueueTab) || "active",
+    sourceFilter: (g("queue_source_filter") as SourceFilter) || "all",
+    historyFilter: (g("queue_history_filter") as HistoryFilter) || "all",
+    statusFilter: g("queue_status_filter") || null,
+    historySortBy: (g("queue_history_sort_by") as HistorySortBy) || "date_added",
+    historySortDir: (g("queue_history_sort_dir") as HistorySortDir) || "desc",
+    activePageSize: Number(g("queue_active_page_size")) || 20,
+    historyPageSize: Number(g("queue_history_page_size")) || 20,
+  };
+}
+
+function getQueuePrefs(): QueuePrefs {
+  const fallback = queueLegacy();
+  return { ...fallback, ...getPref<Partial<QueuePrefs>>("queue", fallback) };
+}
+
+function patchQueuePrefs(patch: Partial<QueuePrefs>): void {
+  setPref("queue", { ...getQueuePrefs(), ...patch });
+}
 
 const DOWNLOAD_JOB_TYPES = new Set(["import_url", "playlist_import", "redownload"]);
 const IMPORT_JOB_TYPES = new Set(["library_scan", "library_import", "library_import_video"]);
@@ -118,48 +154,27 @@ export function QueuePage() {
 
   const [expandedJobId, setExpandedJobId] = useState<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [activeTab, setActiveTab] = useState<QueueTab>(() => {
-    return (localStorage.getItem("queue_tab") as QueueTab) || "active";
-  });
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(() => {
-    return (localStorage.getItem("queue_source_filter") as SourceFilter) || "all";
-  });
+  const [activeTab, setActiveTab] = useState<QueueTab>(() => getQueuePrefs().tab);
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(() => getQueuePrefs().sourceFilter);
   const [searchQuery, setSearchQuery] = useState("");
-  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>(() => {
-    return (localStorage.getItem("queue_history_filter") as HistoryFilter) || "all";
-  });
-  const [statusFilter, setStatusFilter] = useState<string | null>(() => {
-    return localStorage.getItem("queue_status_filter") || null;
-  });
-  const [historySortBy, setHistorySortBy] = useState<HistorySortBy>(() => {
-    return (localStorage.getItem("queue_history_sort_by") as HistorySortBy) || "date_added";
-  });
-  const [historySortDir, setHistorySortDir] = useState<HistorySortDir>(() => {
-    return (localStorage.getItem("queue_history_sort_dir") as HistorySortDir) || "desc";
-  });
+  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>(() => getQueuePrefs().historyFilter);
+  const [statusFilter, setStatusFilter] = useState<string | null>(() => getQueuePrefs().statusFilter);
+  const [historySortBy, setHistorySortBy] = useState<HistorySortBy>(() => getQueuePrefs().historySortBy);
+  const [historySortDir, setHistorySortDir] = useState<HistorySortDir>(() => getQueuePrefs().historySortDir);
 
   // Persist filter state
-  useEffect(() => { localStorage.setItem("queue_tab", activeTab); }, [activeTab]);
-  useEffect(() => { localStorage.setItem("queue_source_filter", sourceFilter); }, [sourceFilter]);
-  useEffect(() => { localStorage.setItem("queue_history_filter", historyFilter); }, [historyFilter]);
-  useEffect(() => {
-    if (statusFilter) localStorage.setItem("queue_status_filter", statusFilter);
-    else localStorage.removeItem("queue_status_filter");
-  }, [statusFilter]);
-  useEffect(() => { localStorage.setItem("queue_history_sort_by", historySortBy); }, [historySortBy]);
-  useEffect(() => { localStorage.setItem("queue_history_sort_dir", historySortDir); }, [historySortDir]);
+  useEffect(() => { patchQueuePrefs({ tab: activeTab }); }, [activeTab]);
+  useEffect(() => { patchQueuePrefs({ sourceFilter }); }, [sourceFilter]);
+  useEffect(() => { patchQueuePrefs({ historyFilter }); }, [historyFilter]);
+  useEffect(() => { patchQueuePrefs({ statusFilter }); }, [statusFilter]);
+  useEffect(() => { patchQueuePrefs({ historySortBy }); }, [historySortBy]);
+  useEffect(() => { patchQueuePrefs({ historySortDir }); }, [historySortDir]);
 
   // Pagination
   const [activePage, setActivePage] = useState(1);
-  const [activePageSize, setActivePageSize] = useState(() => {
-    const saved = localStorage.getItem("queue_active_page_size");
-    return saved ? Number(saved) : 20;
-  });
+  const [activePageSize, setActivePageSize] = useState(() => getQueuePrefs().activePageSize);
   const [historyPage, setHistoryPage] = useState(1);
-  const [historyPageSize, setHistoryPageSize] = useState(() => {
-    const saved = localStorage.getItem("queue_history_page_size");
-    return saved ? Number(saved) : 20;
-  });
+  const [historyPageSize, setHistoryPageSize] = useState(() => getQueuePrefs().historyPageSize);
 
   // Separate active and history jobs
   const { activeJobs, allActiveCount, historyJobs } = useMemo(() => {
@@ -534,8 +549,8 @@ export function QueuePage() {
   const currentPageSize = activeTab === "active" ? activePageSize : historyPageSize;
   const onPageChange = activeTab === "active" ? setActivePageSafe : setHistoryPageSafe;
   const onPageSizeChange = activeTab === "active"
-    ? (s: number) => { localStorage.setItem("queue_active_page_size", String(s)); setActivePageSize(s); setActivePage(1); }
-    : (s: number) => { localStorage.setItem("queue_history_page_size", String(s)); setHistoryPageSize(s); setHistoryPage(1); };
+    ? (s: number) => { patchQueuePrefs({ activePageSize: s }); setActivePageSize(s); setActivePage(1); }
+    : (s: number) => { patchQueuePrefs({ historyPageSize: s }); setHistoryPageSize(s); setHistoryPage(1); };
 
   return (
     <div className="p-4 md:p-6 max-w-5xl mx-auto">

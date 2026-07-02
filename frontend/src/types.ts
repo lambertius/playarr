@@ -123,12 +123,66 @@ export interface VideoItemDetail {
   has_archive?: boolean;
   exclude_from_editor_scan?: boolean;
   field_provenance?: Record<string, string> | null;
+  field_provenance_users?: Record<string, string> | null;
+  field_provenance_at?: Record<string, string> | null;
+  field_verifications?: Record<string, { by?: string; at?: string; from?: string | null }> | null;
+  last_edited_by?: string | null;
+  song_rating_by?: string | null;
+  song_rating_at?: string | null;
+  video_rating_by?: string | null;
+  video_rating_at?: string | null;
+  file_checksum?: string | null;
+  audio_fingerprint?: string | null;
+  acoustid_id?: string | null;
+  video_phash?: string | null;
   created_at: string;
   updated_at: string;
   sources: SourceInfo[];
   quality_signature?: QualitySignature | null;
   genres: GenreInfo[];
   media_assets: MediaAsset[];
+}
+
+/** A single field's provenance/trust in a TMVDB contribution envelope. */
+export interface FieldProvenance {
+  value: unknown;
+  source?: string | null;
+  edited_by?: string | null;
+  verified_by?: string | null;
+  verified_at?: string | null;
+  set_at?: string | null;
+  trust: "human_edited" | "human_verified" | "automated" | "unknown";
+  locked: boolean;
+}
+
+/** The full tagged contribution envelope previewed/pushed to TMVDB. */
+export interface ContributionEnvelope {
+  schema_version: string;
+  instance_user_id: string;
+  contributed_at: string;
+  payload_hash: string;
+  identity: Record<string, unknown>;
+  fields: Record<string, FieldProvenance>;
+  ratings: Record<string, { value?: number | null; set: boolean; by?: string | null; at?: string | null }>;
+  canonical: { confidence?: number | null; provenance?: string | null };
+  version: Record<string, unknown>;
+  genres: { name: string; source?: string | null; trust: string }[];
+  assets: Record<string, unknown>[];
+  sources: Record<string, unknown>[];
+}
+
+export interface ContributionLogEntry {
+  id: number;
+  video_id?: number | null;
+  instance_user_id?: string | null;
+  target: string;
+  operation: string;
+  playarr_track_id?: string | null;
+  playarr_video_id?: string | null;
+  payload_hash?: string | null;
+  status: string;
+  remote_id?: string | null;
+  created_at?: string | null;
 }
 
 export interface VideoItemUpdate {
@@ -590,6 +644,7 @@ export interface PartyModeParams {
   exclude_albums?: string;
   min_song_rating?: number;
   min_video_rating?: number;
+  party_year?: number;
 }
 
 export interface PartyModeResponse {

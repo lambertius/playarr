@@ -3,8 +3,9 @@ but are still stuck in the review queue (1.9.4 bug)."""
 import sqlite3
 import json
 import sys
+import os
 
-DB = r"C:\Users\user\AppData\Roaming\Playarr\data\playarr.db"
+DB = os.path.join(os.environ["APPDATA"], "Playarr", "data", "playarr.db")
 
 def main():
     db = sqlite3.connect(DB)

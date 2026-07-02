@@ -1591,12 +1591,10 @@ def _rescan_from_disk(job_id: int, video_id: int,
             except Exception as _nfo_e:
                 _append_job_log(job_id, f"NFO rewrite warning: {_nfo_e}")
 
-            # Compute Playarr content IDs
+            # Compute Playarr content IDs (+ phash / fingerprint / checksum)
             try:
-                from app.services.content_id import compute_ids_for_video
-                ids = compute_ids_for_video(video_item)
-                video_item.playarr_track_id = ids["playarr_track_id"]
-                video_item.playarr_video_id = ids["playarr_video_id"]
+                from app.services.content_id import enrich_content_identity
+                enrich_content_identity(video_item)
             except Exception as _cid_e:
                 _append_job_log(job_id, f"Content ID generation warning: {_cid_e}")
 
@@ -2365,12 +2363,10 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                     except Exception as _xml_e:
                         _append_job_log(job_id, f"Playarr XML write error: {_xml_e}")
 
-                # Compute Playarr content IDs
+                # Compute Playarr content IDs (+ phash / fingerprint / checksum)
                 try:
-                    from app.services.content_id import compute_ids_for_video
-                    ids = compute_ids_for_video(video_item)
-                    video_item.playarr_track_id = ids["playarr_track_id"]
-                    video_item.playarr_video_id = ids["playarr_video_id"]
+                    from app.services.content_id import enrich_content_identity
+                    enrich_content_identity(video_item)
                 except Exception as _cid_e:
                     _append_job_log(job_id, f"Content ID generation warning: {_cid_e}")
 
@@ -4249,12 +4245,11 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 video_item.review_category = None
                 _append_job_log(job_id, "Review flag cleared — issue resolved by scrape")
 
-        # Recompute Playarr content IDs (metadata may have changed)
+        # Recompute Playarr content IDs (metadata may have changed); idempotent
+        # enrichment fills any still-missing phash / fingerprint / checksum.
         try:
-            from app.services.content_id import compute_ids_for_video
-            _ids = compute_ids_for_video(video_item)
-            video_item.playarr_track_id = _ids["playarr_track_id"]
-            video_item.playarr_video_id = _ids["playarr_video_id"]
+            from app.services.content_id import enrich_content_identity
+            enrich_content_identity(video_item)
         except Exception as _cid_e:
             _append_job_log(job_id, f"Content ID generation warning: {_cid_e}")
 
@@ -5571,6 +5566,19 @@ def library_scan_task(self, job_id: int, import_new: bool = True,
                                     is_selected=td.get("is_selected", False),
                                     provenance=td.get("provenance", "xml_import"),
                                 ))
+
+                        # If no thumbnail was marked selected in XML, auto-select the best one
+                        db.flush()
+                        any_selected = any(td.get("is_selected") for td in xml_sa["thumbnails"])
+                        if not any_selected:
+                            best = (
+                                db.query(AIThumbnail)
+                                .filter(AIThumbnail.video_id == video_item.id)
+                                .order_by(AIThumbnail.score_overall.desc())
+                                .first()
+                            )
+                            if best:
+                                best.is_selected = True
 
                     # Restore entity references (artist, album, canonical track)
                     entity_refs = xml_sidecar_data.get("entity_refs", {})

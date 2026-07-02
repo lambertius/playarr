@@ -758,7 +758,7 @@ function GenreConsolidation() {
         </div>
 
         {consolidations && consolidations.length > 0 ? (
-          <div className="max-h-[420px] overflow-y-auto rounded-lg border border-white/5 bg-surface-dark/50 space-y-0">
+          <div className="max-h-[840px] overflow-y-auto rounded-lg border border-white/5 bg-surface-dark/50 space-y-0">
             {consolidations.map((c) => (
               <div
                 key={c.master_genre_id}
@@ -1088,7 +1088,7 @@ function GenreManager() {
       </div>
 
       {/* Genre list */}
-      <div className="max-h-72 overflow-y-auto rounded-lg border border-white/5">
+      <div className="max-h-[36rem] overflow-y-auto rounded-lg border border-white/5">
         {filtered.length === 0 ? (
           <p className="text-xs text-text-muted text-center py-6">
             {search ? "No matching genres" : tab === "visible" ? "All genres are hidden" : "No hidden genres"}

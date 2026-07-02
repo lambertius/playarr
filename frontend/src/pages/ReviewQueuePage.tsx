@@ -24,11 +24,38 @@ import { Tooltip } from "@/components/Tooltip";
 import { cn, formatBytes, timeAgo } from "@/lib/utils";
 import { ScrapeOptionsModal, type ScrapeOptions } from "@/components/ScrapeOptionsModal";
 import { ScanOptionsModal } from "@/components/ScanOptionsModal";
+import { getPref, setPref } from "@/lib/preferences";
 
 // ── Types ───────────────────────────────────────────────
 type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "manual_review" | "rename" | "scanned" | "normalization" | "canonical_missing" | "canonical_conflict" | "canonical_low_confidence" | "ai_pending" | "ai_partial" | "artwork_incomplete" | "missing_artwork";
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 500, 1000, 0];
+
+// ── Review page preferences (server-backed) ─────────────
+interface ReviewPrefs {
+  categoryFilter: ReviewCategory | null;
+  pageSize: number;
+}
+
+const K_REVIEW_CATEGORY_FILTER = "review_category_filter";
+const K_REVIEW_PAGE_SIZE = "review_page_size";
+
+function reviewLegacy(): ReviewPrefs {
+  let categoryFilter: ReviewCategory | null = null;
+  let pageSize = 25;
+  try { const c = localStorage.getItem(K_REVIEW_CATEGORY_FILTER) as ReviewCategory | null; if (c) categoryFilter = c; } catch { /* ignore */ }
+  try { const n = Number(localStorage.getItem(K_REVIEW_PAGE_SIZE)); if (n) pageSize = n; } catch { /* ignore */ }
+  return { categoryFilter, pageSize };
+}
+
+function getReviewPrefs(): ReviewPrefs {
+  const fallback = reviewLegacy();
+  return { ...fallback, ...getPref<Partial<ReviewPrefs>>("review", fallback) };
+}
+
+function patchReviewPrefs(patch: Partial<ReviewPrefs>): void {
+  setPref("review", { ...getReviewPrefs(), ...patch });
+}
 
 // ── Category config ─────────────────────────────────────
 const CATEGORY_CONFIG: Record<ReviewCategory, {
@@ -461,7 +488,7 @@ export default function ReviewQueuePage() {
   const [categoryFilter, setCategoryFilter] = useState<ReviewCategory>(() => {
     const fromUrl = searchParams.get("tab") as ReviewCategory | null;
     if (fromUrl && fromUrl in CATEGORY_CONFIG) return fromUrl;
-    const saved = localStorage.getItem("review_category_filter") as ReviewCategory | null;
+    const saved = getReviewPrefs().categoryFilter;
     return saved && saved in CATEGORY_CONFIG ? saved : "all";
   });
   const [searchQuery, setSearchQuery] = useState("");
@@ -469,10 +496,7 @@ export default function ReviewQueuePage() {
   const [showHelp, setShowHelp] = useState(false);
 
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(() => {
-    const saved = localStorage.getItem("review_page_size");
-    return saved ? Number(saved) : 25;
-  });
+  const [pageSize, setPageSize] = useState(() => getReviewPrefs().pageSize);
 
   const params: ReviewParams = useMemo(() => ({
     category: categoryFilter === "all" ? undefined : categoryFilter,
@@ -708,7 +732,7 @@ export default function ReviewQueuePage() {
     setCategoryFilter(cat);
     setPage(1);
     setSelectedIds(new Set());
-    localStorage.setItem("review_category_filter", cat);
+    patchReviewPrefs({ categoryFilter: cat });
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       if (cat === "all") next.delete("tab"); else next.set("tab", cat);
@@ -717,7 +741,7 @@ export default function ReviewQueuePage() {
   }, [setSearchParams]);
 
   const handlePageSizeChange = useCallback((size: number) => {
-    localStorage.setItem("review_page_size", String(size));
+    patchReviewPrefs({ pageSize: size });
     setPageSize(size);
     setPage(1);
   }, []);

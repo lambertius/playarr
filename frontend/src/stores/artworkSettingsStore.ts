@@ -1,6 +1,9 @@
 import { create } from "zustand";
+import { getPref, setPref } from "@/lib/preferences";
 
 export type ArtChangeStyle = "fade" | "flip" | "spin" | "random";
+/** Queue panel auto-hide behaviour in theatre mode. */
+export type QueueHideMode = "off" | "per-song" | "auto";
 
 interface ArtworkSettings {
   /** Artwork cell size in pixels */
@@ -29,6 +32,21 @@ interface ArtworkSettings {
   artChangeCount: number;
   /** Transition style for artwork swaps */
   artChangeStyle: ArtChangeStyle;
+  /** Queue panel auto-hide behaviour in theatre mode */
+  queueHideMode: QueueHideMode;
+  /** Seconds before the queue fades out in per-song / auto hide modes */
+  queueHideDelay: number;
+  /** TV/kiosk render resolution (logical height: 1080 / 1440 / 2160) — the /tv
+   *  view lays out on this 16:9 canvas then CSS-scales to fit, giving
+   *  browser-like artwork density regardless of the low logical viewport a TV
+   *  browser reports. */
+  tvResolution: number;
+  /** Force a server-side compatibility transcode (H.264/AAC) for TV mode. */
+  tvTranscode: boolean;
+  /** Force a server-side compatibility transcode (H.264/AAC) for browser playback. */
+  browserTranscode: boolean;
+  /** Force a server-side compatibility transcode (H.264/AAC) for the /cast page. */
+  castTranscode: boolean;
 
   setArtworkSize: (size: number) => void;
   setScrollDuration: (duration: number) => void;
@@ -43,29 +61,42 @@ interface ArtworkSettings {
   setArtChangeEnabled: (enabled: boolean) => void;
   setArtChangeCount: (count: number) => void;
   setArtChangeStyle: (style: ArtChangeStyle) => void;
+  setQueueHideMode: (mode: QueueHideMode) => void;
+  setQueueHideDelay: (sec: number) => void;
+  setTvResolution: (res: number) => void;
+  setTvTranscode: (on: boolean) => void;
+  setBrowserTranscode: (on: boolean) => void;
+  setCastTranscode: (on: boolean) => void;
 }
 
-const STORAGE_KEY = "playarr-artwork-settings";
+// Server-stored preference group.  LEGACY_KEY is the old browser-only blob,
+// read once as the migration fallback the first time this runs post-upgrade.
+const PREF_GROUP = "artwork";
+const LEGACY_KEY = "playarr-artwork-settings";
 
-type Persisted = Pick<ArtworkSettings, "artworkSize" | "scrollDuration" | "changeRate" | "fadeDuration" | "playbackRatio" | "queueOpacity" | "overlayDuration" | "artRepeatPenalty" | "overlaySize" | "queueClock" | "artChangeEnabled" | "artChangeCount" | "artChangeStyle">;
+type Persisted = Pick<ArtworkSettings, "artworkSize" | "scrollDuration" | "changeRate" | "fadeDuration" | "playbackRatio" | "queueOpacity" | "overlayDuration" | "artRepeatPenalty" | "overlaySize" | "queueClock" | "artChangeEnabled" | "artChangeCount" | "artChangeStyle" | "queueHideMode" | "queueHideDelay" | "tvResolution" | "tvTranscode" | "browserTranscode" | "castTranscode">;
 
-const DEFAULTS: Persisted = { artworkSize: 150, scrollDuration: 60, changeRate: 4, fadeDuration: 1, playbackRatio: 75, queueOpacity: 70, overlayDuration: 30, artRepeatPenalty: 50, overlaySize: 35, queueClock: false, artChangeEnabled: true, artChangeCount: 1, artChangeStyle: "fade" };
+const DEFAULTS: Persisted = { artworkSize: 150, scrollDuration: 60, changeRate: 4, fadeDuration: 1, playbackRatio: 75, queueOpacity: 70, overlayDuration: 30, artRepeatPenalty: 50, overlaySize: 35, queueClock: false, artChangeEnabled: true, artChangeCount: 1, artChangeStyle: "fade", queueHideMode: "off", queueHideDelay: 5, tvResolution: 1080, tvTranscode: false, browserTranscode: false, castTranscode: false };
 
-function loadDefaults(): Persisted {
+function loadLegacy(): Persisted {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(LEGACY_KEY);
     if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
   } catch { /* ignore */ }
   return DEFAULTS;
 }
 
+function loadDefaults(): Persisted {
+  return { ...DEFAULTS, ...getPref<Partial<Persisted>>(PREF_GROUP, loadLegacy()) };
+}
+
 function persist(state: Persisted) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  setPref(PREF_GROUP, state);
 }
 
 function snap(): Persisted {
   const s = useArtworkSettings.getState();
-  return { artworkSize: s.artworkSize, scrollDuration: s.scrollDuration, changeRate: s.changeRate, fadeDuration: s.fadeDuration, playbackRatio: s.playbackRatio, queueOpacity: s.queueOpacity, overlayDuration: s.overlayDuration, artRepeatPenalty: s.artRepeatPenalty, overlaySize: s.overlaySize, queueClock: s.queueClock, artChangeEnabled: s.artChangeEnabled, artChangeCount: s.artChangeCount, artChangeStyle: s.artChangeStyle };
+  return { artworkSize: s.artworkSize, scrollDuration: s.scrollDuration, changeRate: s.changeRate, fadeDuration: s.fadeDuration, playbackRatio: s.playbackRatio, queueOpacity: s.queueOpacity, overlayDuration: s.overlayDuration, artRepeatPenalty: s.artRepeatPenalty, overlaySize: s.overlaySize, queueClock: s.queueClock, artChangeEnabled: s.artChangeEnabled, artChangeCount: s.artChangeCount, artChangeStyle: s.artChangeStyle, queueHideMode: s.queueHideMode, queueHideDelay: s.queueHideDelay, tvResolution: s.tvResolution, tvTranscode: s.tvTranscode, browserTranscode: s.browserTranscode, castTranscode: s.castTranscode };
 }
 
 export const useArtworkSettings = create<ArtworkSettings>((set) => ({
@@ -122,5 +153,29 @@ export const useArtworkSettings = create<ArtworkSettings>((set) => ({
   setArtChangeStyle: (style) => {
     set({ artChangeStyle: style });
     persist({ ...snap(), artChangeStyle: style });
+  },
+  setQueueHideMode: (mode) => {
+    set({ queueHideMode: mode });
+    persist({ ...snap(), queueHideMode: mode });
+  },
+  setQueueHideDelay: (sec) => {
+    set({ queueHideDelay: sec });
+    persist({ ...snap(), queueHideDelay: sec });
+  },
+  setTvResolution: (res) => {
+    set({ tvResolution: res });
+    persist({ ...snap(), tvResolution: res });
+  },
+  setTvTranscode: (on) => {
+    set({ tvTranscode: on });
+    persist({ ...snap(), tvTranscode: on });
+  },
+  setBrowserTranscode: (on) => {
+    set({ browserTranscode: on });
+    persist({ ...snap(), browserTranscode: on });
+  },
+  setCastTranscode: (on) => {
+    set({ castTranscode: on });
+    persist({ ...snap(), castTranscode: on });
   },
 }));

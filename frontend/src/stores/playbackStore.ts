@@ -27,6 +27,10 @@ interface PlaybackState {
   repeat: RepeatMode;
   fullscreenMode: FullscreenMode;
 
+  /** TV/kiosk mode: the on-screen <video> carries its own audio (single
+   *  stream) and AudioManager stays silent, so there's no dual-stream sync. */
+  tvMode: boolean;
+
   // ── Individual playback pause-over ──
   /** When a video is played individually while a playlist runs, the playlist pauses. */
   pausedForIndividual: boolean;
@@ -60,6 +64,7 @@ interface PlaybackState {
   setFullscreenMode: (mode: FullscreenMode) => void;
   cycleFullscreen: () => void;
   exitFullscreen: () => void;
+  setTvMode: (on: boolean) => void;
 
   // ── Derived ──
   currentTrack: () => PlaybackTrack | null;
@@ -95,6 +100,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   shuffle: false,
   repeat: "off",
   fullscreenMode: "off",
+  tvMode: false,
   pausedForIndividual: false,
   individualTrack: null,
 
@@ -293,4 +299,6 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       document.exitFullscreen().catch(() => {});
     }
   },
+
+  setTvMode: (on) => set({ tvMode: on }),
 }));

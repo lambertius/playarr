@@ -9,7 +9,7 @@
 ; Output: Output\PlayarrSetup.exe
 
 #define MyAppName "Playarr"
-#define MyAppVersion "1.9.14"
+#define MyAppVersion "1.9.34"
 #define MyAppPublisher "Playarr Contributors"
 #define MyAppURL "https://github.com/lambertius/playarr"
 #define MyAppExeName "Playarr.exe"
@@ -73,8 +73,11 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 ; Desktop (optional)
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\playarr.ico"; Tasks: desktopicon
 
-; Windows Startup (optional)
-Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--delay 10 --headless"; Tasks: startupentry
+[Registry]
+; Windows Startup (optional) — write the SAME HKCU Run value the in-app
+; "Start with Windows" toggle manages, so there is exactly one startup
+; mechanism (no competing Startup-folder shortcut → no double-launch).
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"" --delay 10"; Tasks: startupentry; Flags: uninsdeletevalue
 
 [Run]
 ; Launch after install
@@ -86,22 +89,33 @@ Type: filesandordirs; Name: "{app}\__pycache__"
 Type: files; Name: "{app}\playarr.ico"
 
 [Code]
-// Kill running Playarr before install/uninstall
-function InitializeSetup(): Boolean;
+// Stop a running Playarr cleanly before install/uninstall: ask it to shut down
+// (releases the executable + sockets gracefully), give it a moment, then
+// force-kill anything left as a fallback.
+procedure StopPlayarr();
 var
   ResultCode: Integer;
 begin
+  // Graceful request to the default port (best-effort; ignored if not running
+  // or on a non-default port).
+  Exec('powershell.exe',
+       '-NoProfile -NonInteractive -Command "try { Invoke-WebRequest -UseBasicParsing -Method POST -Uri ''http://127.0.0.1:6969/api/settings/shutdown'' -TimeoutSec 3 | Out-Null } catch { }"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(2500);
+  // Fallback: force-kill any remaining processes (supervisor + child + ffmpeg).
   Exec('taskkill', '/F /IM Playarr.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM ffmpeg.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  StopPlayarr();
   Result := True;
 end;
 
 function InitializeUninstall(): Boolean;
-var
-  ResultCode: Integer;
 begin
-  Exec('taskkill', '/F /IM Playarr.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('taskkill', '/F /IM ffmpeg.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  StopPlayarr();
   Result := True;
 end;
 

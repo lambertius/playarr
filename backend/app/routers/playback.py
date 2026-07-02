@@ -2,17 +2,21 @@
 Playback API — Stream video files, serve previews, record playback history,
 upload artwork.
 """
+import asyncio
+import collections
 import logging
 import os
 import subprocess
 import sys
 import threading
+import time
 from typing import Optional
 
 _POPEN_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from sqlalchemy import func
@@ -122,6 +126,12 @@ def _unregister_stream(file_path: str, proc: subprocess.Popen):
                 del _active_streams[key]
 
 
+def active_stream_count() -> int:
+    """Total number of active streaming ffmpeg processes (diagnostics)."""
+    with _streams_lock:
+        return sum(len(procs) for procs in _active_streams.values())
+
+
 def kill_streams_for_file(file_path: str) -> int:
     """Kill all active ffmpeg streaming processes that are reading *file_path*.
     Returns the number of processes killed."""
@@ -164,11 +174,17 @@ _BROWSER_SAFE_AUDIO = {"aac", "mp3", "opus", "vorbis", "flac"}
 
 
 @router.get("/stream/{video_id}")
-async def stream_video(video_id: int, request: Request, db: Session = Depends(get_db)):
+async def stream_video(
+    video_id: int,
+    request: Request,
+    transcode: bool = Query(False, description="Force a full H.264/AAC compatibility transcode"),
+    db: Session = Depends(get_db),
+):
     """
     Stream a video file with Range header support for seeking.
     If the audio codec is not browser-compatible, transcode on-the-fly
-    via ffmpeg (copy video, encode audio to AAC).
+    via ffmpeg (copy video, encode audio to AAC).  With ?transcode=1 the video
+    is fully re-encoded to a broadly-compatible, network-friendly H.264 stream.
     """
     item = db.query(VideoItem).get(video_id)
     if not item or not item.file_path or not os.path.isfile(item.file_path):
@@ -184,6 +200,10 @@ async def stream_video(video_id: int, request: Request, db: Session = Depends(ge
                             detail="Video file is outside configured library directories")
 
     file_path = item.file_path
+
+    # Compatibility mode: full video+audio transcode regardless of source codec.
+    if transcode:
+        return _stream_compat(file_path, with_audio=True, audio_bitrate=_audio_bitrate(db))
 
     # Check if container/codec combo needs remuxing for browser playback
     qs = item.quality_signature
@@ -272,15 +292,140 @@ async def stream_video(video_id: int, request: Request, db: Session = Depends(ge
     )
 
 
+def _range_file_response(file_path: str, request: Request) -> Response:
+    """Serve a file untouched with HTTP Range support (no remux/transcode).
+
+    Used by native players (Kodi, VLC) that decode every container/codec
+    directly, so byte-range seeking works correctly.
+    """
+    file_size = os.path.getsize(file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+    mime_map = {
+        ".mp4": "video/mp4",
+        ".mkv": "video/x-matroska",
+        ".webm": "video/webm",
+        ".avi": "video/x-msvideo",
+        ".mov": "video/quicktime",
+        ".mpg": "video/mpeg",
+    }
+    content_type = mime_map.get(ext, "video/mp4")
+
+    range_header = request.headers.get("range")
+    if range_header:
+        start, end = _parse_range(range_header, file_size)
+        chunk_size = end - start + 1
+
+        def iter_file():
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    data = f.read(min(remaining, 1024 * 1024))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            iter_file(),
+            status_code=206,
+            media_type=content_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(chunk_size),
+            },
+        )
+
+    return FileResponse(
+        file_path,
+        media_type=content_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        },
+    )
+
+
+@router.get("/raw/{video_id}")
+async def stream_raw(video_id: int, request: Request, db: Session = Depends(get_db)):
+    """
+    Serve the original video file untouched with HTTP Range support.
+
+    Unlike ``/stream/{video_id}`` (which remuxes/transcodes for browsers),
+    this performs NO remux or transcode — intended for native players such
+    as the Playarr Kodi add-on that handle MKV and every codec directly,
+    so seeking is fast and exact.
+    """
+    item = db.query(VideoItem).get(video_id)
+    if not item or not item.file_path or not os.path.isfile(item.file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    from app.config import get_settings
+    all_dirs = get_settings().get_all_library_dirs()
+    norm_path = os.path.normcase(os.path.normpath(item.file_path))
+    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
+               for d in all_dirs):
+        raise HTTPException(status_code=403,
+                            detail="Video file is outside configured library directories")
+
+    return _range_file_response(item.file_path, request)
+
+
+@router.get("/theatre/{video_id}")
+async def stream_theatre(video_id: int, db: Session = Depends(get_db)):
+    """Theatre stream — the source video centred over a pre-rendered artwork-wall
+    backdrop, composited into a single H.264/AAC stream.
+
+    This is how Kodi (a native player that can't draw the web app's artwork wall)
+    gets the theatre experience: it just plays this stream full-screen. The
+    backdrop is cached and reused (see services/theatre_backdrop), so the per-track
+    cost is a composite + encode, comparable to the compatibility transcode.
+    """
+    item = db.query(VideoItem).get(video_id)
+    if not item or not item.file_path or not os.path.isfile(item.file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    from app.config import get_settings
+    all_dirs = get_settings().get_all_library_dirs()
+    norm_path = os.path.normcase(os.path.normpath(item.file_path))
+    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
+               for d in all_dirs):
+        raise HTTPException(status_code=403,
+                            detail="Video file is outside configured library directories")
+
+    from app.services.theatre_backdrop import ensure_backdrop
+    from app.routers.preferences import get_preference
+    # Rendering the backdrop is blocking (disk + Pillow); keep it off the loop.
+    backdrop = await asyncio.to_thread(ensure_backdrop, db)
+    if not backdrop:
+        # No backdrop available (e.g. Pillow missing) — fall back to a plain
+        # full-screen compatibility transcode so playback still works.
+        return _stream_compat(item.file_path, with_audio=True, audio_bitrate=_audio_bitrate(db))
+
+    ratio = (get_preference(db, "artwork", {}) or {}).get("playbackRatio", 75)
+    try:
+        ratio = max(25, min(95, int(ratio)))
+    except (TypeError, ValueError):
+        ratio = 75
+    return _stream_theatre(item.file_path, backdrop, ratio)
+
+
 @router.get("/stream-video-only/{video_id}")
-async def stream_video_only(video_id: int, request: Request, db: Session = Depends(get_db)):
+async def stream_video_only(
+    video_id: int,
+    request: Request,
+    transcode: bool = Query(False, description="Force a full H.264 compatibility transcode (no audio)"),
+    db: Session = Depends(get_db),
+):
     """
     Lightweight video-only stream for muted playback (e.g. the NowPlaying
     visual feed).  Serves the raw file directly for MP4/WebM since the
     browser can decode the video track even when the audio codec is
     unsupported — the element is muted so audio is irrelevant.
     Only MKV containers are remuxed (video-copy, no audio) because
-    Chrome cannot play the MKV container at all.
+    Chrome cannot play the MKV container at all.  With ?transcode=1 the video
+    is fully re-encoded to a broadly-compatible H.264 stream.
     """
     item = db.query(VideoItem).get(video_id)
     if not item or not item.file_path or not os.path.isfile(item.file_path):
@@ -296,6 +441,10 @@ async def stream_video_only(video_id: int, request: Request, db: Session = Depen
 
     file_path = item.file_path
     ext_lower = os.path.splitext(file_path)[1].lower()
+
+    # Compatibility mode: full video transcode (no audio), regardless of source.
+    if transcode:
+        return _stream_compat(file_path, with_audio=False)
 
     # MKV needs remux to MP4 (video-only, no audio transcode)
     if ext_lower in (".mkv",):
@@ -660,12 +809,16 @@ async def kill_all_streams():
     """Kill all active streaming FFmpeg processes.
 
     Called by the frontend on track change to ensure old streams don't linger.
+    The kill itself (proc.kill + proc.wait) is blocking, so run it in a thread —
+    otherwise, under TV mode's rapid track cycling, it freezes the event loop
+    (and a wait on a wedged ffmpeg could stall the whole server).
     """
-    total = 0
-    with _streams_lock:
-        keys = list(_active_streams.keys())
-    for key in keys:
-        total += kill_streams_for_file(key)
+    def _kill_all() -> int:
+        with _streams_lock:
+            keys = list(_active_streams.keys())
+        return sum(kill_streams_for_file(key) for key in keys)
+
+    total = await asyncio.to_thread(_kill_all)
     return {"killed": total}
 
 
@@ -689,225 +842,286 @@ def record_playback(
     return {"detail": "Recorded"}
 
 
+# ── Client-side playback diagnostics ──────────────────────
+class ClientPlaybackMetrics(BaseModel):
+    video_id: Optional[int] = None
+    mode: Optional[str] = None          # "tv" | "browser" | "video-only" | …
+    dropped: int = 0                    # dropped video frames (cumulative)
+    total: int = 0                      # total video frames (cumulative)
+    stalls: int = 0                     # buffer-underrun events this interval
+    waiting_ms: int = 0                 # time spent stalled this interval
+    buffered_ahead: Optional[float] = None  # seconds buffered ahead of playhead
+
+
+@router.post("/client-metrics")
+def client_metrics(m: ClientPlaybackMetrics):
+    """Record client-side playback health (dropped frames, stalls, buffer
+    health) to the server log so network drop-outs/hangs can be diagnosed
+    without opening the browser dev tools — useful for TV devices."""
+    pct = (m.dropped / m.total * 100.0) if m.total else 0.0
+    logger.info(
+        "Client playback [%s] vid=%s: dropped %d/%d (%.1f%%), stalls=%d, waiting=%dms, buffered_ahead=%.1fs",
+        m.mode or "?", m.video_id, m.dropped, m.total, pct, m.stalls, m.waiting_ms,
+        (m.buffered_ahead if m.buffered_ahead is not None else -1.0),
+    )
+    return {"ok": True}
+
+
+# Full re-encodes (libx264) are CPU-bound — a handful running at once can
+# saturate the machine. Heavy streams acquire this semaphore (light remux/copy
+# streams skip it). It is acquired *inside* the streaming generator, which
+# Starlette pumps on a threadpool thread, so queuing never blocks the event loop.
+_MAX_CONCURRENT_TRANSCODES = 3
+_transcode_sem = threading.BoundedSemaphore(_MAX_CONCURRENT_TRANSCODES)
+
+
+def _audio_bitrate(db: Session, default: str = "256k") -> str:
+    """Configured AAC transcode bitrate (e.g. '256k')."""
+    row = db.query(AppSetting).filter(
+        AppSetting.key == "transcode_audio_bitrate",
+        AppSetting.user_id.is_(None),
+    ).first()
+    return f"{row.value}k" if row and row.value else default
+
+
+def _drain_stderr(proc: subprocess.Popen, buf: "collections.deque[str]") -> None:
+    """Continuously drain ffmpeg's stderr into a bounded ring buffer.
+
+    We MUST keep reading stderr: ffmpeg emits warnings (e.g. non-monotonic DTS)
+    and if its stderr pipe buffer fills, ffmpeg blocks on the write — which
+    stalls stdout and hangs the stream (this previously exhausted the thread
+    pool and took the server down). Draining on a daemon thread into a
+    fixed-size deque keeps memory bounded while still capturing the error tail.
+    """
+    try:
+        for line in iter(proc.stderr.readline, b""):
+            buf.append(line.decode("utf-8", "replace").rstrip())
+    except Exception:
+        pass
+    finally:
+        try:
+            proc.stderr.close()
+        except OSError:
+            pass
+
+
+def _spawn_ffmpeg(cmd: list) -> subprocess.Popen:
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **_POPEN_FLAGS,
+    )
+    tail: "collections.deque[str]" = collections.deque(maxlen=40)
+    process._stderr_tail = tail  # type: ignore[attr-defined]
+    threading.Thread(target=_drain_stderr, args=(process, tail), daemon=True).start()
+    return process
+
+
+def _streaming_response(cmd: list, file_path: str, label: str, heavy: bool = False) -> StreamingResponse:
+    """Spawn an ffmpeg pipe lazily and wrap its stdout as a StreamingResponse
+    with throughput diagnostics and guaranteed cleanup on client disconnect.
+
+    ffmpeg is spawned *inside* the generator rather than eagerly: if the client
+    disconnects before the body is consumed, the generator is never iterated and
+    no process is ever started — so there is no orphaned ffmpeg to leak.
+
+    `heavy` marks a full re-encode (libx264); those acquire the transcode
+    semaphore so a burst of compat streams can't saturate the CPU. The acquire
+    runs on the threadpool thread that pumps this generator, so a queued request
+    simply holds its connection open without blocking the event loop.
+
+    The end-of-stream log line (throughput, time-to-first-byte, whether the
+    client read the whole thing) is a key signal for diagnosing network
+    drop-outs/hangs: a low sustained Mbps with an early disconnect points at the
+    client stalling, while a high ttfb points at slow transcode start-up.
+    """
+    name = os.path.basename(file_path)
+
+    def _generate():
+        acquired = False
+        if heavy:
+            _transcode_sem.acquire()
+            acquired = True
+        process = None
+        sent = 0
+        ttfb = None
+        natural_eof = False
+        start = time.monotonic()
+        try:
+            process = _spawn_ffmpeg(cmd)
+            _register_stream(file_path, process)
+            while True:
+                chunk = process.stdout.read(1024 * 1024)  # 1MB chunks
+                if not chunk:
+                    natural_eof = True
+                    break
+                if ttfb is None:
+                    ttfb = time.monotonic() - start
+                sent += len(chunk)
+                yield chunk
+        finally:
+            elapsed = time.monotonic() - start
+            if process is not None:
+                _unregister_stream(file_path, process)
+                # Force-kill immediately on disconnect to prevent orphaned processes
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                try:
+                    process.stdout.close()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except Exception:
+                    pass
+                mbps = (sent * 8 / 1_000_000 / elapsed) if elapsed > 0.01 else 0.0
+                logger.info(
+                    "Stream end [%s] %s: %.1f MB in %.1fs (%.1f Mbps), ttfb=%.2fs, ffmpeg_rc=%s",
+                    label, name, sent / 1_000_000, elapsed, mbps,
+                    (ttfb if ttfb is not None else -1.0), process.returncode,
+                )
+                # If ffmpeg ended on its own with a nonzero code (not because we
+                # killed it on a client disconnect), surface the stderr tail —
+                # the only signal for a failed transcode (bad codec, etc.).
+                if natural_eof and process.returncode not in (0, None):
+                    tail = getattr(process, "_stderr_tail", None)
+                    if tail:
+                        logger.error(
+                            "FFmpeg [%s] %s exited rc=%s; stderr tail:\n%s",
+                            label, name, process.returncode, "\n".join(tail),
+                        )
+            if acquired:
+                _transcode_sem.release()
+
+    return StreamingResponse(
+        _generate(),
+        media_type="video/mp4",
+        headers={"Content-Type": "video/mp4", "Cache-Control": "no-cache"},
+    )
+
+
 def _stream_remuxed(
     file_path: str,
     transcode_audio: bool = False,
     audio_bitrate: str = "256k",
 ) -> StreamingResponse:
-    """
-    Remux a video (e.g. H.264+MKV) to fragmented MP4 for browser playback.
-    Video is always stream-copied. Audio is copied or transcoded to AAC.
-    """
+    """Remux a video (e.g. H.264+MKV) to fragmented MP4 for browser playback.
+    Video is always stream-copied; audio is copied or transcoded to AAC."""
     from app.config import get_settings
-    settings = get_settings()
-    ffmpeg = settings.resolved_ffmpeg
-
+    ffmpeg = get_settings().resolved_ffmpeg
     audio_args = ["-c:a", "aac", "-b:a", audio_bitrate] if transcode_audio else ["-c:a", "copy"]
     cmd = [
-        ffmpeg,
-        "-i", file_path,
-        "-c:v", "copy",
-        *audio_args,
+        ffmpeg, "-i", file_path,
+        "-c:v", "copy", *audio_args,
         "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-        "-f", "mp4",
-        "-v", "warning",
-        "pipe:1",
+        "-f", "mp4", "-v", "warning", "pipe:1",
     ]
-
     logger.info(f"Remux-streaming (H.264+MKV→MP4): {os.path.basename(file_path)}")
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **_POPEN_FLAGS,
-    )
-    _register_stream(file_path, process)
-
-    def _generate():
-        try:
-            while True:
-                chunk = process.stdout.read(1024 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            _unregister_stream(file_path, process)
-            # Force-kill immediately on disconnect to prevent orphaned processes
-            try:
-                process.kill()
-            except OSError:
-                pass
-            try:
-                process.stdout.close()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=5)
-            except Exception:
-                pass
-            try:
-                if process.returncode and process.returncode not in (0, -9, -15, 4294967295):
-                    stderr = process.stderr.read().decode(errors="replace")
-                    if stderr.strip():
-                        logger.warning(f"Remux exited {process.returncode}: {stderr[:500]}")
-            except Exception:
-                pass
-            try:
-                process.stderr.close()
-            except OSError:
-                pass
-
-    return StreamingResponse(
-        _generate(),
-        media_type="video/mp4",
-        headers={
-            "Content-Type": "video/mp4",
-            "Cache-Control": "no-cache",
-        },
-    )
+    return _streaming_response(cmd, file_path, "remux")
 
 
 def _stream_remuxed_video_only(file_path: str) -> StreamingResponse:
-    """
-    Remux video stream only (no audio) from MKV to fragmented MP4.
-    Used for the muted visual feed — avoids audio transcoding overhead.
-    """
+    """Remux video stream only (no audio) from MKV to fragmented MP4 — for the
+    muted visual feed; avoids audio transcoding overhead."""
     from app.config import get_settings
-    settings = get_settings()
-    ffmpeg = settings.resolved_ffmpeg
-
+    ffmpeg = get_settings().resolved_ffmpeg
     cmd = [
-        ffmpeg,
-        "-i", file_path,
-        "-c:v", "copy",
-        "-an",  # strip audio entirely
+        ffmpeg, "-i", file_path,
+        "-c:v", "copy", "-an",
         "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-        "-f", "mp4",
-        "-v", "warning",
-        "pipe:1",
+        "-f", "mp4", "-v", "warning", "pipe:1",
     ]
-
     logger.info(f"Video-only remux (MKV→MP4, no audio): {os.path.basename(file_path)}")
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **_POPEN_FLAGS,
-    )
-    _register_stream(file_path, process)
-
-    def _generate():
-        try:
-            while True:
-                chunk = process.stdout.read(1024 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            _unregister_stream(file_path, process)
-            try:
-                process.kill()
-            except OSError:
-                pass
-            try:
-                process.stdout.close()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=5)
-            except Exception:
-                pass
-            try:
-                process.stderr.close()
-            except OSError:
-                pass
-
-    return StreamingResponse(
-        _generate(),
-        media_type="video/mp4",
-        headers={
-            "Content-Type": "video/mp4",
-            "Cache-Control": "no-cache",
-        },
-    )
+    return _streaming_response(cmd, file_path, "remux-vo")
 
 
 def _stream_transcoded(file_path: str, audio_bitrate: str = "256k") -> StreamingResponse:
-    """
-    Stream a video file with on-the-fly audio transcoding to AAC.
-    Video is stream-copied (no re-encode), audio is transcoded to AAC.
-    Output is fragmented MP4 piped to stdout for streaming.
+    """Stream with on-the-fly audio transcode to AAC; video is stream-copied."""
+    from app.config import get_settings
+    ffmpeg = get_settings().resolved_ffmpeg
+    cmd = [
+        ffmpeg, "-i", file_path,
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", audio_bitrate,
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4", "-v", "warning", "pipe:1",
+    ]
+    logger.info(f"Transcode-streaming (audio): {os.path.basename(file_path)}")
+    return _streaming_response(cmd, file_path, "atranscode")
+
+
+def _stream_compat(file_path: str, with_audio: bool = True, audio_bitrate: str = "192k") -> StreamingResponse:
+    """Full compatibility transcode: re-encode video to H.264 (High profile,
+    8-bit yuv420p), capped to 1080p with a bounded bitrate, and audio to AAC.
+
+    For devices/networks where stream-copy playback drops frames or stutters —
+    e.g. HEVC/VP9/AV1 sources, 10-bit or High-10 profiles, or bitrates too high
+    for the link.  Costs server CPU but produces the most broadly-playable,
+    network-friendly stream.
     """
     from app.config import get_settings
-    settings = get_settings()
-    ffmpeg = settings.resolved_ffmpeg
+    ffmpeg = get_settings().resolved_ffmpeg
+    audio_args = ["-c:a", "aac", "-b:a", audio_bitrate] if with_audio else ["-an"]
+    cmd = [
+        ffmpeg, "-i", file_path,
+        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high",
+        "-pix_fmt", "yuv420p",
+        "-vf", "scale='min(1920,iw)':-2",   # cap width to 1920 (≤1080p), keep aspect
+        "-crf", "23", "-maxrate", "6M", "-bufsize", "12M",
+        "-g", "60",
+        *audio_args,
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4", "-v", "warning", "pipe:1",
+    ]
+    logger.info("Compat-transcode streaming (%s): %s",
+                "A/V" if with_audio else "video-only", os.path.basename(file_path))
+    return _streaming_response(cmd, file_path, "compat" if with_audio else "compat-vo", heavy=True)
 
+
+# Vertical scroll speed of the theatre wall, in pixels/second (gentle drift).
+_THEATRE_SCROLL_PX_S = 30
+
+
+def _stream_theatre(file_path: str, backdrop_path: str, playback_ratio: int = 75) -> StreamingResponse:
+    """Composite the source video centred over the scrolling artwork-wall backdrop
+    into a single H.264/AAC stream (for Kodi's theatre mode).
+
+    The backdrop is a tall cached image (`CANVAS_W` × `2·SCROLL_SPAN`); a
+    `CANVAS_W`×`CANVAS_H` window is cropped at a time-driven y offset so the wall
+    drifts upward and loops seamlessly (the image is the montage stacked twice).
+    The video is scaled into a centred box sized to `playback_ratio` % of the
+    canvas. Always a full re-encode, so it's marked heavy (transcode semaphore)."""
+    from app.config import get_settings
+    from app.services.theatre_backdrop import CANVAS_W, CANVAS_H, SCROLL_SPAN
+    ffmpeg = get_settings().resolved_ffmpeg
+    box_w = round(CANVAS_W * playback_ratio / 100)
+    box_h = round(CANVAS_H * playback_ratio / 100)
+    # Commas inside the crop y-expression must be escaped so they aren't read as
+    # filter separators. y = mod(t*speed, SCROLL_SPAN) scrolls then wraps.
+    crop_y = f"mod(t*{_THEATRE_SCROLL_PX_S}\\,{SCROLL_SPAN})"
+    filter_complex = (
+        f"[0:v]crop={CANVAS_W}:{CANVAS_H}:0:'{crop_y}',format=yuv420p[bg];"
+        f"[1:v]scale={box_w}:{box_h}:force_original_aspect_ratio=decrease[vid];"
+        f"[bg][vid]overlay=(W-w)/2:(H-h)/2:shortest=1,format=yuv420p[out]"
+    )
     cmd = [
         ffmpeg,
+        "-framerate", "30", "-loop", "1", "-i", backdrop_path,  # tall scrolling wall
         "-i", file_path,
-        "-c:v", "copy",          # pass through video untouched
-        "-c:a", "aac",           # transcode audio to AAC
-        "-b:a", audio_bitrate,   # configurable audio bitrate
+        "-filter_complex", filter_complex,
+        "-map", "[out]", "-map", "1:a?",
+        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high",
+        "-pix_fmt", "yuv420p",
+        "-crf", "23", "-maxrate", "6M", "-bufsize", "12M", "-g", "60",
+        "-c:a", "aac", "-b:a", "192k",
         "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-        "-f", "mp4",             # fragmented MP4 to stdout
-        "-v", "warning",
-        "pipe:1",
+        "-f", "mp4", "-v", "warning", "pipe:1",
     ]
-
-    logger.info(f"Transcode-streaming: {os.path.basename(file_path)}")
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **_POPEN_FLAGS,
-    )
-    _register_stream(file_path, process)
-
-    def _generate():
-        try:
-            while True:
-                chunk = process.stdout.read(1024 * 1024)  # 1MB chunks
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            _unregister_stream(file_path, process)
-            # Force-kill immediately on disconnect to prevent orphaned processes
-            try:
-                process.kill()
-            except OSError:
-                pass
-            try:
-                process.stdout.close()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=5)
-            except Exception:
-                pass
-            try:
-                if process.returncode and process.returncode not in (0, -9, -15, 4294967295):
-                    stderr = process.stderr.read().decode(errors="replace")
-                    if stderr.strip():
-                        logger.warning(f"Transcode exited {process.returncode}: {stderr[:500]}")
-            except Exception:
-                pass
-            try:
-                process.stderr.close()
-            except OSError:
-                pass
-
-    return StreamingResponse(
-        _generate(),
-        media_type="video/mp4",
-        headers={
-            "Content-Type": "video/mp4",
-            "Cache-Control": "no-cache",
-        },
-    )
+    logger.info("Theatre streaming: %s", os.path.basename(file_path))
+    return _streaming_response(cmd, file_path, "theatre", heavy=True)
 
 
 # ── Audio download ─────────────────────────────────────────

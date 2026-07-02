@@ -283,3 +283,96 @@ def compute_ids_for_video(video: "VideoItem") -> dict:
         video_phash=video.video_phash,
     )
     return {"playarr_track_id": track_id, "playarr_video_id": video_id}
+
+
+# ── Fast content signature ───────────────────────────────────────
+
+def compute_file_signature(file_path: str) -> Optional[str]:
+    """Compute a cheap, deterministic content signature for a media file.
+
+    Hashes the file size plus three 1 MB samples (head, middle, tail) rather
+    than the whole file — fast even for multi-GB videos while remaining a
+    strong exact-content key for integrity checks and cross-instance dedup.
+
+    Returns a 64-char SHA-256 hex string, or None on failure.
+    """
+    import os
+    SAMPLE = 1 << 20  # 1 MB
+    try:
+        size = os.path.getsize(file_path)
+        h = hashlib.sha256()
+        h.update(str(size).encode("ascii"))
+        with open(file_path, "rb") as f:
+            # Head
+            h.update(f.read(SAMPLE))
+            # Middle
+            if size > SAMPLE * 2:
+                f.seek(size // 2)
+                h.update(f.read(SAMPLE))
+            # Tail
+            if size > SAMPLE:
+                f.seek(max(0, size - SAMPLE))
+                h.update(f.read(SAMPLE))
+        return h.hexdigest()
+    except Exception as e:
+        logger.warning(f"File signature failed for {file_path}: {e}")
+        return None
+
+
+def enrich_content_identity(video: "VideoItem", acoustid_api_key: Optional[str] = None) -> dict:
+    """Populate all file-derived identity signals on a VideoItem, then its IDs.
+
+    Best-effort and idempotent — only computes signals that are missing and an
+    accessible file is required.  Sets, when possible:
+      video_phash, file_checksum, audio_fingerprint, acoustid_id, mb_recording_id
+    and finally playarr_track_id / playarr_video_id (which incorporate phash).
+
+    Never raises; returns a dict of the identity values that were set.
+    """
+    import os
+    settings = get_settings()
+    path = getattr(video, "file_path", None)
+
+    if path and os.path.isfile(path):
+        # Perceptual hash of a representative frame
+        if not video.video_phash:
+            ph = compute_phash(path)
+            if ph:
+                video.video_phash = ph
+
+        # Fast exact-content signature
+        if not getattr(video, "file_checksum", None):
+            sig = compute_file_signature(path)
+            if sig:
+                video.file_checksum = sig
+
+        # Audio fingerprint (Chromaprint) — the strongest cross-instance key.
+        # Computed even without an AcoustID key (the fingerprint string is set
+        # before the AcoustID lookup); the lookup additionally fills acoustid/MB.
+        if not video.audio_fingerprint:
+            try:
+                from app.ai.fingerprint_service import identify_track
+                fp = identify_track(
+                    file_path=path,
+                    acoustid_api_key=acoustid_api_key,
+                    ffmpeg_path=settings.resolved_ffmpeg,
+                )
+                if fp.fingerprint:
+                    video.audio_fingerprint = fp.fingerprint
+                if fp.best_match:
+                    if fp.best_match.mb_recording_id and not video.mb_recording_id:
+                        video.mb_recording_id = fp.best_match.mb_recording_id
+            except Exception as e:
+                logger.debug(f"Fingerprint enrichment skipped for video {getattr(video, 'id', '?')}: {e}")
+
+    ids = compute_ids_for_video(video)
+    video.playarr_track_id = ids["playarr_track_id"]
+    video.playarr_video_id = ids["playarr_video_id"]
+    return {
+        "playarr_track_id": ids["playarr_track_id"],
+        "playarr_video_id": ids["playarr_video_id"],
+        "video_phash": video.video_phash,
+        "file_checksum": getattr(video, "file_checksum", None),
+        "audio_fingerprint": bool(video.audio_fingerprint),
+        "acoustid_id": video.acoustid_id,
+    }

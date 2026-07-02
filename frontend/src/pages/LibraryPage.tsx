@@ -16,6 +16,7 @@ import { RescanOptionsDialog } from "@/components/RescanOptionsDialog";
 import type { RescanOptions } from "@/components/RescanOptionsDialog";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { usePartyMode } from "@/hooks/usePartyMode";
+import { getLibraryPrefs, patchLibraryPrefs, PAGE_SIZE_OPTIONS } from "@/lib/libraryPrefs";
 import type { ViewMode, LibraryParams, FacetFilterParams } from "@/types";
 
 const SORT_OPTIONS = [
@@ -25,16 +26,6 @@ const SORT_OPTIONS = [
   { value: "created_at", label: "Recently Added" },
   { value: "updated_at", label: "Recently Updated" },
 ];
-
-const STORAGE_KEY_VIEW = "playarr:library:view";
-const STORAGE_KEY_SORT = "playarr:library:sort";
-const STORAGE_KEY_DIR = "playarr:library:dir";
-const STORAGE_KEY_PAGE_SIZE = "playarr:library:pageSize";
-const PAGE_SIZE_OPTIONS = [12, 24, 48, 96, 192];
-
-function loadStorage(key: string, fallback: string): string {
-  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
-}
 
 function Pagination({ page, totalPages, total, onPageChange }: {
   page: number; totalPages: number; total: number;
@@ -77,19 +68,15 @@ function Pagination({ page, totalPages, total, onPageChange }: {
 export function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [view, setViewRaw] = useState<ViewMode>(() => loadStorage(STORAGE_KEY_VIEW, "grid") as ViewMode);
+  const [view, setViewRaw] = useState<ViewMode>(() => getLibraryPrefs().view as ViewMode);
   const setView = useCallback((v: ViewMode) => {
     setViewRaw(v);
-    try { localStorage.setItem(STORAGE_KEY_VIEW, v); } catch { /* ignore */ }
+    patchLibraryPrefs({ view: v });
   }, []);
-  const [pageSize, setPageSizeRaw] = useState<number>(() => {
-    const stored = loadStorage(STORAGE_KEY_PAGE_SIZE, "48");
-    const n = Number(stored);
-    return PAGE_SIZE_OPTIONS.includes(n) ? n : 48;
-  });
+  const [pageSize, setPageSizeRaw] = useState<number>(() => getLibraryPrefs().pageSize);
   const setPageSize = useCallback((n: number) => {
     setPageSizeRaw(n);
-    try { localStorage.setItem(STORAGE_KEY_PAGE_SIZE, String(n)); } catch { /* ignore */ }
+    patchLibraryPrefs({ pageSize: n });
   }, []);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [rescanDialogOpen, setRescanDialogOpen] = useState(false);
@@ -115,8 +102,8 @@ export function LibraryPage() {
     song_rating: searchParams.get("song_rating") ? Number(searchParams.get("song_rating")) : undefined,
     video_rating: searchParams.get("video_rating") ? Number(searchParams.get("video_rating")) : undefined,
     quality: searchParams.get("quality") ?? undefined,
-    sort_by: searchParams.get("sort") ?? loadStorage(STORAGE_KEY_SORT, "artist"),
-    sort_dir: (searchParams.get("dir") as "asc" | "desc") ?? loadStorage(STORAGE_KEY_DIR, "asc") as "asc" | "desc",
+    sort_by: searchParams.get("sort") ?? getLibraryPrefs().sort,
+    sort_dir: (searchParams.get("dir") as "asc" | "desc") ?? getLibraryPrefs().dir,
   };
 
   const { data, isLoading, isError, refetch } = useLibrary(params);
@@ -154,11 +141,9 @@ export function LibraryPage() {
 
   const setParam = useCallback(
     (key: string, value: string | null) => {
-      // Persist sort settings to localStorage
-      try {
-        if (key === "sort" && value) localStorage.setItem(STORAGE_KEY_SORT, value);
-        if (key === "dir" && value) localStorage.setItem(STORAGE_KEY_DIR, value);
-      } catch { /* ignore */ }
+      // Persist sort settings server-side
+      if (key === "sort" && value) patchLibraryPrefs({ sort: value });
+      if (key === "dir" && (value === "asc" || value === "desc")) patchLibraryPrefs({ dir: value });
       setSearchParams((prev) => {
         const next = new URLSearchParams(prev);
         if (value) next.set(key, value);

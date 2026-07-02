@@ -16,6 +16,8 @@ import ReviewQueuePage from "@/pages/ReviewQueuePage";
 import MatchDetailPage from "@/pages/MatchDetailPage";
 import { ImportLibraryPage } from "@/pages/ImportLibraryPage";
 import { NowPlayingPage } from "@/pages/NowPlayingPage";
+import { TvModePage } from "@/pages/TvModePage";
+import { CastModePage } from "@/pages/CastModePage";
 import { VideoEditorPage } from "@/pages/VideoEditorPage";
 import { ScraperTesterPage } from "@/pages/ScraperTesterPage";
 import { NewVideosPage } from "@/pages/NewVideosPage";
@@ -56,6 +58,8 @@ function App() {
               <Route path="settings" element={<SettingsPage />} />
               <Route path="library-import" element={<ImportLibraryPage />} />
               <Route path="now-playing" element={<NowPlayingPage />} />
+              <Route path="tv" element={<TvModePage />} />
+              <Route path="cast" element={<CastModePage />} />
               <Route path="video-editor" element={<VideoEditorPage />} />
               <Route path="metadata-manager" element={<MetadataManagerPage />} />
               <Route path="archive" element={<ArchivePage />} />

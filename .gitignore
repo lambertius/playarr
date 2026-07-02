@@ -39,6 +39,7 @@ build/
 # ── App Data (runtime / user-generated) ──
 data/
 logs/
+*.log
 reports/
 cache/
 previews/
@@ -71,6 +72,9 @@ docker-compose.override.yml
 dev/
 frontend-old/
 *.bak
+
+# ── AI assistant working notes (not for distribution) ──
+memory/
 
 # ── Build Output ──
 dist/

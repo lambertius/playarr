@@ -347,6 +347,7 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
         db = SessionLocal()
         try:
             from app.pipeline_lib.ai.scene_analysis import analyze_scenes
+            from app.models import VideoItem
             analyze_scenes(db, video_id)
             _mark_processing_state(db, video_id, "scenes_analyzed", method="scene_analysis")
             _mark_processing_state(db, video_id, "thumbnail_selected", method="scene_analysis")
@@ -360,7 +361,6 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
             # Persist scene thumbnails to the video folder so they survive
             # a library clear + re-scan cycle (fallback discovery).
             try:
-                from app.models import VideoItem
                 from app.ai.models import AIThumbnail
                 import shutil as _shutil
 

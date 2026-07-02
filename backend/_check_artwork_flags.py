@@ -3,7 +3,7 @@ import sqlite3
 import os
 import re
 
-DB_PATH = r"C:\Users\user\AppData\Roaming\Playarr\data\playarr.db"
+DB_PATH = os.path.join(os.environ["APPDATA"], "Playarr", "data", "playarr.db")
 if not os.path.exists(DB_PATH):
     DB_PATH = "playarr.db"  # fallback to dev DB
 

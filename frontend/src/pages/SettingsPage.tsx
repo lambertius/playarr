@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Compass, Download, Power, ScrollText, ExternalLink } from "lucide-react";
+import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Compass, Download, Power, ScrollText, ExternalLink, Tv, Cast, Image, Music, Puzzle, Wrench, Star } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport } from "@/hooks/queries";
 import { settingsApi, statsApi } from "@/lib/api";
@@ -12,6 +12,7 @@ import { LogViewer } from "@/components/LogViewer";
 import { NewVideosSettings } from "@/components/new-videos/NewVideosSettings";
 import { AISettingsPanel } from "@/components/AISettingsPanel";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
+import type { QueueHideMode } from "@/stores/artworkSettingsStore";
 import { useFireworksStore } from "@/stores/fireworksStore";
 import {
   loadExclusions,
@@ -19,8 +20,13 @@ import {
   DEFAULT_EXCLUSIONS,
   loadAnimationSettings,
   saveAnimationSettings,
+  loadEraSettings,
+  saveEraSettings,
+  loadPartyPlaylist,
+  savePartyPlaylist,
 } from "@/hooks/usePartyMode";
-import type { PartyModeAnimationSettings } from "@/hooks/usePartyMode";
+import type { PartyModeAnimationSettings, PartyModeEraSettings } from "@/hooks/usePartyMode";
+import { usePlaylists } from "@/hooks/queries";
 import type { AppSetting, PartyModeExclusions } from "@/types";
 
 /* ── Setting metadata: group, human label, and description ── */
@@ -322,7 +328,7 @@ const SETTING_META: Record<string, SettingMeta> = {
 
 const GROUP_LABELS: Record<string, string> = {
   library: "Library & Storage",
-  av: "Video Settings",
+  av: "Video & Audio",
   import: "Import Defaults",
   previews: "Preview Generation",
   ai: "AI / Summaries",
@@ -331,26 +337,51 @@ const GROUP_LABELS: Record<string, string> = {
   tmvdb: "The Music Video DB",
 };
 
-/* ── Top-level tabs that group related setting sections ── */
+/* ── Sidebar navigation ── */
 
-interface SettingsTab {
-  id: string;
-  label: string;
-  icon: React.ReactNode;
-  groups: string[];           // setting groups rendered under this tab
-  extras?: string[];          // hard-coded client-side sections (nowplaying, partymode)
-}
+// Sidebar navigation — every category and sub-category is visible at once,
+// grouped under section headings. Each item id maps to either a server-driven
+// settings group (rendered by renderGroup) or a client-side section (rendered by
+// renderSection). Replaces the old scrollable top-tab bar.
+interface NavItem { id: string; label: string; icon: React.ReactNode }
+interface NavGroup { heading: string; items: NavItem[] }
 
-const SETTINGS_TABS: SettingsTab[] = [
-  { id: "library",  label: "Library",  icon: <HardDrive size={16} />, groups: ["library", "import"] },
-  { id: "media",    label: "Media",    icon: <Film size={16} />,      groups: ["av", "previews"] },
-  { id: "ai",       label: "AI",       icon: <Sparkles size={16} />,  groups: ["ai"] },
-  { id: "playback", label: "Playback", icon: <Play size={16} />,      groups: ["nowplaying"], extras: ["nowplaying", "partymode"] },
-  { id: "system",   label: "System",   icon: <Server size={16} />,    groups: ["server"], extras: ["system"] },
-  { id: "tmvdb",    label: "TMVDB",    icon: <Compass size={16} />,   groups: ["tmvdb"] },
-  { id: "discovery", label: "Discovery", icon: <Compass size={16} />,  groups: [], extras: ["newvideos"] },
-  { id: "logs",      label: "Logs",      icon: <ScrollText size={16} />, groups: [], extras: ["logviewer"] },
+const SETTINGS_NAV: NavGroup[] = [
+  { heading: "Library", items: [
+    { id: "library", label: "Library & Storage", icon: <HardDrive size={16} /> },
+    { id: "import",  label: "Import Defaults",   icon: <Download size={16} /> },
+  ]},
+  { heading: "Media", items: [
+    { id: "av",       label: "Video & Audio", icon: <Film size={16} /> },
+    { id: "previews", label: "Previews",      icon: <Image size={16} /> },
+  ]},
+  { heading: "Intelligence", items: [
+    { id: "ai",        label: "AI",        icon: <Sparkles size={16} /> },
+    { id: "newvideos", label: "Discovery", icon: <Compass size={16} /> },
+  ]},
+  { heading: "Playback", items: [
+    { id: "nowplaying", label: "Now Playing", icon: <Play size={16} /> },
+    { id: "partymode",  label: "Party Mode",  icon: <Music size={16} /> },
+    { id: "tvmode",     label: "TV Mode",     icon: <Tv size={16} /> },
+    { id: "castmode",   label: "Cast Mode",   icon: <Cast size={16} /> },
+  ]},
+  { heading: "System", items: [
+    { id: "server",     label: "Server",             icon: <Server size={16} /> },
+    { id: "startup",    label: "Startup & Behaviour", icon: <Power size={16} /> },
+    { id: "kodi",       label: "Kodi Add-on",        icon: <Puzzle size={16} /> },
+    { id: "management", label: "Server Management",  icon: <Wrench size={16} /> },
+    { id: "logs",       label: "Logs",               icon: <ScrollText size={16} /> },
+  ]},
+  { heading: "Integrations", items: [
+    { id: "tmvdb", label: "TMVDB", icon: <Compass size={16} /> },
+  ]},
 ];
+
+// Pinned at the foot of the sidebar.
+const ABOUT_ITEM: NavItem = { id: "about", label: "About", icon: <Info size={16} /> };
+
+// Items whose id is a server-driven settings group (handled by renderGroup).
+const SERVER_GROUP_IDS = new Set(["library", "import", "av", "previews", "ai", "server", "tmvdb"]);
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -358,7 +389,7 @@ export function SettingsPage() {
   const { toast } = useToast();
   const { data: settings, isLoading, isError, refetch } = useSettings();
   const updateMutation = useUpdateSetting();
-  const [activeTab, setActiveTab] = useState("library");
+  const [activeSection, setActiveSection] = useState("library");
   const [dirDefaults, setDirDefaults] = useState<{ library_dir: string } | null>(null);
 
   useEffect(() => {
@@ -403,9 +434,6 @@ export function SettingsPage() {
       groups["other"].push(s);
     }
   });
-
-  const currentTabDef = SETTINGS_TABS.find((t) => t.id === activeTab) ?? SETTINGS_TABS[0];
-  const visibleGroups = currentTabDef.groups.filter((g) => groups[g]?.length);
 
   /* shared helper — renders SettingRow list for a group with import-exclusive logic */
   const settingRows = (items: AppSetting[]) =>
@@ -684,115 +712,101 @@ export function SettingsPage() {
     );
   };
 
+  /* ── Render a client-side section wrapped to match renderGroup's chrome ── */
+  const extraSection = (title: string, node: React.ReactNode, plain = false) => (
+    <section>
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
+        {title}
+      </h2>
+      <div className={plain ? "card" : "card space-y-5"}>{node}</div>
+    </section>
+  );
+
+  /* ── Dispatch the active sidebar entry to its content ── */
+  const renderSection = (id: string): React.ReactNode => {
+    if (SERVER_GROUP_IDS.has(id)) return renderGroup(id);
+    switch (id) {
+      case "newvideos": return extraSection("New Videos Discovery", <NewVideosSettings />);
+      case "nowplaying": return extraSection(GROUP_LABELS.nowplaying, <NowPlayingSettings />);
+      case "partymode": return extraSection("Party Mode", <PartyModeSettings />);
+      case "tvmode": return extraSection("TV Mode", <TvModeSettings />);
+      case "castmode": return extraSection("Cast Mode", <CastModeSettings />);
+      case "startup":
+        return extraSection("Startup & Behaviour", (
+          <StartupControls settings={settingsByKey} onSave={(key, value, valueType) => {
+            // Return the promise so the registry sync can await the DB write.
+            return updateMutation.mutateAsync(
+              { key, value, value_type: valueType },
+              {
+                onSuccess: () => toast({ type: "success", title: `${SETTING_META[key]?.label || key} saved` }),
+                onError: () => toast({ type: "error", title: `Failed to save ${SETTING_META[key]?.label || key}` }),
+              }
+            );
+          }} />
+        ));
+      case "kodi": return extraSection("Kodi Add-on", <KodiPluginSettings />);
+      case "management": return extraSection("Server Management", <RestartServerButton />);
+      case "logs": return extraSection("Log Viewer", <LogViewer />, true);
+      case "about": return extraSection("System Information", <VersionInfo />);
+      default: return null;
+    }
+  };
+
+  const navItemClass = (id: string) =>
+    `flex items-center gap-2.5 w-full px-3 py-1.5 rounded-md text-sm text-left transition-colors ${
+      activeSection === id
+        ? "bg-accent/15 text-accent font-medium"
+        : "text-text-muted hover:text-text-secondary hover:bg-white/5"
+    }`;
+
   return (
-    <div className={`p-4 md:p-6 ${activeTab === "logs" ? "max-w-5xl" : "max-w-3xl"}`}>
+    <div className="p-4 md:p-6">
       <h1 className="text-2xl font-bold text-text-primary mb-4">Settings</h1>
 
-      {/* ── Tab bar ── */}
-      <div className="flex gap-1 border-b border-white/10 mb-6 overflow-x-auto">
-        {SETTINGS_TABS.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
-              activeTab === tab.id
-                ? "border-accent text-accent"
-                : "border-transparent text-text-muted hover:text-text-secondary hover:border-white/20"
-            }`}
-          >
-            {tab.icon}
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      <div className="flex flex-col md:flex-row gap-6">
+        {/* ── Sidebar (md+) ── */}
+        <nav className="hidden md:block md:w-56 shrink-0 self-start md:sticky md:top-6">
+          {SETTINGS_NAV.map((group) => (
+            <div key={group.heading} className="mb-4">
+              <div className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted/70">
+                {group.heading}
+              </div>
+              {group.items.map((item) => (
+                <button key={item.id} onClick={() => setActiveSection(item.id)} className={navItemClass(item.id)}>
+                  {item.icon}
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          ))}
+          <div className="mt-2 pt-3 border-t border-white/10">
+            <button onClick={() => setActiveSection(ABOUT_ITEM.id)} className={navItemClass(ABOUT_ITEM.id)}>
+              {ABOUT_ITEM.icon}
+              {ABOUT_ITEM.label}
+            </button>
+          </div>
+        </nav>
 
-      {/* ── Tab content ── */}
-      <div className="space-y-8">
-        {visibleGroups.map((group) => renderGroup(group))}
+        {/* ── Mobile section picker ── */}
+        <select
+          value={activeSection}
+          onChange={(e) => setActiveSection(e.target.value)}
+          className="input-field md:hidden"
+        >
+          {SETTINGS_NAV.map((group) => (
+            <optgroup key={group.heading} label={group.heading}>
+              {group.items.map((item) => (
+                <option key={item.id} value={item.id}>{item.label}</option>
+              ))}
+            </optgroup>
+          ))}
+          <option value={ABOUT_ITEM.id}>{ABOUT_ITEM.label}</option>
+        </select>
 
-        {/* Client-side extras for the active tab */}
-        {currentTabDef.extras?.includes("nowplaying") && (
-          <section>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
-              {GROUP_LABELS.nowplaying}
-            </h2>
-            <div className="card space-y-5">
-              <NowPlayingSettings />
-            </div>
-          </section>
-        )}
-
-        {currentTabDef.extras?.includes("partymode") && (
-          <section>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
-              Party Mode
-            </h2>
-            <div className="card space-y-5">
-              <PartyModeSettings />
-            </div>
-          </section>
-        )}
-
-        {currentTabDef.extras?.includes("newvideos") && (
-          <section>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
-              New Videos Discovery
-            </h2>
-            <div className="card space-y-5">
-              <NewVideosSettings />
-            </div>
-          </section>
-        )}
-
-        {currentTabDef.extras?.includes("system") && (
-          <section>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
-              System Information
-            </h2>
-            <div className="card space-y-5">
-              <VersionInfo />
-            </div>
-          </section>
-        )}
-        {currentTabDef.extras?.includes("system") && (
-          <section>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
-              Startup & Behaviour
-            </h2>
-            <div className="card space-y-5">
-              <StartupControls settings={settingsByKey} onSave={(key, value, valueType) => {
-                updateMutation.mutate(
-                  { key, value, value_type: valueType },
-                  {
-                    onSuccess: () => toast({ type: "success", title: `${SETTING_META[key]?.label || key} saved` }),
-                    onError: () => toast({ type: "error", title: `Failed to save ${SETTING_META[key]?.label || key}` }),
-                  }
-                );
-              }} />
-            </div>
-          </section>
-        )}
-        {currentTabDef.extras?.includes("system") && (
-          <section>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
-              Server Management
-            </h2>
-            <div className="card space-y-5">
-              <RestartServerButton />
-            </div>
-          </section>
-        )}
-
-        {currentTabDef.extras?.includes("logviewer") && (
-          <section>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
-              Log Viewer
-            </h2>
-            <div className="card">
-              <LogViewer />
-            </div>
-          </section>
-        )}
+        {/* ── Content ── */}
+        <div className={`flex-1 min-w-0 space-y-8 ${activeSection === "logs" ? "max-w-5xl" : "max-w-3xl"}`}>
+          {renderSection(activeSection)}
+        </div>
       </div>
     </div>
   );
@@ -805,7 +819,7 @@ function StartupControls({
   onSave,
 }: {
   settings: Record<string, AppSetting>;
-  onSave: (key: string, value: string, valueType: string) => void;
+  onSave: (key: string, value: string, valueType: string) => void | Promise<unknown>;
 }) {
   const { toast } = useToast();
   const startupEnabled = settings["startup_with_system"]?.value === "true";
@@ -831,18 +845,26 @@ function StartupControls({
     }
   };
 
-  const toggleStartup = () => {
+  const toggleStartup = async () => {
     const next = startupEnabled ? "false" : "true";
-    onSave("startup_with_system", next, "bool");
-    // Sync registry after a short delay so the DB write lands first
-    setTimeout(syncStartup, 600);
+    try {
+      // Await the DB write, then sync the registry so it reads the new value.
+      await onSave("startup_with_system", next, "bool");
+      await syncStartup();
+    } catch {
+      /* save failure already surfaced by onSave's toast */
+    }
   };
 
-  const saveDelay = () => {
+  const saveDelay = async () => {
     const clamped = Math.max(0, Math.min(300, parseInt(delayInput) || 0));
     setDelayInput(String(clamped));
-    onSave("startup_delay_seconds", String(clamped), "int");
-    if (startupEnabled) setTimeout(syncStartup, 600);
+    try {
+      await onSave("startup_delay_seconds", String(clamped), "int");
+      if (startupEnabled) await syncStartup();
+    } catch {
+      /* save failure already surfaced by onSave's toast */
+    }
   };
 
   return (
@@ -852,7 +874,7 @@ function StartupControls({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <p className="text-sm font-medium text-text-primary">Start with Windows</p>
-            <Tooltip content="Adds Playarr to the Windows startup registry so it launches automatically on login. Uses pythonw.exe (no console window) when available.">
+            <Tooltip content="Adds Playarr to the Windows startup registry (HKCU Run) so it launches automatically on login. Launches to the system tray with no console window.">
               <Info size={13} className="text-text-muted cursor-help" />
             </Tooltip>
           </div>
@@ -1098,6 +1120,57 @@ function VersionInfo() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── Kodi add-on download (version-matched to this server) ── */
+
+function KodiPluginSettings() {
+  const [info, setInfo] = useState<{ available: boolean; version: string; filename: string } | null>(null);
+
+  useEffect(() => {
+    settingsApi.kodiPluginInfo().then(setInfo).catch(() => setInfo(null));
+  }, []);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <label className="text-sm font-medium text-text-primary">Kodi Add-on</label>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+            Download the Playarr add-on for Kodi. The download is built from — and version-matched
+            to — this server ({info?.version ? `v${info.version}` : "…"}), so the add-on and server
+            never drift out of sync. Re-download it after every Playarr update.
+          </p>
+        </div>
+        <div className="shrink-0 sm:pt-0.5">
+          {info && !info.available ? (
+            <span className="text-xs text-text-muted">Not bundled with this build</span>
+          ) : (
+            <a
+              href={settingsApi.kodiPluginDownloadUrl()}
+              download
+              className="btn-primary btn-sm flex items-center gap-1.5 no-underline"
+            >
+              <Download size={14} />
+              Download
+            </a>
+          )}
+        </div>
+      </div>
+
+      <div className="rounded-lg bg-surface-dark/50 border border-white/5 p-3 space-y-1.5">
+        <p className="text-xs font-medium text-text-secondary">Install in Kodi</p>
+        <ol className="text-xs text-text-muted leading-relaxed list-decimal pl-4 space-y-0.5">
+          <li>Copy the downloaded zip to your Kodi device.</li>
+          <li>In Kodi: <span className="text-text-secondary">Settings → Add-ons → Install from zip file</span>.</li>
+          <li>Select the zip, then open the Playarr add-on and set your server address in its settings.</li>
+        </ol>
+        <p className="text-[11px] text-text-muted/80 pt-1">
+          Installing from zip requires "Unknown sources" enabled in Kodi's add-on settings.
+        </p>
+      </div>
     </div>
   );
 }
@@ -1714,6 +1787,9 @@ function NowPlayingSettings() {
   const artChangeEnabled = useArtworkSettings((s) => s.artChangeEnabled);
   const artChangeCount = useArtworkSettings((s) => s.artChangeCount);
   const artChangeStyle = useArtworkSettings((s) => s.artChangeStyle);
+  const queueHideMode = useArtworkSettings((s) => s.queueHideMode);
+  const queueHideDelay = useArtworkSettings((s) => s.queueHideDelay);
+  const browserTranscode = useArtworkSettings((s) => s.browserTranscode);
   const setArtworkSize = useArtworkSettings((s) => s.setArtworkSize);
   const setScrollDuration = useArtworkSettings((s) => s.setScrollDuration);
   const setChangeRate = useArtworkSettings((s) => s.setChangeRate);
@@ -1727,6 +1803,9 @@ function NowPlayingSettings() {
   const setArtChangeEnabled = useArtworkSettings((s) => s.setArtChangeEnabled);
   const setArtChangeCount = useArtworkSettings((s) => s.setArtChangeCount);
   const setArtChangeStyle = useArtworkSettings((s) => s.setArtChangeStyle);
+  const setQueueHideMode = useArtworkSettings((s) => s.setQueueHideMode);
+  const setQueueHideDelay = useArtworkSettings((s) => s.setQueueHideDelay);
+  const setBrowserTranscode = useArtworkSettings((s) => s.setBrowserTranscode);
 
   return (
     <>
@@ -1989,6 +2068,73 @@ function NowPlayingSettings() {
         </div>
       </div>
 
+      {/* Queue Auto-Hide */}
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <label className="text-sm font-medium text-text-primary">Queue Auto-Hide</label>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+            Fade the queue out automatically on the Now Playing screen (windowed and fullscreen).
+            <strong>Per song</strong> reappears at the start of every track; <strong>Full auto-hide</strong>{" "}
+            stays hidden until you move the mouse. Either way, moving the mouse brings it back (like the play bar).
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+          <select
+            value={queueHideMode}
+            onChange={(e) => setQueueHideMode(e.target.value as QueueHideMode)}
+            className="input-field w-auto py-1.5 text-sm"
+          >
+            <option value="off">No auto-hide</option>
+            <option value="per-song">Per song</option>
+            <option value="auto">Full auto-hide</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Queue Hide Delay */}
+      <div className={`flex flex-col sm:flex-row sm:items-start gap-2 transition-opacity ${queueHideMode === "off" ? "opacity-40 pointer-events-none" : ""}`}>
+        <div className="flex-1 min-w-0">
+          <label className="text-sm font-medium text-text-primary">Hide After (s)</label>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+            How long the queue stays visible before it fades out.
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+          <input
+            type="range"
+            min={2}
+            max={30}
+            step={1}
+            value={queueHideDelay}
+            onChange={(e) => setQueueHideDelay(Number(e.target.value))}
+            className="w-32 accent-accent"
+          />
+          <span className="text-sm text-text-secondary w-12 text-right">{queueHideDelay}s</span>
+        </div>
+      </div>
+
+      {/* Compatibility transcoding — browser playback only.  TV and Cast
+          transcoding live in their own Party Mode subsections. */}
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <label className="text-sm font-medium text-text-primary">Transcode for Compatibility — Browser</label>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+            Re-encode video on the server to a broadly-compatible H.264/AAC stream for regular in-browser
+            playback (Now Playing and the video player). Turn on if normal playback drops frames or stutters
+            (e.g. HEVC/VP9/AV1, 10-bit, or high-bitrate sources). Uses more server CPU. TV and Cast modes
+            have their own transcode toggles under Party Mode.
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+          <button
+            onClick={() => setBrowserTranscode(!browserTranscode)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${browserTranscode ? "bg-accent" : "bg-white/20"}`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${browserTranscode ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+      </div>
+
       {/* Metadata Overlay Duration */}
       <div className="flex flex-col sm:flex-row sm:items-start gap-2">
         <div className="flex-1 min-w-0">
@@ -2054,8 +2200,11 @@ const VERSION_TYPE_OPTIONS = [
 
 function PartyModeSettings() {
   const { toast } = useToast();
+  const { data: playlists } = usePlaylists();
   const [exclusions, setExclusions] = useState<PartyModeExclusions>(loadExclusions);
   const [animation, setAnimation] = useState<PartyModeAnimationSettings>(loadAnimationSettings);
+  const [era, setEra] = useState<PartyModeEraSettings>(loadEraSettings);
+  const [partyPlaylist, setPartyPlaylist] = useState(loadPartyPlaylist);
   const [artistInput, setArtistInput] = useState("");
   const [genreInput, setGenreInput] = useState("");
   const [albumInput, setAlbumInput] = useState("");
@@ -2065,6 +2214,18 @@ function PartyModeSettings() {
     setExclusions(next);
     saveExclusions(next);
     toast({ type: "success", title: "Party Mode exclusions saved" });
+  };
+
+  const changePartyPlaylist = (playlistId: number | null) => {
+    const next = { playlistId };
+    setPartyPlaylist(next);
+    savePartyPlaylist(next);
+    toast({
+      type: "success",
+      title: playlistId == null
+        ? "Party Mode will auto-generate from the current filter"
+        : "Party Mode playlist set",
+    });
   };
 
   const toggleVersionType = (vt: string) => {
@@ -2097,8 +2258,39 @@ function PartyModeSettings() {
 
   return (
     <>
-      {/* ── Animation ── */}
+      {/* ── Playlist ── */}
       <div>
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Playlist</h4>
+        <div className="space-y-4 pl-2 border-l-2 border-border">
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+            <div className="flex-1 min-w-0">
+              <label className="text-sm font-medium text-text-primary">Party Mode Playlist</label>
+              <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+                Choose a playlist to play (shuffled) when Party Mode starts. Leave as
+                <span className="text-text-secondary"> Auto-generate</span> to build the queue from the current
+                filter and the exclusion / era settings below.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+              <select
+                value={partyPlaylist.playlistId ?? ""}
+                onChange={(e) => changePartyPlaylist(e.target.value === "" ? null : Number(e.target.value))}
+                className="input-field text-sm min-w-[12rem]"
+              >
+                <option value="">Auto-generate from filter</option>
+                {(playlists ?? []).map((pl) => (
+                  <option key={pl.id} value={pl.id}>
+                    {pl.name} ({pl.entry_count})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Animation ── */}
+      <div className="mt-4">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Animation</h4>
         <div className="space-y-4 pl-2 border-l-2 border-border">
           <div className="flex flex-col sm:flex-row sm:items-start gap-2">
@@ -2156,6 +2348,68 @@ function PartyModeSettings() {
         </div>
       </div>
 
+      {/* ── Party Like It's… ── */}
+      <div className="mt-4">
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Party Like It's…</h4>
+        <div className="space-y-4 pl-2 border-l-2 border-border">
+          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+            <div className="flex-1 min-w-0">
+              <label className="text-sm font-medium text-text-primary">Enable</label>
+              <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+                Cap Party Mode at a chosen year — nothing newer plays, and videos closest to that
+                year are favoured for the start of the queue, gradually falling off the further back they go.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+              <button
+                onClick={() => {
+                  const next = { ...era, enabled: !era.enabled };
+                  setEra(next);
+                  saveEraSettings(next);
+                }}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${era.enabled ? "bg-accent" : "bg-white/20"}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${era.enabled ? "translate-x-6" : "translate-x-1"}`} />
+              </button>
+            </div>
+          </div>
+
+          {era.enabled && (
+            <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+              <div className="flex-1 min-w-0">
+                <label className="text-sm font-medium text-text-primary">Year</label>
+                <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+                  Party like it's this year.
+                </p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+                <input
+                  type="number"
+                  min={1900}
+                  max={new Date().getFullYear()}
+                  step={1}
+                  value={era.year}
+                  onChange={(e) => {
+                    const next = { ...era, year: Number(e.target.value) };
+                    setEra(next);
+                  }}
+                  onBlur={() => {
+                    const clamped = Math.min(
+                      new Date().getFullYear(),
+                      Math.max(1900, Math.floor(era.year) || new Date().getFullYear()),
+                    );
+                    const next = { ...era, year: clamped };
+                    setEra(next);
+                    saveEraSettings(next);
+                  }}
+                  className="input-field w-24 py-1.5 text-sm"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* ── Content Filters ── */}
       <div className="mt-4">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Content Filters</h4>
@@ -2190,19 +2444,10 @@ function PartyModeSettings() {
               </p>
             </div>
             <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
-              <select
-                value={exclusions.min_song_rating ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value ? Number(e.target.value) : null;
-                  save({ ...exclusions, min_song_rating: v });
-                }}
-                className="input-field w-auto py-1.5 text-sm"
-              >
-                <option value="">Any</option>
-                {[1, 2, 3, 4, 5].map((r) => (
-                  <option key={r} value={r}>{r} star{r > 1 ? "s" : ""}</option>
-                ))}
-              </select>
+              <MinRatingStars
+                value={exclusions.min_song_rating}
+                onChange={(v) => save({ ...exclusions, min_song_rating: v })}
+              />
             </div>
           </div>
 
@@ -2214,19 +2459,10 @@ function PartyModeSettings() {
               </p>
             </div>
             <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
-              <select
-                value={exclusions.min_video_rating ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value ? Number(e.target.value) : null;
-                  save({ ...exclusions, min_video_rating: v });
-                }}
-                className="input-field w-auto py-1.5 text-sm"
-              >
-                <option value="">Any</option>
-                {[1, 2, 3, 4, 5].map((r) => (
-                  <option key={r} value={r}>{r} star{r > 1 ? "s" : ""}</option>
-                ))}
-              </select>
+              <MinRatingStars
+                value={exclusions.min_video_rating}
+                onChange={(v) => save({ ...exclusions, min_video_rating: v })}
+              />
             </div>
           </div>
         </div>
@@ -2272,6 +2508,149 @@ function PartyModeSettings() {
         </div>
       </div>
     </>
+  );
+}
+
+/* ── TV Mode (/tv) — full-screen Party Mode for a television's own browser ── */
+function TvModeSettings() {
+  const tvResolution = useArtworkSettings((s) => s.tvResolution);
+  const setTvResolution = useArtworkSettings((s) => s.setTvResolution);
+  const tvTranscode = useArtworkSettings((s) => s.tvTranscode);
+  const setTvTranscode = useArtworkSettings((s) => s.setTvTranscode);
+
+  return (
+    <div className="space-y-4 pl-2 border-l-2 border-border">
+      <p className="text-xs text-text-muted leading-relaxed">
+        Open <code className="text-text-secondary">/tv</code> in a browser on the television itself
+        (e.g. an NVIDIA&nbsp;Shield, Google/Android&nbsp;TV, or a Chromium kiosk) — for example
+        <code className="text-text-secondary"> http://&lt;this-pc&gt;:6969/tv</code>. Each visit opens a
+        quick prompt (era + theatre/fullscreen) then plays Party Mode full-screen with no app chrome, and
+        the TV does the decoding directly (no PC streaming overhead). These settings only take effect on
+        that page; regular browser playback is unaffected.
+      </p>
+
+      {/* TV Resolution */}
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <label className="text-sm font-medium text-text-primary">Render Resolution</label>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+            TV browsers often report a low viewport, which leaves the artwork wall only a few tiles
+            wide. This lays the page out on a fixed 16:9 canvas at the chosen resolution then scales it
+            to fit, giving browser-like density. Higher = denser wall and a smaller video relative to the
+            background.
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+          <select
+            value={tvResolution}
+            onChange={(e) => setTvResolution(Number(e.target.value))}
+            className="input-field w-auto py-1.5 text-sm"
+          >
+            <option value={1080}>1080p</option>
+            <option value={1440}>2K (1440p)</option>
+            <option value={2160}>4K (2160p)</option>
+          </select>
+        </div>
+      </div>
+
+      {/* TV transcode */}
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <label className="text-sm font-medium text-text-primary">Transcode for Compatibility</label>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+            Re-encode video on the server to a broadly-compatible, network-friendly H.264/AAC stream
+            (capped at 1080p) for the <code>/tv</code> page. Turn on if TV playback drops frames or stutters
+            (e.g. HEVC/VP9/AV1, 10-bit, or high-bitrate sources). The encode only runs while <code>/tv</code>
+            is actually open, so it adds no PC overhead the rest of the time.
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+          <button
+            onClick={() => setTvTranscode(!tvTranscode)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${tvTranscode ? "bg-accent" : "bg-white/20"}`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${tvTranscode ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Cast Mode (/cast) — low-motion Party Mode for Chrome tab-casting ── */
+function CastModeSettings() {
+  const castTranscode = useArtworkSettings((s) => s.castTranscode);
+  const setCastTranscode = useArtworkSettings((s) => s.setCastTranscode);
+
+  return (
+    <div className="space-y-4 pl-2 border-l-2 border-border">
+      <p className="text-xs text-text-muted leading-relaxed">
+        Use <code className="text-text-secondary">/cast</code> when you "Cast tab" from Chrome on this PC
+        to a Chromecast or smart TV — for example
+        <code className="text-text-secondary"> http://&lt;this-pc&gt;:6969/cast</code>. Each visit opens a
+        quick prompt (era + theatre/fullscreen) first. Chrome re-encodes the whole tab as it streams, so
+        this page strips back the motion — the artwork wall is held static (no scrolling or tile swaps) and
+        blur is disabled — leaving only the video moving. That keeps the cast sharp and the PC's encoder
+        light. Open <code className="text-text-secondary">http://&lt;this-pc&gt;:6969/cast</code> in Chrome,
+        then cast the tab.
+      </p>
+
+      {/* Cast transcode */}
+      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <label className="text-sm font-medium text-text-primary">Transcode for Compatibility</label>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+            Re-encode the source to H.264/AAC for the <code>/cast</code> page. Usually unnecessary since
+            Chrome already re-encodes the tab, but turn it on if the source codec won't decode on this PC
+            (e.g. AV1 without hardware support). Only runs while <code>/cast</code> is open.
+          </p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
+          <button
+            onClick={() => setCastTranscode(!castTranscode)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${castTranscode ? "bg-accent" : "bg-white/20"}`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${castTranscode ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Minimum-rating stars (Party Mode) — same star graphic as song/video
+ *    ratings; clicking the current value clears it back to "Any" (null). ── */
+function MinRatingStars({
+  value,
+  onChange,
+}: {
+  value: number | null;
+  onChange: (rating: number | null) => void;
+}) {
+  const [hover, setHover] = useState(0);
+  return (
+    <span className="inline-flex items-center gap-1" onMouseLeave={() => setHover(0)}>
+      <span className="inline-flex gap-0.5">
+        {[1, 2, 3, 4, 5].map((star) => {
+          const filled = hover ? star <= hover : value != null && star <= value;
+          return (
+            <button
+              key={star}
+              type="button"
+              className={`p-0 transition-colors ${filled ? "text-accent" : "text-text-muted/50"} hover:text-accent-hover`}
+              onMouseEnter={() => setHover(star)}
+              onClick={() => onChange(value === star ? null : star)}
+              aria-label={`Minimum ${star} star${star > 1 ? "s" : ""}`}
+            >
+              <Star size={18} fill={filled ? "currentColor" : "none"} />
+            </button>
+          );
+        })}
+      </span>
+      <span className="text-xs text-text-muted w-10 text-right">
+        {value == null ? "Any" : `${value}+`}
+      </span>
+    </span>
   );
 }
 

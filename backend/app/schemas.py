@@ -170,6 +170,10 @@ class VideoItemOut(BaseModel):
     video_rating: Optional[int] = None
     song_rating_set: bool = False
     video_rating_set: bool = False
+    song_rating_by: Optional[str] = None
+    song_rating_at: Optional[datetime] = None
+    video_rating_by: Optional[str] = None
+    video_rating_at: Optional[datetime] = None
     locked_fields: Optional[List[str]] = None
     version_type: str = "normal"
     alternate_version_label: Optional[str] = None
@@ -186,6 +190,14 @@ class VideoItemOut(BaseModel):
     has_archive: bool = False
     exclude_from_editor_scan: bool = False
     field_provenance: Optional[dict] = None
+    field_provenance_users: Optional[dict] = None
+    field_provenance_at: Optional[dict] = None
+    field_verifications: Optional[dict] = None
+    last_edited_by: Optional[str] = None
+    file_checksum: Optional[str] = None
+    audio_fingerprint: Optional[str] = None
+    acoustid_id: Optional[str] = None
+    video_phash: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

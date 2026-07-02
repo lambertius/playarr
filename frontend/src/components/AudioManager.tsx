@@ -24,10 +24,19 @@ export function AudioManager() {
   });
   const videoId = track?.videoId ?? null;
 
+  // In TV/kiosk mode the on-screen <video> plays a single combined stream that
+  // carries its own audio, so this global audio element must stay silent to
+  // avoid double audio.
+  const tvMode = usePlaybackStore((s) => s.tvMode);
+
   // Load new source when track changes
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
+    if (tvMode) {
+      el.pause();
+      return;
+    }
     if (videoId === null) {
       el.pause();
       el.removeAttribute("src");
@@ -44,18 +53,18 @@ export function AudioManager() {
       el.load();
       prevVideoIdRef.current = videoId;
     }
-  }, [videoId]);
+  }, [videoId, tvMode]);
 
   // Play / pause sync
   useEffect(() => {
     const el = audioRef.current;
-    if (!el || videoId === null) return;
+    if (!el || videoId === null || tvMode) return;
     if (isPlaying) {
       el.play().catch(() => {});
     } else {
       el.pause();
     }
-  }, [isPlaying, videoId]);
+  }, [isPlaying, videoId, tvMode]);
 
   // Handle external seek requests
   const storeCurrentTime = usePlaybackStore((s) => s.currentTime);

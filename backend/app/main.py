@@ -19,6 +19,7 @@ from app.database import engine, Base
 from app.config import get_settings
 from app.version import APP_VERSION
 from app.routers import library, jobs, playback, settings as settings_router
+from app.routers import preferences as preferences_router
 from app.routers import metadata as metadata_router
 from app.routers import resolve as resolve_router
 from app.routers import ai as ai_router
@@ -297,6 +298,23 @@ def _apply_schema_upgrades(eng):
         if "user_id" not in ms_cols:
             with eng.begin() as conn:
                 conn.execute(text("ALTER TABLE metadata_snapshots ADD COLUMN user_id VARCHAR(36)"))
+
+    # ── Provenance robustness (migration 018) ──
+    if "video_items" in existing_tables:
+        vi_cols5 = {c["name"] for c in insp.get_columns("video_items")}
+        _new_prov = {
+            "field_provenance_at": "JSON",
+            "field_verifications": "JSON",
+            "song_rating_by": "VARCHAR(36)",
+            "song_rating_at": "DATETIME",
+            "video_rating_by": "VARCHAR(36)",
+            "video_rating_at": "DATETIME",
+            "file_checksum": "VARCHAR(64)",
+        }
+        with eng.begin() as conn:
+            for col_name, col_type in _new_prov.items():
+                if col_name not in vi_cols5:
+                    conn.execute(text(f"ALTER TABLE video_items ADD COLUMN {col_name} {col_type}"))
 
 
 def _migrate_ai_settings(eng):
@@ -670,6 +688,57 @@ def _purge_orphan_workspaces(engine):
 # before force-unsticking — so a large batch won't be prematurely killed.
 _FINALIZING_WATCHDOG_MAX_AGE = 2400  # 40 minutes
 _FINALIZING_WATCHDOG_INTERVAL = 120  # check every 2 minutes
+
+
+async def _deferred_startup_maintenance(artwork_repair_mode: str):
+    """Run heavy, non-essential startup maintenance off the critical path.
+
+    These steps involve full-library filesystem walks and other slow I/O. They
+    are executed in a worker thread *after* lifespan startup completes, so they
+    do not delay uvicorn from binding and serving the UI.
+
+    Why this matters: the ASGI server does not accept any requests until the
+    lifespan startup phase finishes. Running these scans inline (as they were
+    previously) meant that on a cold boot — slow disk plus antivirus scanning
+    every file touched — the process showed as "running" in Task Manager while
+    the web UI stayed unreachable for minutes, until the user killed and
+    restarted it. Each step is isolated so one failure does not abort the rest.
+    """
+    steps = [
+        ("untracked library scan", _detect_untracked_library_files),
+        ("zombie record cleanup", _cleanup_zombie_records),
+        ("artwork cache repair", lambda: _run_startup_artwork_repair(artwork_repair_mode)),
+        ("orphan cached-asset purge", _purge_orphan_cached_assets),
+        ("orphan preview purge", _purge_orphan_previews),
+        ("duration backfill", _backfill_missing_durations),
+        ("startup duplicate scan", _maybe_startup_duplicate_scan),
+        ("startup rename scan", _maybe_startup_rename_scan),
+    ]
+    for label, fn in steps:
+        try:
+            await asyncio.to_thread(fn)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Deferred startup maintenance step failed: %s", label)
+    logger.info("Deferred startup maintenance complete.")
+
+
+async def _diagnostics_heartbeat():
+    """Periodic health log — reveals thread/active-stream accumulation, and the
+    last heartbeat before a hard death marks when the event loop stopped."""
+    import threading
+    while True:
+        try:
+            await asyncio.sleep(20)
+        except asyncio.CancelledError:
+            break
+        try:
+            from app.routers.playback import active_stream_count
+            streams = active_stream_count()
+        except Exception:
+            streams = -1
+        logger.info("heartbeat: threads=%d active_streams=%d", threading.active_count(), streams)
 
 
 async def _finalizing_watchdog():
@@ -1152,49 +1221,55 @@ async def lifespan(app: FastAPI):
     _hydrate_dir_settings_from_db(s)
     s.ensure_directories()
 
-    # Warn about video files in the library that aren't tracked in the DB
-    _detect_untracked_library_files()
-
-    # Remove DB records whose video files no longer exist on disk ("zombies")
-    _cleanup_zombie_records()
-
-    # --- Automatic artwork cache repair ---
-    # Purge old corrupt cached assets (HTML-as-jpg, zero-byte, etc.) so they
-    # are not reused by imports, rescans, or entity re-resolution.
-    _run_startup_artwork_repair(s.startup_repair_mode)
-
-    # --- Purge orphan cached assets ---
-    # CachedAssets referencing entities that no longer exist (e.g. after
-    # all videos were deleted but entity cleanup was incomplete).
-    _purge_orphan_cached_assets()
-
-    # --- Purge orphan preview files ---
-    # Preview files persist in the preview cache after videos are deleted.
-    # Clean up any previews referencing video IDs that no longer exist.
-    _purge_orphan_previews()
-
     logger.info(f"Library dir: {s.library_dir}")
     extra_dirs = s.get_all_library_dirs()[1:]
     if extra_dirs:
         logger.info(f"Additional source dirs: {extra_dirs}")
     logger.info(f"Archive dir: {s.archive_dir} (inside library)")
 
+    # Raise the default worker thread-pool limit (anyio defaults to 40).
+    # Starlette pumps a sync streaming generator by re-acquiring a pool thread
+    # for every chunk, so a burst of concurrent artwork-image requests (the Now
+    # Playing grid) can saturate the pool and starve a video stream's chunk
+    # reads — underrunning playback and ending a track early (seen with heavy 4K
+    # transcodes). More tokens give streaming + artwork serving headroom.
+    try:
+        import anyio
+        anyio.to_thread.current_default_thread_limiter().total_tokens = 256
+        logger.info("Worker thread-pool limit raised to 256")
+    except Exception:
+        logger.exception("Could not raise worker thread-pool limit")
+
     # Start background watchdog for stuck Finalizing jobs
     watchdog_task = asyncio.create_task(_finalizing_watchdog())
 
-    # --- Backfill missing duration_seconds values ---
-    _backfill_missing_durations()
+    # Heavy maintenance — full-library filesystem walks (untracked-file
+    # detection, zombie cleanup), artwork repair, orphan purges, duration
+    # backfill, and duplicate/rename scans — runs in a background thread AFTER
+    # the server is already accepting connections. Running these inline blocks
+    # uvicorn's lifespan startup (the server does not serve requests until
+    # startup completes), which on a cold boot left the process "running" but
+    # the UI unreachable for minutes. See _deferred_startup_maintenance().
+    maintenance_task = asyncio.create_task(
+        _deferred_startup_maintenance(s.startup_repair_mode)
+    )
 
-    # --- Optional startup duplicate scan ---
-    _maybe_startup_duplicate_scan()
-
-    # --- Optional startup rename scan ---
-    _maybe_startup_rename_scan()
+    # Diagnostics: route otherwise-silent asyncio errors to crash.log, and run a
+    # heartbeat so thread/stream accumulation is visible and the last heartbeat
+    # before a hard death pinpoints when the event loop stopped.
+    try:
+        from app.crash_diagnostics import install_asyncio_handler
+        install_asyncio_handler(asyncio.get_running_loop())
+    except Exception:
+        logger.exception("Could not install asyncio exception handler")
+    heartbeat_task = asyncio.create_task(_diagnostics_heartbeat())
 
     yield
 
     # Shutdown
     watchdog_task.cancel()
+    maintenance_task.cancel()
+    heartbeat_task.cancel()
     logger.info("Playarr shutting down.")
 
 
@@ -1214,11 +1289,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request: Request, exc: Exception):
+    """Record the traceback for any unhandled request error to playarr.log (and
+    crash.log).  Without this, a 500 from a route is logged only by uvicorn's
+    own logger, which in the frozen windowed build writes to a devnull'd stderr
+    — so server errors (e.g. ffmpeg not found, a bad stream) vanished, making
+    playback failures impossible to diagnose from the logs."""
+    import traceback as _tb
+    tb = _tb.format_exc()
+    logger.error("Unhandled error on %s %s:\n%s", request.method, request.url.path, tb)
+    try:
+        from app.crash_diagnostics import record
+        # record() does blocking disk I/O (write+flush); keep it off the event
+        # loop so a slow disk under a burst of 500s can't stall request handling.
+        await asyncio.to_thread(record, f"HTTP 500 on {request.method} {request.url.path}:\n{tb}")
+    except Exception:
+        pass
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+
 # Include routers
 app.include_router(library.router)
 app.include_router(jobs.router)
 app.include_router(playback.router)
 app.include_router(settings_router.router)
+app.include_router(preferences_router.router)
 app.include_router(metadata_router.router)
 app.include_router(resolve_router.resolve_router)
 app.include_router(resolve_router.review_router)

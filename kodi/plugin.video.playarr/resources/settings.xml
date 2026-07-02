@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<settings>
+  <category label="Connection">
+    <setting id="host" type="text" label="Playarr host or IP" default="127.0.0.1"/>
+    <setting id="port" type="number" label="Port" default="6969"/>
+    <setting id="use_https" type="bool" label="Use HTTPS" default="false"/>
+    <setting id="test" type="action" label="Test connection"
+             action="RunPlugin(plugin://plugin.video.playarr/?action=ping)"
+             option="close"/>
+  </category>
+  <category label="Playback">
+    <setting id="playback_mode" type="enum" label="Playback source"
+             values="Stream via Playarr API|Direct file path / share" default="0"/>
+    <setting id="remap_from" type="text"
+             label="Direct mode: replace this path prefix" default=""
+             enable="eq(-1,1)"/>
+    <setting id="remap_to" type="text"
+             label="Direct mode: with this prefix (e.g. smb://nas/Playarr)" default=""
+             enable="eq(-2,1)"/>
+  </category>
+  <category label="Browsing">
+    <setting id="page_size" type="number" label="Items per page" default="50"/>
+    <setting id="party_limit" type="number"
+             label="Party Mode: max videos to queue" default="200"/>
+    <setting id="record_history" type="bool"
+             label="Record playback history in Playarr" default="true"/>
+  </category>
+  <category label="Home menu">
+    <setting id="addfav" type="action" label="Add Playarr to Kodi Favourites"
+             action="RunPlugin(plugin://plugin.video.playarr/?action=addfav)"
+             option="close"/>
+  </category>
+</settings>

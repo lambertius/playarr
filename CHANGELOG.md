@@ -1,5 +1,139 @@
 # Changelog
 
+## [1.9.34] - 2026-07-02
+
+### Added
+- **Rate & playlist tracks from the queue** — right-clicking a track in the Now Playing queue opens a context menu to **add it to a new or existing playlist** and to **rate the song or video** (5 stars each), without leaving the page.
+- **Party Mode playlist** — Settings → Party Mode can now select an existing playlist as the Party Mode source; when set, Party Mode plays that playlist (shuffled). Leaving it on *Auto-generate* keeps the existing behaviour of building the queue from the current filter and exclusion/era settings.
+
+### Changed
+- **Start-with-Windows simplified for reliability** — the installer checkbox and the in-app *Start with Windows* toggle now manage a single HKCU `Run` entry pointing at the real `Playarr.exe`, replacing the previous two competing mechanisms (a Startup-folder shortcut plus a registry command that targeted a script not shipped in the installed build). Startup now launches to the system tray, and the in-app toggle syncs the registry reliably after saving.
+
+## [1.9.33] - 2026-06-19
+
+### Added
+- **Cast Mode (`/cast`)** — a new low-overhead Party Mode page tuned for Chrome's "Cast tab" feature. Because Chrome re-encodes the entire tab while casting, this page holds the artwork wall **static** (no scrolling, no tile swaps) and disables blur, so only the video moves — keeping the cast sharp and the PC's encoder light. Has its own optional compatibility transcode toggle.
+
+### Changed
+- **Playback profiles** — Now Playing, TV (`/tv`), and Cast (`/cast`) are now driven by an explicit per-context profile, so each is optimised for its use case and the on-the-fly transcode is selected per context. TV transcoding therefore only runs while `/tv` is actually open, and Cast transcoding only while `/cast` is open — no background encode overhead on the PC otherwise.
+- **Animation tuning for compatibility** — outside regular browser playback the heavy effects are dropped automatically: `backdrop-filter` blur (queue panel + metadata overlay) is disabled for TV and Cast, and artwork tile swaps are forced to plain opacity fades (no 3D flip/spin) since TV GPUs handle 3D transforms poorly. The cheap `translateY` artwork scroll is kept for TV.
+- **Settings reorganised** — TV Mode and Cast Mode now have their own subsections under **Settings → Party Mode** (with short how/why instructions and the relevant transcode toggles), instead of living under Now Playing. Now Playing keeps only the regular **Browser** compatibility-transcode toggle.
+
+## [1.9.32] - 2026-06-19
+
+### Added
+- **Server errors are now logged** — unhandled request errors (HTTP 500s) are written with full traceback to `playarr.log` and `crash.log`. Previously these were emitted only by uvicorn's own logger, which in the packaged windowed build goes to a discarded stderr, so playback/stream failures left no trace. (This was the missing piece that made the streaming issues hard to diagnose.)
+
+### Notes
+- Verified the compatibility transcode end-to-end in the packaged build (H.264/AAC, ≤1080p): both A/V and video-only paths stream with the bundled ffmpeg.
+
+## [1.9.31] - 2026-06-19
+
+### Added
+- **Compatibility transcoding (per-context toggles)** — Settings → Playback now has two switches: *Transcode for Compatibility — TV mode* and *— Browser*. When on, the server re-encodes video on the fly to a broadly-compatible, network-friendly **H.264 High / 8-bit / ≤1080p / ~6 Mbps + AAC** stream (`?transcode=1` on the stream endpoints). This fixes frame drops/stutter caused by source codecs the device can't decode smoothly (HEVC/VP9/**AV1**, 10-bit, or bitrates too high for the link) — e.g. an AV1 2880×2160 source is delivered as H.264 1920×1440. TV and browser are independent so you can target each. Costs server CPU when enabled.
+- **Playback diagnostics** — to pinpoint network drop-outs/hangs:
+  - Server: every stream now logs an end-of-stream summary (MB sent, duration, **throughput in Mbps**, time-to-first-byte, ffmpeg return code).
+  - Client: a per-video monitor reports **dropped/total frames, stall count, time spent waiting, and seconds buffered ahead** to the server log via `POST /api/playback/client-metrics` (every 15s + on track end) — visible in `playarr.log` without opening dev tools, which matters for TV devices.
+
+## [1.9.30] - 2026-06-19
+
+### Added
+- **Self-healing server supervisor** — the server now runs as a supervised child process. If it ever dies unexpectedly (crash, native fault, or an external force-kill of the server) the supervisor automatically relaunches it, with a crash-loop guard (5 failures in 60s → falls back to running in-process so the app can never be left unable to start). This also fixes **Settings → Restart**, which previously did nothing in the packaged build (it exited the process with no supervisor to relaunch it).
+
+### Changed
+- **Graceful shutdown for clean stops/updates** — new `POST /api/settings/shutdown`. The installer now asks a running Playarr to shut down cleanly (releasing the executable and sockets) and only force-kills as a fallback, so updates no longer hard-kill the app and look like a crash in the logs.
+- **Orphan prevention** — a supervised server process exits automatically if its supervisor disappears, so a killed supervisor can never leave a server running and holding the port.
+- Crash diagnostics, the heartbeat, and the worker thread-pool limit from recent releases remain in effect.
+
+## [1.9.29] - 2026-06-19
+
+### Fixed
+- **Queue auto-hide never triggered in TV mode** — browsers fire synthetic `mousemove` events when animated content (the scrolling artwork grid) moves under a stationary cursor, and those kept resetting the auto-hide timer, so on a TV (where the pointer never actually moves) the queue stayed visible. Mouse movement now only counts when the pointer's coordinates actually change.
+
+### Changed
+- **Video re-centres when the queue auto-hides** — when the queue fades out it now slides off to the right and the video gently glides (700ms) to the centre of the screen; when the queue returns, the video glides back to its position. Applies wherever queue auto-hide is enabled (TV and windowed).
+
+## [1.9.28] - 2026-06-19
+
+### Fixed
+- **TV mode stalled/hesitated when advancing to the next track** — on each track change TV mode called `killStreams()`, which kills *all* active streams and raced with the stream it was about to start, killing the next track's FFmpeg and forcing a re-request (visible in the logs as the same file streamed twice seconds apart). Changing the persistent video's `src` already aborts the previous stream (the server cleans it up on disconnect), so the redundant `killStreams()` call is removed — the queue now advances smoothly.
+- **TV artwork wall too sparse (only a few tiles on a 4K TV)** — TV browsers render the page at a low logical viewport, so the native-viewport rendering introduced in 1.9.27 left the grid only a few tiles wide. TV mode again lays out on a fixed 16:9 canvas at a configurable resolution (Settings → Playback → "TV Mode Resolution": 1080p / 2K / 4K, default 1080p) and CSS-scales it to fit, giving browser-like tile density regardless of what the TV browser reports.
+- **A track (notably a heavy 4K transcode) could end partway through and skip to the next** — Starlette pumps a streaming response's sync generator by re-acquiring a worker-thread per chunk, and a burst of concurrent artwork-image requests (the Now Playing grid) could saturate the default 40-thread pool and starve the video stream's chunk reads, underrunning playback until the element reported end-of-stream and auto-advanced (the logs showed the worker-thread count spiking to ~49 right as the 4K track terminated). The worker thread-pool limit is raised to 256 so streaming and artwork serving no longer contend.
+
+## [1.9.27] - 2026-06-19
+
+### Added
+- **Crash diagnostics** — the server still died during playback streaming with no traceback (and no Windows error event), because the frozen windowed build sends stdout/stderr to devnull, so an unhandled exception that ends the process leaves no record. A new diagnostics layer now captures the cause to `logs/crash.log`: native faults via `faulthandler` (all-thread dump), unhandled exceptions on the main and worker threads, asyncio loop exceptions, a wrapper around `uvicorn.run`, and an `atexit` marker. A 20s heartbeat (`threads=… active_streams=…`) is logged so thread/stream accumulation is visible and the last heartbeat pinpoints when the loop stopped. If the server dies again, `crash.log` will name the cause.
+
+### Changed
+- **TV mode now renders at the device's native viewport** — congruent with the normal browser: artwork-grid density, video size, queue, controls and behaviour are identical to a regular browser tab. The fixed-canvas scaling (and its "TV Mode Resolution" setting) is removed; artwork tile size is controlled by the existing "Tile Size" setting, the same as the browser. TV-specific behaviour is limited to single-stream audio playback and the one-tap autoplay fallback.
+
+## [1.9.26] - 2026-06-19
+
+### Fixed
+- **TV mode artwork grid didn't fill the screen** — the grid container is what the size-measuring ResizeObserver attaches to, but in the empty (pre-load) state the component returned a *different* element without that ref, so the observer never attached and the grid stayed sized to the initial window. On desktop the window equals the canvas so it looked fine; in TV mode the canvas is a different scaled size, leaving the grid too small. The container now always renders, so the grid measures and fills the canvas at any resolution.
+
+## [1.9.25] - 2026-06-19
+
+### Fixed
+- **Server instability/crash during playback streaming** — the video streaming endpoints piped ffmpeg's stderr but never drained it; on files where ffmpeg emits continuous warnings (e.g. non-monotonic DTS), the OS pipe buffer filled, ffmpeg blocked on the stderr write, and the stream thread hung forever. Under TV mode's rapid track cycling this exhausted the server's thread pool and brought it down. ffmpeg stderr is now discarded (`DEVNULL`) so it can't deadlock. Additionally, the `/kill-streams` endpoint (called on every track change) now runs its blocking process kills off the event loop, so it can't freeze the server.
+
+## [1.9.24] - 2026-06-19
+
+### Fixed
+- **TV mode stalled at the end of each track** — the TV video element was keyed by track ID, so every track change fully remounted it and started a fresh stream with no cleanup of the previous one (and lost its autoplay permission). TV mode now uses a single persistent video element driven imperatively — it kills the previous track's stream, loads the next, and plays — mirroring the desktop audio transition, so the queue advances continuously without stalling.
+
+## [1.9.23] - 2026-06-19
+
+### Fixed
+- **TV mode video squashed into a narrow band** — the Now Playing video area was sized with viewport units (`vh`), which inside TV mode's CSS-scaled render canvas pointed at the smaller real browser viewport instead of the canvas, collapsing the video into a thin band. The video area now sizes relative to the TV canvas height, so it fills the 16:9 display correctly at any resolution.
+
+## [1.9.22] - 2026-06-19
+
+### Changed
+- **Queue auto-hide is now a general playback setting** — it applies on the Now Playing screen in both windowed and fullscreen layouts (previously fullscreen/theatre only), so the desktop install honours it too.
+
+## [1.9.21] - 2026-06-19
+
+### Added
+- **TV mode resolution setting** — Settings → Playback → "TV Mode Resolution" (720p / 1080p / 2K / 4K). The `/tv` page now lays its visual out on a fixed 16:9 canvas at the chosen resolution and CSS-scales it to fit the screen, so artwork-grid density and the video-to-background ratio no longer depend on whatever low logical viewport a TV browser reports. Raise it if the artwork wall looks sparse / the video looks oversized.
+- **Queue auto-hide in theatre mode** — Settings → Playback → "Queue Auto-Hide": *No auto-hide* (always shown), *Per song* (fades out after a delay, reappears at the start of each track), or *Full auto-hide* (fades out and only returns on mouse movement). A configurable "Hide After" delay drives the timer. The queue gently fades and reappears on mouse movement, mirroring the play-bar behaviour.
+
+### Changed
+- The Now Playing artwork grid now measures its own container rather than the window, so it fills the TV render canvas correctly (and reacts to resolution changes).
+
+## [1.9.20] - 2026-06-18
+
+### Changed
+- **TV mode (`/tv`) re-architected to single-stream playback** — instead of the desktop player's dual-stream design (a hidden `<audio>` driving the clock while a separate muted video follows it, which was bandwidth-doubling and unreliable on TV browsers), TV mode now plays one combined audio+video stream in the on-screen video element, which is its own clock and advances the queue itself; the global audio element stays silent. This fixes the no-audio / stuck-loop / slow-load problems at the root while rendering the *exact* Party Mode visual (artwork wall + video + queue) natively — no cast/mirror re-encode. Autoplay starts on its own in a kiosk browser with autoplay enabled; otherwise a one-tap "Press OK to start" prompt appears. The desktop player is unchanged.
+
+## [1.9.19] - 2026-06-18
+
+### Fixed
+- **TV mode (`/tv`): no audio, stuck-in-a-loop, slow loading** — the player is audio-master (a global `<audio>` drives the clock; the on-screen video is muted and slaved to it), and browsers block autoplay-with-sound without a user gesture, so on TV devices the audio never started, the clock stalled, and the muted video was repeatedly yanked back to the start (the loop) while thrashing the remux (slow load). TV mode now builds the Party Mode queue but holds playback behind a one-time "Press OK to start" prompt; that gesture unlocks audio for the session, after which the clock advances and the video syncs normally. Renders natively on the device — no cast/mirror re-encode.
+
+## [1.9.18] - 2026-06-18
+
+### Added
+- **TV / kiosk mode (`/tv`)** — a single full-screen deep link that auto-starts Party Mode with no app chrome, for casting the scrolling-artwork visual to a TV. Designed to be opened by a browser on a TV device (e.g. NVIDIA Shield, Android/Google TV, or a Chromium kiosk) so the page renders **natively at full resolution** — no screen-mirroring re-encode, so quality is limited only by the source video bitrate.
+
+### Fixed
+- **Kodi add-on: Party Mode crash** — "shuffle all" no longer builds a playlist of the entire library (which could exhaust memory and crash Kodi); the queue is capped (configurable, default 200) and the originating directory handle is released before playback starts to avoid a re-entrancy hang.
+- **Kodi add-on: folder artwork** — Artist / Album / Genre / Year folders now show real artwork (representative `artist_thumb` / poster) instead of the generic add-on icon.
+- **Kodi add-on: home-screen access** — added an "Add Playarr to Favourites" action (Kodi add-ons can't inject a skin main-menu item directly); documented per-skin setup.
+
+## [1.9.17] - 2026-06-18
+
+### Added
+- **Kodi Add-on (bundled & version-matched)** — the Kodi plugin is now distributed from the server itself via **Settings → System → Kodi Add-on**. The download is built on demand from the bundled add-on source and its `addon.xml` version is stamped to the running server's version, so the plugin and server can never drift out of sync; includes in-app install instructions. The add-on's "Test connection" now warns if the installed add-on and server differ on major.minor and prompts a re-download.
+- **Party Mode: "Party Like It's…"** — new Party Mode setting to cap playback at a chosen year (nothing newer plays) and weight the queue toward that era: videos closest to the target year are favoured for the front of the queue with a gradual fall-off (~10-year half-life) the further back they go. Videos with no known year stay in the pool at a low weight. Stored server-side so the Kodi add-on inherits it.
+
+### Fixed
+- **Windows Startup: App Appeared Running but Unreachable** — at logon the process started but the web UI stayed unreachable for minutes (cold disk + antivirus), requiring a manual kill and restart. Heavy startup maintenance — full-library untracked-file detection, zombie-record cleanup, artwork repair, orphan purges, duration backfill, and duplicate/rename scans — now runs in a background thread *after* the server begins accepting connections, instead of blocking uvicorn's lifespan startup.
+
+### Changed
+- **Genre Consolidation & Genre Manager** — doubled the scroll-area height of the Active Consolidations and genre lists for easier browsing.
+
 ## [1.9.14] - 2026-04-12
 
 ### Added

@@ -1,0 +1,119 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { usePartyMode } from "@/hooks/usePartyMode";
+import { usePlaybackStore } from "@/stores/playbackStore";
+import { useArtworkSettings } from "@/stores/artworkSettingsStore";
+import { NowPlayingPage } from "@/pages/NowPlayingPage";
+import { PartyStartGate, type PartyStartChoice } from "@/components/PartyStartGate";
+
+/**
+ * TV / kiosk mode (`/tv`) — opens the exact Party Mode visual full-screen with
+ * no app chrome, for a TV device's browser (NVIDIA Shield / TV Bro, Android/
+ * Google TV, a Chromium kiosk, …).
+ *
+ * TV browsers often render the page at a low logical viewport, which would
+ * leave the artwork grid only a few tiles wide on a 4K screen.  So the content
+ * lays out on a fixed 16:9 canvas at the configured TV resolution (1080/1440/
+ * 2160) and is CSS-scaled to fit — giving browser-like tile density and the
+ * same video-to-background ratio a desktop browser shows at that resolution.
+ *
+ * Playback (NowPlayingPage `tvMode`): a single combined audio+video stream that
+ * is its own clock and advances the queue; the global audio element stays
+ * silent.  Autoplay falls back to a one-tap "Press OK to start" if blocked.
+ */
+export function TvModePage() {
+  const { launch } = usePartyMode();
+  const setTvMode = usePlaybackStore((s) => s.setTvMode);
+  const clearQueue = usePlaybackStore((s) => s.clearQueue);
+  const setFullscreenMode = usePlaybackStore((s) => s.setFullscreenMode);
+  const tvResolution = useArtworkSettings((s) => s.tvResolution);
+
+  const canvasH = tvResolution;
+  const canvasW = Math.round((tvResolution * 16) / 9);
+  const [fit, setFit] = useState({ scale: 1, x: 0, y: 0 });
+
+  // Every access is a fresh first access — start at the prompt on every mount.
+  const [phase, setPhase] = useState<"prompt" | "loading" | "ready" | "error">("prompt");
+  const startedRef = useRef(false);
+
+  useEffect(() => {
+    const update = () => {
+      const scale = Math.min(window.innerWidth / canvasW, window.innerHeight / canvasH);
+      setFit({
+        scale,
+        x: (window.innerWidth - canvasW * scale) / 2,
+        y: (window.innerHeight - canvasH * scale) / 2,
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [canvasW, canvasH]);
+
+  // Teardown on unmount. Clear the queue (→ videoId=null) BEFORE leaving tv mode
+  // so AudioManager's load effect takes its clean teardown branch instead of
+  // briefly starting an audio-master stream for the track being torn down.
+  useEffect(() => {
+    return () => {
+      clearQueue();
+      setFullscreenMode("off");
+      setTvMode(false);
+    };
+  }, [clearQueue, setFullscreenMode, setTvMode]);
+
+  const handleStart = useCallback((choice: PartyStartChoice) => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    setPhase("loading");
+    setTvMode(true);
+    (async () => {
+      try {
+        await launch(
+          { party_year: choice.partyYear },
+          { navigate: false, fullscreenMode: choice.fullscreenMode, ignoreSavedEra: true },
+        );
+        setPhase("ready");
+      } catch {
+        setPhase("error");
+      }
+    })();
+  }, [launch, setTvMode]);
+
+  if (phase === "prompt") {
+    return <PartyStartGate surface="tv" onStart={handleStart} />;
+  }
+
+  if (phase === "error") {
+    return (
+      <div className="flex h-screen w-screen flex-col items-center justify-center gap-3 bg-black text-center text-white/70">
+        <span className="text-xl font-semibold">No videos to play</span>
+        <span className="text-sm text-white/50">Check your Party Mode filters in Playarr settings.</span>
+      </div>
+    );
+  }
+
+  if (phase === "loading") {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-black">
+        <span className="text-sm uppercase tracking-widest text-white/50 animate-pulse">Loading Party Mode…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 overflow-hidden bg-black">
+      <div
+        style={{
+          position: "absolute",
+          width: canvasW,
+          height: canvasH,
+          left: fit.x,
+          top: fit.y,
+          transform: `scale(${fit.scale})`,
+          transformOrigin: "top left",
+        }}
+      >
+        <NowPlayingPage profile="tv" tvCanvasHeight={canvasH} />
+      </div>
+    </div>
+  );
+}

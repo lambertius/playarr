@@ -40,6 +40,13 @@ datas = [
     (str(BACKEND / ".env.example"), "."),
 ]
 
+# Kodi add-on source — bundled so the server can hand out a plugin zip that is
+# always version-matched to itself (Settings → System → Kodi).  The download
+# endpoint stamps addon.xml's version to APP_VERSION at request time.
+_KODI_ADDON = ROOT / "kodi" / "plugin.video.playarr"
+if (_KODI_ADDON / "addon.xml").is_file():
+    datas.append((str(_KODI_ADDON), "kodi/plugin.video.playarr"))
+
 # ---------------------------------------------------------------------------
 # Hidden imports — packages PyInstaller can miss
 # ---------------------------------------------------------------------------
@@ -108,6 +115,7 @@ hiddenimports = [
     "app",
     "app.main",
     "app.config",
+    "app.crash_diagnostics",
     "app.database",
     "app.models",
     "app.schemas",
@@ -116,6 +124,8 @@ hiddenimports = [
     "app.version",
     "app.runtime_dirs",
     "app.safe_delete",
+    "app.provenance",
+    "app.user_identity",
     "app.routers.library",
     "app.routers.jobs",
     "app.routers.playback",
@@ -137,6 +147,7 @@ hiddenimports = [
     "app.metadata",
     "app.scraper",
     "app.services",
+    "app.services.theatre_backdrop",  # imported lazily by the theatre stream route
     "app.pipeline",
     "app.pipeline_lib",
     "app.pipeline_url",
