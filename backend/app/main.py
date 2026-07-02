@@ -29,6 +29,7 @@ from app.routers import playlists as playlists_router
 from app.routers import video_editor as video_editor_router
 from app.routers import scraper_test as scraper_test_router
 from app.routers import tmvdb as tmvdb_router
+from app.routers import tools as tools_router
 from app.new_videos import router as new_videos_router
 
 
@@ -1329,6 +1330,7 @@ app.include_router(video_editor_router.router)
 app.include_router(scraper_test_router.router)
 app.include_router(new_videos_router.router)
 app.include_router(tmvdb_router.router)
+app.include_router(tools_router.router)
 
 
 @app.get("/api/health")

@@ -102,6 +102,15 @@ class RuntimeDirs:
         self.library_dir = default_music
 
     @property
+    def tools_dir(self) -> Path:
+        """Writable directory for self-managed CLI tools (e.g. yt-dlp).
+
+        Lives under the data dir so it survives app reinstalls/upgrades and
+        never requires admin rights (unlike the install folder).
+        """
+        return self.data_dir / "tools"
+
+    @property
     def database_url(self) -> str:
         """SQLAlchemy connection URL for the resolved DB path."""
         return f"sqlite:///{self.db_path}"

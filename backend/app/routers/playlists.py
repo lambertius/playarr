@@ -2,7 +2,7 @@
 Playlist API — CRUD for playlists and their entries.
 """
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -32,6 +32,8 @@ class PlaylistEntryOut(BaseModel):
     position: int
     artist: str
     title: str
+    album: str | None = None
+    year: int | None = None
     has_poster: bool
     duration_seconds: float | None = None
 
@@ -67,6 +69,14 @@ class AddMultipleRequest(BaseModel):
 class ReorderRequest(BaseModel):
     entry_ids: List[int]
 
+class SortRequest(BaseModel):
+    field: Literal["artist", "title", "year"]
+    direction: Literal["asc", "desc"] = "asc"
+
+class PlaylistMembership(BaseModel):
+    playlist_id: int
+    entry_id: int
+
 
 # ── Helpers ───────────────────────────────────────────────
 
@@ -89,6 +99,8 @@ def _entry_out(entry: PlaylistEntry) -> PlaylistEntryOut:
         position=entry.position,
         artist=vi.artist if vi else "Unknown",
         title=vi.title if vi else "Unknown",
+        album=vi.album if vi else None,
+        year=vi.year if vi else None,
         has_poster=has_poster,
         duration_seconds=qs.duration_seconds if qs else None,
     )
@@ -172,6 +184,11 @@ def add_entry(playlist_id: int, data: AddEntryRequest, db: Session = Depends(get
     vi = db.query(VideoItem).get(data.video_id)
     if not vi:
         raise HTTPException(status_code=404, detail="Video not found")
+    # De-duplicate: a track can only appear once per playlist. If it's already
+    # present, return the existing entry rather than creating a duplicate.
+    existing = next((e for e in p.entries if e.video_id == data.video_id), None)
+    if existing:
+        return _entry_out(existing)
     # Next position
     max_pos = max((e.position for e in p.entries), default=-1)
     entry = PlaylistEntry(playlist_id=playlist_id, video_id=data.video_id, position=max_pos + 1)
@@ -185,14 +202,21 @@ def add_entry(playlist_id: int, data: AddEntryRequest, db: Session = Depends(get
 def add_entries_batch(playlist_id: int, data: AddMultipleRequest, db: Session = Depends(get_db)):
     p = _playlist_or_404(db, playlist_id)
     max_pos = max((e.position for e in p.entries), default=-1)
+    existing_ids = {e.video_id for e in p.entries}
     results = []
-    for i, vid in enumerate(data.video_ids):
+    next_pos = max_pos + 1
+    for vid in data.video_ids:
+        # Skip duplicates (already in playlist or repeated within this request).
+        if vid in existing_ids:
+            continue
         vi = db.query(VideoItem).get(vid)
         if not vi:
             continue
-        entry = PlaylistEntry(playlist_id=playlist_id, video_id=vid, position=max_pos + 1 + i)
+        entry = PlaylistEntry(playlist_id=playlist_id, video_id=vid, position=next_pos)
         db.add(entry)
         results.append(entry)
+        existing_ids.add(vid)
+        next_pos += 1
     db.commit()
     for e in results:
         db.refresh(e)
@@ -221,3 +245,42 @@ def reorder_entries(playlist_id: int, data: ReorderRequest, db: Session = Depend
             id_to_entry[eid].position = pos
     db.commit()
     return _playlist_out(_playlist_or_404(db, playlist_id))
+
+
+@router.put("/{playlist_id}/sort", response_model=PlaylistOut)
+def sort_entries(playlist_id: int, data: SortRequest, db: Session = Depends(get_db)):
+    """Reorganise the playlist by a track field (artist/title/year), A–Z or Z–A.
+
+    This persists the new order by rewriting each entry's position.
+    """
+    p = _playlist_or_404(db, playlist_id)
+    reverse = data.direction == "desc"
+
+    def key(entry: PlaylistEntry):
+        vi = entry.video_item
+        if data.field == "year":
+            # Unknown years always sort to the end regardless of direction.
+            y = vi.year if (vi and vi.year is not None) else None
+            missing = y is None
+            return (missing if not reverse else not missing, y if y is not None else 0)
+        value = getattr(vi, data.field, "") if vi else ""
+        return (value or "").casefold()
+
+    ordered = sorted(p.entries, key=key, reverse=reverse)
+    for pos, entry in enumerate(ordered):
+        entry.position = pos
+    db.commit()
+    return _playlist_out(_playlist_or_404(db, playlist_id))
+
+
+@router.get("/for-video/{video_id}", response_model=List[PlaylistMembership])
+def playlists_for_video(video_id: int, db: Session = Depends(get_db)):
+    """Return which playlists already contain the given video (+ the entry id).
+
+    Powers the add-to-playlist toggle: the picker uses this to show a track as
+    already added and to remove it on click instead of adding a duplicate.
+    """
+    rows = db.query(PlaylistEntry).filter(PlaylistEntry.video_id == video_id).all()
+    return [
+        PlaylistMembership(playlist_id=r.playlist_id, entry_id=r.id) for r in rows
+    ]

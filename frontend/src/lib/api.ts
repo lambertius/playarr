@@ -24,7 +24,8 @@ import type {
   LibraryImportStartRequest, LibraryImportStartResponse,
   ExistingDetailsRequest, ExistingDetailsResponse,
   RegexPreviewRequest, RegexPreviewResponse,
-  PlaylistOut, PlaylistSummary, PlaylistEntry,
+  PlaylistOut, PlaylistSummary, PlaylistEntry, PlaylistMembership,
+  PlaylistSortField, SortDirection, YtdlpStatus, YtdlpUpdateResult,
   PartyModeParams, PartyModeResponse,
   LogFileEntry, LogReadResponse,
   ArchiveItem, QualityBucket,
@@ -598,6 +599,21 @@ export const playlistApi = {
 
   reorder: (playlistId: number, entryIds: number[]) =>
     api.put<PlaylistOut>(`/playlists/${playlistId}/reorder`, { entry_ids: entryIds }).then(r => r.data),
+
+  sort: (playlistId: number, field: PlaylistSortField, direction: SortDirection) =>
+    api.put<PlaylistOut>(`/playlists/${playlistId}/sort`, { field, direction }).then(r => r.data),
+
+  forVideo: (videoId: number) =>
+    api.get<PlaylistMembership[]>(`/playlists/for-video/${videoId}`).then(r => r.data),
+};
+
+// ─── Tools (yt-dlp updater) ──────────────────────────────
+export const toolsApi = {
+  ytdlpStatus: () =>
+    api.get<YtdlpStatus>("/tools/ytdlp").then(r => r.data),
+
+  ytdlpUpdate: () =>
+    api.post<YtdlpUpdateResult>("/tools/ytdlp/update").then(r => r.data),
 };
 
 // ─── Video Editor ─────────────────────────────────────────

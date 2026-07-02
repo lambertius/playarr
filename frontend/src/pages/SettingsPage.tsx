@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Compass, Download, Power, ScrollText, ExternalLink, Tv, Cast, Image, Music, Puzzle, Wrench, Star } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport } from "@/hooks/queries";
+import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport, useYtdlpStatus, useUpdateYtdlp } from "@/hooks/queries";
 import { settingsApi, statsApi } from "@/lib/api";
 import { ErrorState, Skeleton } from "@/components/Feedback";
 import { useToast } from "@/components/Toast";
@@ -747,7 +747,14 @@ export function SettingsPage() {
       case "kodi": return extraSection("Kodi Add-on", <KodiPluginSettings />);
       case "management": return extraSection("Server Management", <RestartServerButton />);
       case "logs": return extraSection("Log Viewer", <LogViewer />, true);
-      case "about": return extraSection("System Information", <VersionInfo />);
+      case "about": return extraSection("System Information", (
+        <>
+          <VersionInfo />
+          <div className="mt-4 pt-4 border-t border-surface-border">
+            <YtdlpUpdater />
+          </div>
+        </>
+      ));
       default: return null;
     }
   };
@@ -1118,6 +1125,79 @@ function VersionInfo() {
               than the current v{versionData.app_version}. Upgrade Playarr to avoid potential issues.
             </p>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── yt-dlp updater (updates independently of the app) ── */
+
+function YtdlpUpdater() {
+  const { data: status, isLoading } = useYtdlpStatus();
+  const updateMutation = useUpdateYtdlp();
+  const { toast } = useToast();
+
+  const handleUpdate = () => {
+    updateMutation.mutate(undefined, {
+      onSuccess: (res) => {
+        toast({
+          type: res.success ? "success" : "error",
+          title: res.success ? "yt-dlp updated" : "yt-dlp update failed",
+          description: res.message,
+        });
+      },
+      onError: () => toast({ type: "error", title: "yt-dlp update failed" }),
+    });
+  };
+
+  const installed = status?.installed_version;
+  const latest = status?.latest_version;
+  const updateAvailable = status?.update_available;
+  const busy = updateMutation.isPending;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-text-primary">yt-dlp (YouTube downloader engine)</p>
+          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+            yt-dlp changes often to keep up with YouTube. Update it here without reinstalling Playarr —
+            an out-of-date engine is the usual cause of downloads capping at low resolution.
+          </p>
+        </div>
+        <button
+          onClick={handleUpdate}
+          disabled={busy || isLoading}
+          className="btn-secondary btn-sm flex items-center gap-1.5 shrink-0"
+        >
+          {busy
+            ? <RefreshCw size={14} className="animate-spin" />
+            : <Download size={14} />}
+          {busy ? "Updating…" : (installed ? "Update" : "Install")}
+        </button>
+      </div>
+
+      <div className="flex items-center gap-4 text-xs">
+        <span className="text-text-muted">
+          Installed: <span className="font-mono text-text-secondary">{isLoading ? "…" : (installed ?? "not installed")}</span>
+        </span>
+        <span className="text-text-muted">
+          Latest: <span className="font-mono text-text-secondary">{isLoading ? "…" : (latest ?? "unknown")}</span>
+        </span>
+        {status?.managed && (
+          <span className="text-[10px] text-text-muted/70">(self-managed)</span>
+        )}
+      </div>
+
+      {!isLoading && updateAvailable && (
+        <div className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/30 p-2.5">
+          <AlertTriangle size={14} className="text-amber-400 mt-0.5 shrink-0" />
+          <p className="text-xs text-amber-300">
+            {installed
+              ? `A newer yt-dlp (${latest}) is available.`
+              : "yt-dlp is not installed. Install it to enable YouTube downloads."}
+          </p>
         </div>
       )}
     </div>

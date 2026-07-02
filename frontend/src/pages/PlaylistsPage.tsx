@@ -1,10 +1,12 @@
 import { useState, useMemo } from "react";
-import { ListMusic, Plus, Trash2, Play } from "lucide-react";
+import { ListMusic, Plus, Trash2, Play, ChevronUp, ChevronDown, ArrowDownAZ, ArrowUpAZ, Pencil, Check, X } from "lucide-react";
 import { Tooltip } from "@/components/Tooltip";
 import { EmptyState } from "@/components/Feedback";
-import { usePlaylists, usePlaylist, useCreatePlaylist, useDeletePlaylist, useRemoveFromPlaylist } from "@/hooks/queries";
+import { useToast } from "@/components/Toast";
+import { usePlaylists, usePlaylist, useCreatePlaylist, useUpdatePlaylist, useDeletePlaylist, useRemoveFromPlaylist, useReorderPlaylist, useSortPlaylist } from "@/hooks/queries";
 import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { playbackApi } from "@/lib/api";
+import type { PlaylistSortField } from "@/types";
 
 type SortDir = "asc" | "desc";
 type SortBy = "name" | "entry_count" | "created_at" | "updated_at";
@@ -161,12 +163,39 @@ export function PlaylistsPage() {
   );
 }
 
+const TRACK_SORT_FIELDS: { value: PlaylistSortField; label: string }[] = [
+  { value: "artist", label: "Artist" },
+  { value: "title", label: "Title" },
+  { value: "year", label: "Year" },
+];
+
 function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete: () => void }) {
   const { data: playlist } = usePlaylist(playlistId);
   const removeMutation = useRemoveFromPlaylist();
+  const reorderMutation = useReorderPlaylist();
+  const sortMutation = useSortPlaylist();
+  const updateMutation = useUpdatePlaylist();
   const replaceQueue = usePlaybackStore((s) => s.replaceQueue);
+  const { toast } = useToast();
+  const [sortField, setSortField] = useState<PlaylistSortField>("artist");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
 
   if (!playlist) return null;
+
+  const startRename = () => { setNameDraft(playlist.name); setEditingName(true); };
+  const saveRename = () => {
+    const name = nameDraft.trim();
+    if (!name || name === playlist.name) { setEditingName(false); return; }
+    updateMutation.mutate(
+      { id: playlistId, name },
+      {
+        onSuccess: () => { setEditingName(false); toast({ type: "success", title: `Renamed to "${name}"` }); },
+        onError: () => toast({ type: "error", title: "Failed to rename playlist" }),
+      },
+    );
+  };
 
   const tracks: PlaybackTrack[] = playlist.entries.map((e) => ({
     videoId: e.video_id,
@@ -176,11 +205,52 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
     duration: e.duration_seconds ?? undefined,
   }));
 
+  // Manual reorder: swap the entry with its neighbour and persist the new order.
+  const moveEntry = (index: number, delta: number) => {
+    const ids = playlist.entries.map((e) => e.id);
+    const target = index + delta;
+    if (target < 0 || target >= ids.length) return;
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    reorderMutation.mutate({ playlistId, entryIds: ids });
+  };
+
+  const applySort = () => sortMutation.mutate({ playlistId, field: sortField, direction: sortDir });
+
   return (
     <div className="card">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-semibold text-text-primary">{playlist.name}</h2>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between mb-3 gap-2">
+        {editingName ? (
+          <div className="flex items-center gap-1 flex-1 min-w-0">
+            <input
+              type="text"
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") saveRename(); if (e.key === "Escape") setEditingName(false); }}
+              className="flex-1 min-w-0 rounded bg-surface text-lg font-semibold text-text-primary px-2 py-1 border border-surface-border focus:border-accent focus:outline-none"
+              autoFocus
+            />
+            <Tooltip content="Save name">
+              <button onClick={saveRename} disabled={updateMutation.isPending} className="text-accent hover:text-accent/80 p-1">
+                <Check size={16} />
+              </button>
+            </Tooltip>
+            <Tooltip content="Cancel">
+              <button onClick={() => setEditingName(false)} className="text-text-muted hover:text-text-primary p-1">
+                <X size={16} />
+              </button>
+            </Tooltip>
+          </div>
+        ) : (
+          <button
+            onClick={startRename}
+            title="Click to rename"
+            className="group/name flex items-center gap-1.5 min-w-0 text-left"
+          >
+            <h2 className="text-lg font-semibold text-text-primary truncate">{playlist.name}</h2>
+            <Pencil size={13} className="text-text-muted opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
+          </button>
+        )}
+        <div className="flex items-center gap-2 shrink-0">
           {tracks.length > 0 && (
             <button
               onClick={() => replaceQueue(tracks)}
@@ -197,6 +267,40 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
 
       {playlist.description && (
         <p className="text-xs text-text-muted mb-3">{playlist.description}</p>
+      )}
+
+      {/* Reorganise controls */}
+      {playlist.entries.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2 mb-3 pb-3 border-b border-surface-border">
+          <span className="text-[11px] text-text-muted">Sort by</span>
+          <select
+            value={sortField}
+            onChange={(e) => setSortField(e.target.value as PlaylistSortField)}
+            className="input-field w-auto py-1 text-xs"
+            aria-label="Sort tracks by"
+          >
+            {TRACK_SORT_FIELDS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+          <Tooltip content={sortDir === "asc" ? "Ascending (A→Z / oldest first)" : "Descending (Z→A / newest first)"}>
+            <button
+              onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+              className="btn-ghost btn-sm text-xs"
+              aria-label="Toggle sort direction"
+            >
+              {sortDir === "asc" ? <ArrowDownAZ size={14} /> : <ArrowUpAZ size={14} />}
+            </button>
+          </Tooltip>
+          <button
+            onClick={applySort}
+            disabled={sortMutation.isPending}
+            className="btn-secondary btn-sm text-xs"
+          >
+            Apply
+          </button>
+          <span className="text-[10px] text-text-muted ml-auto">Or use ↑ ↓ to move tracks manually</span>
+        </div>
       )}
 
       {playlist.entries.length === 0 ? (
@@ -220,7 +324,32 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
               )}
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium text-text-primary truncate">{entry.artist}</p>
-                <p className="text-[11px] text-text-secondary truncate">{entry.title}</p>
+                <p className="text-[11px] text-text-secondary truncate">
+                  {entry.title}{entry.year ? <span className="text-text-muted"> · {entry.year}</span> : null}
+                </p>
+              </div>
+              {/* Manual move up/down */}
+              <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-all">
+                <Tooltip content="Move up">
+                  <button
+                    onClick={() => moveEntry(idx, -1)}
+                    disabled={idx === 0 || reorderMutation.isPending}
+                    className="text-text-muted hover:text-text-primary disabled:opacity-30"
+                    aria-label="Move track up"
+                  >
+                    <ChevronUp size={13} />
+                  </button>
+                </Tooltip>
+                <Tooltip content="Move down">
+                  <button
+                    onClick={() => moveEntry(idx, 1)}
+                    disabled={idx === playlist.entries.length - 1 || reorderMutation.isPending}
+                    className="text-text-muted hover:text-text-primary disabled:opacity-30"
+                    aria-label="Move track down"
+                  >
+                    <ChevronDown size={13} />
+                  </button>
+                </Tooltip>
               </div>
               <Tooltip content="Remove this track from the playlist">
               <button

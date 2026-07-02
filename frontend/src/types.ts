@@ -1454,8 +1454,33 @@ export interface PlaylistEntry {
   position: number;
   artist: string;
   title: string;
+  album?: string | null;
+  year?: number | null;
   has_poster: boolean;
   duration_seconds?: number | null;
+}
+
+export interface PlaylistMembership {
+  playlist_id: number;
+  entry_id: number;
+}
+
+export type PlaylistSortField = "artist" | "title" | "year";
+export type SortDirection = "asc" | "desc";
+
+// ─── Tools (yt-dlp updater) ───────────────────────────────
+export interface YtdlpStatus {
+  installed_version: string | null;
+  latest_version: string | null;
+  update_available: boolean;
+  managed: boolean;
+  path: string | null;
+  managed_path: string | null;
+}
+
+export interface YtdlpUpdateResult extends YtdlpStatus {
+  success: boolean;
+  message: string;
 }
 
 export interface PlaylistOut {

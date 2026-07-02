@@ -151,6 +151,14 @@ class Settings(BaseSettings):
 
     @property
     def resolved_ytdlp(self) -> str:
+        # Prefer a self-managed yt-dlp installed via the in-app updater so that
+        # updates take effect immediately, regardless of what's on PATH or
+        # bundled next to the exe. Only applies when the path is left on "auto".
+        if self.ytdlp_path.lower() == "auto":
+            tool = "yt-dlp.exe" if os.name == "nt" else "yt-dlp"
+            managed = _rdirs.tools_dir / tool
+            if managed.is_file():
+                return str(managed)
         return self.resolve_tool_path(self.ytdlp_path, "yt-dlp")
 
     def get_all_library_dirs(self) -> list[str]:

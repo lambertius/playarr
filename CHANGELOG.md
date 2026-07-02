@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.9.36] - 2026-07-02
+
+### Added
+- **In-app yt-dlp updater** — Settings → About → System Information can now update (or first-time install) the yt-dlp download engine on its own, independently of a full Playarr reinstall. It shows the installed vs latest version, downloads the binary from the official yt-dlp GitHub releases into a user-writable managed location, verifies it runs, and swaps it in atomically. Because yt-dlp tracks YouTube's constantly-changing player, keeping it current is the usual fix for downloads capping at low resolution.
+- **Playlist reorganisation** — a playlist's tracks can now be **sorted by artist, title, or year (A–Z / Z–A)** — the new order is saved — and **manually reordered** with per-track up/down controls.
+- **Rename playlists** — a playlist's name can now be edited inline from its detail view (hover the title, click the pencil, Enter to save / Esc to cancel).
+
+### Changed
+- **Playlists are now de-duplicated** — a track can only appear in a playlist once. The Add-to-Playlist picker shows which playlists already contain the track and acts as a **toggle**: clicking a playlist it's already in **removes** it instead of adding a duplicate, so you can quickly add/remove across playlists. (Batch adds silently skip tracks already present.)
+
+### Fixed
+- **YouTube downloads now reach full resolution (4K)** — yt-dlp is invoked with the EJS remote challenge-solver enabled (`--remote-components ejs:github`), so it can decipher YouTube's signature/n-parameter and access the high-resolution DASH formats. Without it, only the pre-muxed 360p stream was usable and downloads silently fell back to 360p.
+
 ## [1.9.34] - 2026-07-02
 
 ### Added

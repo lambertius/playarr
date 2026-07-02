@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, exportApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi, metadataManagerApi } from "@/lib/api";
+import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, exportApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi, metadataManagerApi, toolsApi } from "@/lib/api";
 import type {
   LibraryParams, JobsParams, VideoItemUpdate, FacetFilterParams,
   ImportRequest, NormalizeRequest, BatchRescanRequest, SettingUpdate,
@@ -13,6 +13,7 @@ import type {
   ExistingDetailsRequest,
   CropPreviewRequest, EncodeRequest,
   ScraperTestRequest,
+  PlaylistSortField, SortDirection,
 } from "@/types";
 
 // ─── Query Keys ───────────────────────────────────────────
@@ -41,6 +42,8 @@ export const qk = {
     ["manualSearch", type, q, artist] as const,
   playlists: ["playlists"] as const,
   playlist: (id: number) => ["playlist", id] as const,
+  playlistsForVideo: (videoId: number) => ["playlistsForVideo", videoId] as const,
+  ytdlpStatus: ["ytdlpStatus"] as const,
   editorQueue: (ids: number[]) => ["editorQueue", ids] as const,
   editorScanResults: (jobId: number) => ["editorScanResults", jobId] as const,
   editorEncodeStatus: (jobId: number) => ["editorEncodeStatus", jobId] as const,
@@ -1032,6 +1035,18 @@ export function useCreatePlaylist() {
   });
 }
 
+export function useUpdatePlaylist() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name, description }: { id: number; name?: string; description?: string }) =>
+      playlistApi.update(id, { name, description }),
+    onSuccess: (_res, { id }) => {
+      qc.invalidateQueries({ queryKey: qk.playlist(id) });
+      qc.invalidateQueries({ queryKey: qk.playlists });
+    },
+  });
+}
+
 export function useDeletePlaylist() {
   const qc = useQueryClient();
   return useMutation({
@@ -1048,6 +1063,7 @@ export function useAddToPlaylist() {
     onSuccess: (_res, { playlistId }) => {
       qc.invalidateQueries({ queryKey: qk.playlist(playlistId) });
       qc.invalidateQueries({ queryKey: qk.playlists });
+      qc.invalidateQueries({ queryKey: ["playlistsForVideo"] });
     },
   });
 }
@@ -1072,7 +1088,55 @@ export function useRemoveFromPlaylist() {
     onSuccess: (_res, { playlistId }) => {
       qc.invalidateQueries({ queryKey: qk.playlist(playlistId) });
       qc.invalidateQueries({ queryKey: qk.playlists });
+      qc.invalidateQueries({ queryKey: ["playlistsForVideo"] });
     },
+  });
+}
+
+export function useReorderPlaylist() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ playlistId, entryIds }: { playlistId: number; entryIds: number[] }) =>
+      playlistApi.reorder(playlistId, entryIds),
+    onSuccess: (_res, { playlistId }) => qc.invalidateQueries({ queryKey: qk.playlist(playlistId) }),
+  });
+}
+
+export function useSortPlaylist() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ playlistId, field, direction }: { playlistId: number; field: PlaylistSortField; direction: SortDirection }) =>
+      playlistApi.sort(playlistId, field, direction),
+    onSuccess: (_res, { playlistId }) => qc.invalidateQueries({ queryKey: qk.playlist(playlistId) }),
+  });
+}
+
+export function usePlaylistsForVideo(videoId: number, enabled = true) {
+  return useQuery({
+    queryKey: qk.playlistsForVideo(videoId),
+    queryFn: () => playlistApi.forVideo(videoId),
+    enabled: enabled && videoId > 0,
+  });
+}
+
+// ─── Tools (yt-dlp updater) ───────────────────────────────
+
+export function useYtdlpStatus(enabled = true) {
+  return useQuery({
+    queryKey: qk.ytdlpStatus,
+    queryFn: toolsApi.ytdlpStatus,
+    enabled,
+    staleTime: 1000 * 60 * 30,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
+export function useUpdateYtdlp() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => toolsApi.ytdlpUpdate(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.ytdlpStatus }),
   });
 }
 

@@ -96,6 +96,15 @@ def validate_environment(port: int) -> list[StartupError]:
             ]:
                 if os.path.isfile(candidate):
                     return True
+        # Check the self-managed tools dir (populated by the in-app updater).
+        try:
+            from app.runtime_dirs import get_runtime_dirs
+            tools_dir = get_runtime_dirs().tools_dir
+            for fn in (f"{name}.exe", name):
+                if os.path.isfile(os.path.join(str(tools_dir), fn)):
+                    return True
+        except Exception:
+            pass
         return False
 
     if not _find_tool("ffmpeg"):

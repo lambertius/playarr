@@ -264,7 +264,7 @@ def get_available_formats(url: str) -> List[Dict[str, Any]]:
 
     # Point yt-dlp at our portable ffmpeg so it can probe all formats
     ffmpeg_dir = os.path.dirname(settings.resolved_ffmpeg)
-    cmd = [ytdlp, "--ffmpeg-location", ffmpeg_dir, "--js-runtimes", "node", "--dump-json", "--no-download", "--no-playlist", url]
+    cmd = [ytdlp, "--ffmpeg-location", ffmpeg_dir, "--js-runtimes", "node", "--remote-components", "ejs:github", "--dump-json", "--no-download", "--no-playlist", url]
     logger.info(f"Fetching formats for: {url}")
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
@@ -376,6 +376,10 @@ def download_video(
         ytdlp,
         "--ffmpeg-location", ffmpeg_dir,
         "--js-runtimes", "node",
+        # Fetch yt-dlp's EJS challenge-solver so YouTube signature/n-param
+        # deciphering works. Without it, only the pre-muxed 360p format has a
+        # usable URL, so downloads silently fall back to 360p even when 4K exists.
+        "--remote-components", "ejs:github",
         "-f", format_spec,
         "--merge-output-format", container,
         "--write-info-json",
