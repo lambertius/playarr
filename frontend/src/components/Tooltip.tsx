@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, cloneElement, isValidElement } from "react";
 import ReactDOM from "react-dom";
 
 interface TooltipProps {
@@ -48,6 +48,17 @@ export function Tooltip({ content, children, delay = 400 }: TooltipProps) {
     tip.style.opacity = "1";
   }, [visible, coords]);
 
+  // Accessibility: when the tooltip content is a plain string and the child
+  // element has no accessible label of its own (common for icon-only buttons),
+  // expose the tooltip text as the child's aria-label.
+  let child: React.ReactNode = children;
+  if (isValidElement(children) && typeof content === "string" && content) {
+    const el = children as React.ReactElement<Record<string, unknown>>;
+    if (el.props["aria-label"] == null && el.props["aria-labelledby"] == null) {
+      child = cloneElement(el, { "aria-label": content });
+    }
+  }
+
   return (
     <>
       {/* Clone the child to attach ref + handlers */}
@@ -59,7 +70,7 @@ export function Tooltip({ content, children, delay = 400 }: TooltipProps) {
         onBlur={hide}
         style={{ display: "inline-flex" }}
       >
-        {children}
+        {child}
       </span>
       {visible &&
         coords &&

@@ -2,6 +2,7 @@
 Playlist API — CRUD for playlists and their entries.
 """
 import logging
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -193,6 +194,7 @@ def add_entry(playlist_id: int, data: AddEntryRequest, db: Session = Depends(get
     max_pos = max((e.position for e in p.entries), default=-1)
     entry = PlaylistEntry(playlist_id=playlist_id, video_id=data.video_id, position=max_pos + 1)
     db.add(entry)
+    p.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(entry)
     return _entry_out(entry)
@@ -217,6 +219,8 @@ def add_entries_batch(playlist_id: int, data: AddMultipleRequest, db: Session = 
         results.append(entry)
         existing_ids.add(vid)
         next_pos += 1
+    if results:
+        p.updated_at = datetime.now(timezone.utc)
     db.commit()
     for e in results:
         db.refresh(e)
@@ -231,18 +235,37 @@ def remove_entry(playlist_id: int, entry_id: int, db: Session = Depends(get_db))
     ).first()
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
+    playlist = db.query(Playlist).get(playlist_id)
+    if playlist:
+        playlist.updated_at = datetime.now(timezone.utc)
     db.delete(entry)
     db.commit()
 
 
 @router.put("/{playlist_id}/reorder", response_model=PlaylistOut)
 def reorder_entries(playlist_id: int, data: ReorderRequest, db: Session = Depends(get_db)):
-    """Reorder entries by providing an ordered list of entry IDs."""
+    """Reorder entries by providing an ordered list of entry IDs.
+
+    Entries missing from the payload (e.g. added by another client while this
+    one held a stale list) are appended after the provided ones, preserving
+    their previous relative order, so positions never collide.
+    """
     p = _playlist_or_404(db, playlist_id)
     id_to_entry = {e.id: e for e in p.entries}
-    for pos, eid in enumerate(data.entry_ids):
-        if eid in id_to_entry:
-            id_to_entry[eid].position = pos
+    pos = 0
+    seen: set[int] = set()
+    for eid in data.entry_ids:
+        entry = id_to_entry.get(eid)
+        if entry is None or eid in seen:
+            continue  # unknown/duplicate ids are ignored
+        entry.position = pos
+        seen.add(eid)
+        pos += 1
+    leftover = sorted((e for e in p.entries if e.id not in seen), key=lambda e: e.position)
+    for entry in leftover:
+        entry.position = pos
+        pos += 1
+    p.updated_at = datetime.now(timezone.utc)
     db.commit()
     return _playlist_out(_playlist_or_404(db, playlist_id))
 
@@ -269,6 +292,7 @@ def sort_entries(playlist_id: int, data: SortRequest, db: Session = Depends(get_
     ordered = sorted(p.entries, key=key, reverse=reverse)
     for pos, entry in enumerate(ordered):
         entry.position = pos
+    p.updated_at = datetime.now(timezone.utc)
     db.commit()
     return _playlist_out(_playlist_or_404(db, playlist_id))
 

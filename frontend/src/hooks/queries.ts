@@ -1098,7 +1098,13 @@ export function useReorderPlaylist() {
   return useMutation({
     mutationFn: ({ playlistId, entryIds }: { playlistId: number; entryIds: number[] }) =>
       playlistApi.reorder(playlistId, entryIds),
-    onSuccess: (_res, { playlistId }) => qc.invalidateQueries({ queryKey: qk.playlist(playlistId) }),
+    onSuccess: (res, { playlistId }) => {
+      // The endpoint returns the full playlist — seed the cache so the new
+      // order shows immediately instead of flashing back to the stale order.
+      qc.setQueryData(qk.playlist(playlistId), res);
+      qc.invalidateQueries({ queryKey: qk.playlist(playlistId) });
+      qc.invalidateQueries({ queryKey: qk.playlists });
+    },
   });
 }
 
@@ -1107,7 +1113,11 @@ export function useSortPlaylist() {
   return useMutation({
     mutationFn: ({ playlistId, field, direction }: { playlistId: number; field: PlaylistSortField; direction: SortDirection }) =>
       playlistApi.sort(playlistId, field, direction),
-    onSuccess: (_res, { playlistId }) => qc.invalidateQueries({ queryKey: qk.playlist(playlistId) }),
+    onSuccess: (res, { playlistId }) => {
+      qc.setQueryData(qk.playlist(playlistId), res);
+      qc.invalidateQueries({ queryKey: qk.playlist(playlistId) });
+      qc.invalidateQueries({ queryKey: qk.playlists });
+    },
   });
 }
 

@@ -173,6 +173,38 @@ async def list_artwork_ids(db: Session = Depends(get_db)):
 _BROWSER_SAFE_AUDIO = {"aac", "mp3", "opus", "vorbis", "flac"}
 
 
+def _validate_library_path(file_path: str) -> None:
+    """Validate that a playback path is inside a configured library directory
+    and NOT inside its ``_archive`` subdirectory.
+
+    Archived originals (bumped there by the video editor / re-download flows)
+    must never be playable through the normal playback endpoints — only via
+    the explicit Archive manager flows (``/stream-archive`` preview, restore).
+
+    Raises HTTPException(403) on violation.
+    """
+    from app.config import get_settings
+    all_dirs = get_settings().get_all_library_dirs()
+    norm_path = os.path.normcase(os.path.normpath(file_path))
+    inside_library = False
+    for d in all_dirs:
+        norm_root = os.path.normcase(os.path.normpath(d))
+        if not norm_path.startswith(norm_root + os.sep):
+            continue
+        inside_library = True
+        archive_root = os.path.join(norm_root, "_archive")
+        if norm_path == archive_root or norm_path.startswith(archive_root + os.sep):
+            raise HTTPException(
+                status_code=403,
+                detail="File is in the archive — restore it to play",
+            )
+    if not inside_library:
+        raise HTTPException(
+            status_code=403,
+            detail="Video file is outside configured library directories",
+        )
+
+
 @router.get("/stream/{video_id}")
 async def stream_video(
     video_id: int,
@@ -190,14 +222,8 @@ async def stream_video(
     if not item or not item.file_path or not os.path.isfile(item.file_path):
         raise HTTPException(status_code=404, detail="Video file not found")
 
-    # Reject files outside all configured library directories
-    from app.config import get_settings
-    all_dirs = get_settings().get_all_library_dirs()
-    norm_path = os.path.normcase(os.path.normpath(item.file_path))
-    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
-               for d in all_dirs):
-        raise HTTPException(status_code=403,
-                            detail="Video file is outside configured library directories")
+    # Reject files outside all configured library directories or archived originals
+    _validate_library_path(item.file_path)
 
     file_path = item.file_path
 
@@ -240,7 +266,14 @@ async def stream_video(
         return _stream_transcoded(file_path, audio_bitrate=bitrate)
 
     # --- Standard raw streaming (browser-safe audio) ---
-    file_size = os.path.getsize(file_path)
+    stat = os.stat(file_path)
+    file_size = stat.st_size
+
+    # Cache validators derived from file mtime+size so the browser revalidates
+    # instead of blindly serving a stale copy. Critical after an in-place
+    # re-encode/trim: the URL is unchanged, so without a changing validator the
+    # browser would keep playing the pre-edit video from its media cache.
+    etag = f'"{int(stat.st_mtime)}-{file_size}"'
 
     # Determine MIME type
     ext = os.path.splitext(file_path)[1].lower()
@@ -278,6 +311,8 @@ async def stream_video(
                 "Content-Range": f"bytes {start}-{end}/{file_size}",
                 "Accept-Ranges": "bytes",
                 "Content-Length": str(chunk_size),
+                "Cache-Control": "no-cache",
+                "ETag": etag,
             },
         )
 
@@ -288,6 +323,8 @@ async def stream_video(
         headers={
             "Accept-Ranges": "bytes",
             "Content-Length": str(file_size),
+            "Cache-Control": "no-cache",
+            "ETag": etag,
         },
     )
 
@@ -361,13 +398,8 @@ async def stream_raw(video_id: int, request: Request, db: Session = Depends(get_
     if not item or not item.file_path or not os.path.isfile(item.file_path):
         raise HTTPException(status_code=404, detail="Video file not found")
 
-    from app.config import get_settings
-    all_dirs = get_settings().get_all_library_dirs()
-    norm_path = os.path.normcase(os.path.normpath(item.file_path))
-    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
-               for d in all_dirs):
-        raise HTTPException(status_code=403,
-                            detail="Video file is outside configured library directories")
+    # Reject files outside all configured library directories or archived originals
+    _validate_library_path(item.file_path)
 
     return _range_file_response(item.file_path, request)
 
@@ -386,13 +418,8 @@ async def stream_theatre(video_id: int, db: Session = Depends(get_db)):
     if not item or not item.file_path or not os.path.isfile(item.file_path):
         raise HTTPException(status_code=404, detail="Video file not found")
 
-    from app.config import get_settings
-    all_dirs = get_settings().get_all_library_dirs()
-    norm_path = os.path.normcase(os.path.normpath(item.file_path))
-    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
-               for d in all_dirs):
-        raise HTTPException(status_code=403,
-                            detail="Video file is outside configured library directories")
+    # Reject files outside all configured library directories or archived originals
+    _validate_library_path(item.file_path)
 
     from app.services.theatre_backdrop import ensure_backdrop
     from app.routers.preferences import get_preference
@@ -431,13 +458,8 @@ async def stream_video_only(
     if not item or not item.file_path or not os.path.isfile(item.file_path):
         raise HTTPException(status_code=404, detail="Video file not found")
 
-    from app.config import get_settings
-    all_dirs = get_settings().get_all_library_dirs()
-    norm_path = os.path.normcase(os.path.normpath(item.file_path))
-    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
-               for d in all_dirs):
-        raise HTTPException(status_code=403,
-                            detail="Video file is outside configured library directories")
+    # Reject files outside all configured library directories or archived originals
+    _validate_library_path(item.file_path)
 
     file_path = item.file_path
     ext_lower = os.path.splitext(file_path)[1].lower()
@@ -1144,14 +1166,9 @@ async def download_audio(video_id: int, db: Session = Depends(get_db)):
     if not item or not item.file_path or not os.path.isfile(item.file_path):
         raise HTTPException(status_code=404, detail="Video file not found")
 
-    # Security: verify file is within library dirs
+    # Security: verify file is within library dirs and not an archived original
     settings = get_settings()
-    all_dirs = settings.get_all_library_dirs()
-    norm_path = os.path.normcase(os.path.normpath(item.file_path))
-    if not any(norm_path.startswith(os.path.normcase(os.path.normpath(d)) + os.sep)
-               for d in all_dirs):
-        raise HTTPException(status_code=403,
-                            detail="Video file is outside configured library directories")
+    _validate_library_path(item.file_path)
 
     ffmpeg = settings.resolved_ffmpeg
 

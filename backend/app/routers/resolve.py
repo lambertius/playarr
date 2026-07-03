@@ -567,11 +567,15 @@ def _build_review_item(vi: VideoItem, db: Session) -> ReviewItemOut:
                         quality_score=ex_qs.quality_score() if ex_qs else 0,
                     )
 
-    # Duplicate group key: normalized artist||title for visual grouping
+    # Duplicate group key: normalized artist||title for visual grouping.
+    # MUST stay byte-identical to duplicate_scan_task's Phase-1 bucket key
+    # (tasks.py) — the scanner buckets on _normalize_artist_for_dup (which
+    # strips trailing feat./ft. credits), so use the same here or feat-credit
+    # duplicate pairs split into separate UI groups.
     _dup_group_key = None
     if cat == "duplicate" and vi.artist and vi.title:
-        from app.tasks import _normalize_for_dup, _normalize_title_for_dup
-        _dup_group_key = f"{_normalize_for_dup(vi.artist)}||{_normalize_title_for_dup(vi.title)}"
+        from app.tasks import _normalize_artist_for_dup, _normalize_title_for_dup
+        _dup_group_key = f"{_normalize_artist_for_dup(vi.artist)}||{_normalize_title_for_dup(vi.title)}"
 
     # Rename info: compute expected path for rename-category items
     _expected_path = None

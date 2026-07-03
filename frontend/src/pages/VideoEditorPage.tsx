@@ -1,13 +1,15 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { useMutation } from "@tanstack/react-query";
 import {
-  Scissors, ScanLine, Play, Pause, Trash2, Square, CheckSquare,
+  Scissors, ScanLine, Play, Pause, Square, CheckSquare,
   Loader2, Settings2, MonitorPlay, Film, X, Eye, EyeOff, Ban, ExternalLink,
   Volume2, VolumeX, ZoomIn, ZoomOut, Timer, SkipBack, SkipForward, Link2,
-  ChevronUp, ChevronDown, ArrowUpDown,
+  ChevronUp, ChevronDown, ArrowUpDown, ListX, StepBack, StepForward,
+  RotateCcw, AlertTriangle, Archive,
 } from "lucide-react";
-import { useEditorQueue, useDetectLetterbox, useScanLetterbox, useEditorScanResults, useEditorEncodeStatus, useVideoEditorEncode, useVideoEditorBatchEncode, useSetExcludeFromScan } from "@/hooks/queries";
-import { playbackApi } from "@/lib/api";
+import { useEditorQueue, useDetectLetterbox, useScanLetterbox, useEditorScanResults, useEditorEncodeStatus, useVideoEditorEncode, useVideoEditorBatchEncode, useSetExcludeFromScan, useRestoreFromArchive } from "@/hooks/queries";
+import { playbackApi, jobsApi } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
 import type { EditorQueueItem, EncodeRequest, CropPreviewResponse, LetterboxScanItem } from "@/types";
@@ -76,6 +78,8 @@ function saveManualIds(ids: Set<number>) {
 }
 
 // ── Numeric Stepper — larger +/- buttons for number inputs ──
+// Chevron buttons auto-repeat on press-and-hold (400ms delay, then every 60ms)
+// and Shift+click steps by ×10.
 function NumericStepper({ value, onChange, min, max, step = 1, disabled, className = "w-16" }: {
   value: number;
   onChange: (val: number) => void;
@@ -85,11 +89,55 @@ function NumericStepper({ value, onChange, min, max, step = 1, disabled, classNa
   disabled?: boolean;
   className?: string;
 }) {
-  const clamp = (v: number) => {
+  const clamp = useCallback((v: number) => {
     if (min !== undefined) v = Math.max(min, v);
     if (max !== undefined) v = Math.min(max, v);
     return Math.round(v * 1000) / 1000;
-  };
+  }, [min, max]);
+
+  // Refs so hold-to-repeat always reads the latest value/handlers
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  const clampRef = useRef(clamp);
+  useEffect(() => {
+    valueRef.current = value;
+    onChangeRef.current = onChange;
+    clampRef.current = clamp;
+  });
+
+  const delayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const repeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopRepeat = useCallback(() => {
+    if (delayTimerRef.current) { clearTimeout(delayTimerRef.current); delayTimerRef.current = null; }
+    if (repeatTimerRef.current) { clearInterval(repeatTimerRef.current); repeatTimerRef.current = null; }
+  }, []);
+
+  // Clear timers on unmount
+  useEffect(() => stopRepeat, [stopRepeat]);
+
+  const stepValue = useCallback((dir: 1 | -1, mult: number) => {
+    const next = clampRef.current(valueRef.current + dir * step * mult);
+    if (next === valueRef.current) {
+      // Hit min/max — stop auto-repeating
+      stopRepeat();
+      return;
+    }
+    onChangeRef.current(next);
+  }, [step, stopRepeat]);
+
+  const handlePointerDown = useCallback((dir: 1 | -1) => (e: React.PointerEvent) => {
+    if (disabled) return;
+    const mult = e.shiftKey ? 10 : 1;
+    stepValue(dir, mult);
+    stopRepeat();
+    delayTimerRef.current = setTimeout(() => {
+      repeatTimerRef.current = setInterval(() => stepValue(dir, mult), 60);
+    }, 400);
+    // Stop even if the pointer is released outside the button
+    window.addEventListener("pointerup", stopRepeat, { once: true });
+  }, [disabled, stepValue, stopRepeat]);
+
   return (
     <div className={`flex items-stretch mt-1 ${className}`}>
       <input
@@ -106,18 +154,26 @@ function NumericStepper({ value, onChange, min, max, step = 1, disabled, classNa
         <button
           type="button"
           tabIndex={-1}
+          title="Hold to repeat · Shift = ×10"
           disabled={disabled || (max !== undefined && value >= max)}
           className="flex items-center justify-center px-1.5 h-1/2 text-text-muted hover:text-text-primary hover:bg-surface-hover disabled:opacity-30 border-b border-surface-border"
-          onClick={() => onChange(clamp(value + step))}
+          onPointerDown={handlePointerDown(1)}
+          onPointerUp={stopRepeat}
+          onPointerLeave={stopRepeat}
+          onPointerCancel={stopRepeat}
         >
           <ChevronUp size={12} />
         </button>
         <button
           type="button"
           tabIndex={-1}
+          title="Hold to repeat · Shift = ×10"
           disabled={disabled || (min !== undefined && value <= min)}
           className="flex items-center justify-center px-1.5 h-1/2 text-text-muted hover:text-text-primary hover:bg-surface-hover disabled:opacity-30"
-          onClick={() => onChange(clamp(value - step))}
+          onPointerDown={handlePointerDown(-1)}
+          onPointerUp={stopRepeat}
+          onPointerLeave={stopRepeat}
+          onPointerCancel={stopRepeat}
         >
           <ChevronDown size={12} />
         </button>
@@ -153,6 +209,8 @@ export function VideoEditorPage() {
     audioBitrate: string;
     cropLinkLR: boolean;
     cropLinkTB: boolean;
+    /** audioPassthrough value before trim forced it off, restored on trim-disable */
+    prevAudioPassthrough?: boolean;
   }>>({});
 
   // Global defaults
@@ -188,7 +246,13 @@ export function VideoEditorPage() {
   const activeEncodeJob = encodeJobs[0] ?? null;
 
   // Post-encode summary (shown as dismissible banner after encode completes)
-  const [lastEncodeSummary, setLastEncodeSummary] = useState<{ title: string; summary: string } | null>(null);
+  const [lastEncodeSummary, setLastEncodeSummary] = useState<{ videoId: number; title: string; summary: string } | null>(null);
+
+  // Encode confirmation modal — list of video IDs pending confirmation
+  const [encodeConfirmIds, setEncodeConfirmIds] = useState<number[] | null>(null);
+
+  // Restore-original confirmation modal
+  const [restoreConfirm, setRestoreConfirm] = useState<{ videoId: number; title: string } | null>(null);
 
   // Fetch queue items from API
   const { data: queueItems, isLoading: queueLoading } = useEditorQueue(queueIds);
@@ -199,6 +263,12 @@ export function VideoEditorPage() {
   const encodeSingle = useVideoEditorEncode();
   const encodeBatch = useVideoEditorBatchEncode();
   const excludeFromScan = useSetExcludeFromScan();
+  const restoreFromArchive = useRestoreFromArchive();
+
+  // Local mutation — cancel a running encode job (no existing hook for this)
+  const cancelEncode = useMutation({
+    mutationFn: (jobId: number) => jobsApi.cancel(jobId),
+  });
 
   // ── Video playback controls ──────────────────────────────
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -305,11 +375,30 @@ export function VideoEditorPage() {
     if (val > 0 && v.muted) { v.muted = false; setIsMuted(false); }
   }, []);
 
-  const formatTime = (s: number) => {
+  const formatTime = (s: number, tenths = false) => {
+    if (tenths) {
+      // Round to whole tenths first so float64 imprecision doesn't format one tenth low.
+      const t10 = Math.round(s * 10);
+      const m = Math.floor(t10 / 600);
+      const whole = Math.floor((t10 % 600) / 10);
+      const dec = t10 % 10;
+      return `${m}:${String(whole).padStart(2, "0")}.${dec}`;
+    }
     const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, "0")}`;
+    const sec = s % 60;
+    return `${m}:${Math.floor(sec).toString().padStart(2, "0")}`;
   };
+
+  // Seek relative to the current playhead (clamped to [0, duration])
+  const seekBy = useCallback((deltaSeconds: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    const maxT = (dbDurationRef.current > 0 ? dbDurationRef.current : v.duration) || 0;
+    let target = v.currentTime + deltaSeconds;
+    if (maxT > 0) target = Math.min(maxT, target);
+    v.currentTime = Math.max(0, target);
+    setCurrentTime(v.currentTime);
+  }, []);
 
   // ── Zoom controls ──────────────────────────────────────
   const [zoom, setZoom] = useState(1);
@@ -446,7 +535,8 @@ export function VideoEditorPage() {
     setQueueIds([]);
     setCheckedIds(new Set());
     setSelectedId(null);
-    setEncodeJobs([]);
+    // Note: encodeJobs is intentionally NOT cleared here — running encode jobs
+    // must keep being tracked even when the queue is cleared.
     setManualIds(new Set());
     autoDetectedRef.current.clear();
     try { localStorage.removeItem(AUTO_DETECTED_KEY); } catch {}
@@ -522,6 +612,100 @@ export function VideoEditorPage() {
 
   const selectedSettings = selectedId ? getItemSettings(selectedId) : null;
 
+  // ── Frame stepping (±1 frame using item fps, fallback 1/25s) ──
+  const frameStep = useCallback((dir: 1 | -1) => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (!v.paused) v.pause();
+    const fps = selectedItem?.fps && selectedItem.fps > 0 ? selectedItem.fps : 25;
+    seekBy(dir / fps);
+  }, [selectedItem?.fps, seekBy]);
+
+  // ── Enable trim on an item, remembering audio passthrough so it can be
+  //    restored when trim is disabled again (trim requires audio re-encode) ──
+  const setTrimEnabled = useCallback((videoId: number, enabled: boolean, extra: { trimStart?: number; trimEnd?: number } = {}) => {
+    const s = getItemSettings(videoId);
+    if (enabled) {
+      updateItemSetting(videoId, {
+        trimEnabled: true,
+        ...(s.trimEnabled ? {} : {
+          prevAudioPassthrough: s.audioPassthrough,
+          audioPassthrough: false,
+        }),
+        ...extra,
+      });
+    } else {
+      updateItemSetting(videoId, {
+        trimEnabled: false,
+        audioPassthrough: s.prevAudioPassthrough ?? s.audioPassthrough,
+        prevAudioPassthrough: undefined,
+        ...extra,
+      });
+    }
+  }, [getItemSettings, updateItemSetting]);
+
+  // ── Set trim points from the current playhead ────────────
+  const setTrimInFromPlayhead = useCallback(() => {
+    if (!selectedId) return;
+    const s = getItemSettings(selectedId);
+    let t = Math.max(0, Math.round((videoRef.current?.currentTime ?? currentTime) * 10) / 10);
+    // Keep at least 0.1s of output (respect the existing end trim)
+    if (effectiveDuration > 0) t = Math.min(t, Math.max(0, effectiveDuration - s.trimEnd - 0.1));
+    setTrimEnabled(selectedId, true, { trimStart: Math.round(t * 10) / 10 });
+  }, [selectedId, currentTime, effectiveDuration, getItemSettings, setTrimEnabled]);
+
+  const setTrimOutFromPlayhead = useCallback(() => {
+    if (!selectedId) return;
+    const dur = effectiveDuration;
+    if (!dur || dur <= 0) return;
+    const s = getItemSettings(selectedId);
+    const t = videoRef.current?.currentTime ?? currentTime;
+    // trimEnd is seconds removed from the END, not an end timestamp.
+    // Keep at least 0.1s of output (respect the existing start trim).
+    let trimEnd = Math.max(0, Math.round((dur - t) * 10) / 10);
+    trimEnd = Math.min(trimEnd, Math.max(0, dur - s.trimStart - 0.1));
+    setTrimEnabled(selectedId, true, { trimEnd: Math.round(trimEnd * 10) / 10 });
+  }, [selectedId, currentTime, effectiveDuration, getItemSettings, setTrimEnabled]);
+
+  // ── Keyboard shortcuts (only while an item is selected) ──
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Never hijack typing in form fields (trim/crop number inputs etc.)
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // Don't drive the video while any modal is open (they have no focus trap).
+      if (encodeConfirmIds !== null || restoreConfirm !== null || showScanDialog) return;
+      // Let Space/Enter activate a focused button/link instead of hijacking play/pause.
+      if (t && t.closest('button, a, [role="button"]')) return;
+      switch (e.key) {
+        case " ":
+          e.preventDefault();
+          togglePlay();
+          break;
+        case "ArrowLeft":
+          e.preventDefault();
+          if (e.shiftKey) frameStep(-1); else seekBy(-1);
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          if (e.shiftKey) frameStep(1); else seekBy(1);
+          break;
+        case "i":
+        case "I":
+          setTrimInFromPlayhead();
+          break;
+        case "o":
+        case "O":
+          setTrimOutFromPlayhead();
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedId, togglePlay, frameStep, seekBy, setTrimInFromPlayhead, setTrimOutFromPlayhead, encodeConfirmIds, restoreConfirm, showScanDialog]);
+
   // ── Manual crop override from edge pixel inputs ──────────
   const handleCropOverride = useCallback((videoId: number, edge: "left" | "right" | "top" | "bottom", value: number) => {
     const item = queueItems?.find(i => i.video_id === videoId);
@@ -594,9 +778,9 @@ export function VideoEditorPage() {
         setScanJobId(result.job_id);
         toast({ type: "info", title: "Letterbox scan started..." });
       } else if (result.results) {
-        // Inline results — replace queue with fresh scan results
+        // Inline results — merge scan results into the existing queue
+        // (addToQueue de-dupes; manually-added items are preserved)
         const ids = result.results.map(r => r.video_id);
-        clearQueue();
         addToQueue(ids);
         // Store letterbox crop info
         for (const r of result.results) {
@@ -613,21 +797,21 @@ export function VideoEditorPage() {
             },
           });
         }
-        toast({ type: "success", title: `Found ${ids.length} videos with letterboxing` });
+        toast({ type: "success", title: `Found ${ids.length} letterboxed videos — added to queue` });
         setIsScanning(false);
       }
     } catch {
       toast({ type: "error", title: "Letterbox scan failed" });
       setIsScanning(false);
     }
-  }, [scanLetterbox, addToQueue, clearQueue, updateItemSetting, toast]);
+  }, [scanLetterbox, addToQueue, updateItemSetting, toast]);
 
   // Watch scan job results
   useEffect(() => {
     if (scanResults.data?.status === "complete" && scanResults.data.results.length > 0) {
-      // Replace queue with fresh scan results
+      // Merge scan results into the existing queue (addToQueue de-dupes;
+      // manually-added items are preserved)
       const ids = scanResults.data.results.map((r: LetterboxScanItem) => r.video_id);
-      clearQueue();
       addToQueue(ids);
       for (const r of scanResults.data.results) {
         updateItemSetting(r.video_id, {
@@ -643,7 +827,7 @@ export function VideoEditorPage() {
           },
         });
       }
-      toast({ type: "success", title: `Found ${ids.length} videos with letterboxing` });
+      toast({ type: "success", title: `Found ${ids.length} letterboxed videos — added to queue` });
       setScanJobId(null);
       setIsScanning(false);
     } else if (scanResults.data?.status === "failed") {
@@ -651,7 +835,7 @@ export function VideoEditorPage() {
       setScanJobId(null);
       setIsScanning(false);
     }
-  }, [scanResults.data, addToQueue, clearQueue, updateItemSetting, toast]);
+  }, [scanResults.data, addToQueue, updateItemSetting, toast]);
 
   // Watch encode job status
   useEffect(() => {
@@ -662,7 +846,7 @@ export function VideoEditorPage() {
       const summary = encodeStatus.data.summary;
       toast({ type: "success", title: `Encode complete: ${videoTitle}`, description: summary ? summary.split("\n").slice(0, 3).join(" · ") : undefined });
       if (summary) {
-        setLastEncodeSummary({ title: videoTitle, summary });
+        setLastEncodeSummary({ videoId: activeEncodeJob.videoId, title: videoTitle, summary });
       }
       removeFromQueue(activeEncodeJob.videoId);
       setEncodeJobs(prev => prev.filter(j => j.jobId !== activeEncodeJob.jobId));
@@ -788,58 +972,8 @@ export function VideoEditorPage() {
     }
   }, [checkedIds, detectLetterbox, updateItemSetting, toast]);
 
-  // ── Apply edits (encode) ────────────────────────────────
-  const handleApplyChecked = useCallback(async () => {
-    const items: EncodeRequest[] = [];
-    for (const videoId of checkedIds) {
-      const s = getItemSettings(videoId);
-      const req: EncodeRequest = {
-        video_id: videoId,
-        crf: s.crf,
-        preset: s.preset,
-        audio_passthrough: s.audioPassthrough,
-      };
-      if (s.crop && (s.crop.crop_w !== s.crop.original_w || s.crop.crop_h !== s.crop.original_h)) {
-        req.crop_w = s.crop.crop_w;
-        req.crop_h = s.crop.crop_h;
-        req.crop_x = s.crop.crop_x;
-        req.crop_y = s.crop.crop_y;
-      }
-      if (s.targetDar) {
-        req.target_dar = s.targetDar;
-      }
-      if (s.trimEnabled && (s.trimStart > 0 || s.trimEnd > 0)) {
-        req.trim_start = s.trimStart > 0 ? s.trimStart : undefined;
-        req.trim_end = s.trimEnd > 0 ? s.trimEnd : undefined;
-        req.audio_codec = s.audioCodec !== "aac" ? s.audioCodec : undefined;
-        req.audio_bitrate = s.audioBitrate !== "auto" ? s.audioBitrate : undefined;
-      }
-      items.push(req);
-    }
-
-    if (items.length === 0) {
-      toast({ type: "warning", title: "No videos checked" });
-      return;
-    }
-
-    try {
-      if (items.length === 1) {
-        const result = await encodeSingle.mutateAsync(items[0]);
-        setEncodeJobs(prev => [...prev, { videoId: items[0].video_id, jobId: result.job_id }]);
-        toast({ type: "info", title: "Encode job started" });
-      } else {
-        const result = await encodeBatch.mutateAsync(items);
-        const newJobs = result.job_ids.map((jid: number, i: number) => ({ videoId: items[i].video_id, jobId: jid }));
-        setEncodeJobs(prev => [...prev, ...newJobs]);
-        toast({ type: "info", title: `${items.length} encode jobs started` });
-      }
-    } catch {
-      toast({ type: "error", title: "Failed to start encode" });
-    }
-  }, [checkedIds, getItemSettings, encodeSingle, encodeBatch, toast]);
-
-  // ── Encode single item ──────────────────────────────────
-  const handleEncodeSingle = useCallback(async (videoId: number) => {
+  // ── Build an encode request from an item's settings ─────
+  const buildEncodeRequest = useCallback((videoId: number): EncodeRequest => {
     const s = getItemSettings(videoId);
     const req: EncodeRequest = {
       video_id: videoId,
@@ -859,17 +993,93 @@ export function VideoEditorPage() {
     if (s.trimEnabled && (s.trimStart > 0 || s.trimEnd > 0)) {
       req.trim_start = s.trimStart > 0 ? s.trimStart : undefined;
       req.trim_end = s.trimEnd > 0 ? s.trimEnd : undefined;
-      req.audio_codec = s.audioCodec !== "aac" ? s.audioCodec : undefined;
+    }
+    // Audio codec/bitrate apply whenever audio is re-encoded (not only for trim)
+    if (!s.audioPassthrough) {
+      req.audio_codec = s.audioCodec;
       req.audio_bitrate = s.audioBitrate !== "auto" ? s.audioBitrate : undefined;
     }
+    return req;
+  }, [getItemSettings]);
+
+  // ── Start encode jobs (called after the confirmation modal) ──
+  const startEncode = useCallback(async (videoIds: number[]) => {
+    const items = videoIds.map(buildEncodeRequest);
+    if (items.length === 0) return;
     try {
-      const result = await encodeSingle.mutateAsync(req);
-      setEncodeJobs(prev => [...prev, { videoId: videoId, jobId: result.job_id }]);
-      toast({ type: "info", title: "Encode job started" });
+      if (items.length === 1) {
+        const result = await encodeSingle.mutateAsync(items[0]);
+        setEncodeJobs(prev => [...prev, { videoId: items[0].video_id, jobId: result.job_id }]);
+        toast({ type: "info", title: "Encode job started" });
+      } else {
+        const result = await encodeBatch.mutateAsync(items);
+        const newJobs = result.job_ids.map((jid: number, i: number) => ({ videoId: items[i].video_id, jobId: jid }));
+        setEncodeJobs(prev => [...prev, ...newJobs]);
+        toast({ type: "info", title: `${items.length} encode jobs started` });
+      }
     } catch {
       toast({ type: "error", title: "Failed to start encode" });
     }
-  }, [getItemSettings, encodeSingle, toast]);
+  }, [buildEncodeRequest, encodeSingle, encodeBatch, toast]);
+
+  // ── Encode trigger paths — all open the confirmation modal ──
+  const handleApplyChecked = useCallback(() => {
+    if (checkedIds.size === 0) {
+      toast({ type: "warning", title: "No videos checked" });
+      return;
+    }
+    setEncodeConfirmIds([...checkedIds]);
+  }, [checkedIds, toast]);
+
+  const handleEncodeSingle = useCallback((videoId: number) => {
+    setEncodeConfirmIds([videoId]);
+  }, []);
+
+  // ── Restore original from archive (confirm-gated) ───────
+  const handleRestoreConfirm = useCallback(async () => {
+    if (!restoreConfirm) return;
+    const { videoId, title } = restoreConfirm;
+    try {
+      await restoreFromArchive.mutateAsync(videoId);
+      toast({ type: "success", title: `Original restored: ${title}` });
+      setRestoreConfirm(null);
+      // Dismiss the post-encode summary banner if it refers to this video
+      setLastEncodeSummary(prev => (prev && prev.videoId === videoId ? null : prev));
+    } catch {
+      toast({ type: "error", title: "Failed to restore original" });
+    }
+  }, [restoreConfirm, restoreFromArchive, toast]);
+
+  // ── Cancel the active encode job ─────────────────────────
+  const handleCancelEncode = useCallback(() => {
+    if (!activeEncodeJob) return;
+    cancelEncode.mutate(activeEncodeJob.jobId, {
+      onSuccess: () => toast({ type: "info", title: "Cancelling encode..." }),
+      onError: () => toast({ type: "error", title: "Failed to cancel encode" }),
+    });
+  }, [activeEncodeJob, cancelEncode, toast]);
+
+  // ── Bulk-apply global defaults to every queued item ──────
+  // (per-item settings override the globals once an item has its own entry,
+  // so this is the way to push new defaults onto already-queued items)
+  const applyGlobalsToAll = useCallback(() => {
+    if (queueIds.length === 0) return;
+    setItemSettings(prev => {
+      const next = { ...prev };
+      for (const id of queueIds) {
+        const cur = prev[id] ?? getItemSettings(id);
+        next[id] = {
+          ...cur,
+          crf: globalCrf,
+          preset: globalPreset,
+          // Trim requires audio re-encode — never force passthrough back on
+          audioPassthrough: cur.trimEnabled ? false : globalAudioPassthrough,
+        };
+      }
+      return next;
+    });
+    toast({ type: "success", title: `Defaults applied to ${queueIds.length} queued item${queueIds.length > 1 ? "s" : ""}` });
+  }, [queueIds, getItemSettings, globalCrf, globalPreset, globalAudioPassthrough, toast]);
 
   const handleToggleExcludeFromScan = useCallback(async (videoId: number, currentlyExcluded: boolean) => {
     const newExclude = !currentlyExcluded;
@@ -943,7 +1153,7 @@ export function VideoEditorPage() {
 
           <div className="flex-1 min-w-[8px]" />
 
-          <Tooltip content="Apply edits to checked videos">
+          <Tooltip content="Apply edits to checked videos (asks for confirmation)">
             <button
               className="btn-primary btn-sm whitespace-nowrap"
               onClick={handleApplyChecked}
@@ -955,17 +1165,17 @@ export function VideoEditorPage() {
           </Tooltip>
 
           {checkedIds.size > 0 && (
-            <Tooltip content="Remove checked from queue">
+            <Tooltip content="Remove checked items from the editor queue (files are not deleted)">
               <button className="btn-secondary btn-sm text-orange-400 whitespace-nowrap" onClick={clearCheckedFromQueue}>
-                <Trash2 size={14} /> Checked
+                <X size={14} /> Remove Checked
               </button>
             </Tooltip>
           )}
 
           {queueIds.length > 0 && (
-            <Tooltip content="Clear entire queue">
+            <Tooltip content="Clear the editor queue (files are not deleted)">
               <button className="btn-secondary btn-sm text-red-400 whitespace-nowrap" onClick={clearQueue}>
-                <Trash2 size={14} /> All
+                <ListX size={14} /> Clear Queue
               </button>
             </Tooltip>
           )}
@@ -974,7 +1184,19 @@ export function VideoEditorPage() {
         {/* Global Settings Collapsible */}
         {showSettings && (
           <div className="px-3 py-3 border-b border-surface-border bg-surface/50 space-y-3">
-            <h4 className="text-xs font-medium text-text-muted uppercase tracking-wider">Default Encode Settings</h4>
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-xs font-medium text-text-muted uppercase tracking-wider">Default Encode Settings</h4>
+              <Tooltip content="Write these CRF/preset/audio defaults into every queued item's settings">
+                <button
+                  className="btn-secondary btn-sm whitespace-nowrap"
+                  onClick={applyGlobalsToAll}
+                  disabled={queueIds.length === 0}
+                >
+                  Apply to all queued
+                </button>
+              </Tooltip>
+            </div>
+            <p className="text-[10px] text-text-muted">Per-item settings override these defaults.</p>
             <div className="grid grid-cols-2 gap-2">
               <label className="text-xs text-text-secondary">
                 CRF (Quality)
@@ -1103,10 +1325,25 @@ export function VideoEditorPage() {
               <div className="flex items-center gap-2 text-xs text-green-400">
                 <Loader2 size={14} className="animate-spin" />
                 <span className="flex-1 truncate">
-                  {encodeStatus.data?.current_step || "Encoding..."}
+                  Encoding 1 of {encodeJobs.length}
+                  {(() => {
+                    const t = queueItems?.find(i => i.video_id === activeEncodeJob?.videoId)?.title;
+                    return t ? `: ${t}` : "";
+                  })()}
                 </span>
-                <span className="text-text-muted">{encodeJobs.length} job{encodeJobs.length > 1 ? "s" : ""}</span>
+                <Tooltip content="Cancel the active encode job">
+                  <button
+                    className="btn-ghost btn-xs text-text-muted hover:text-red-400"
+                    onClick={handleCancelEncode}
+                    disabled={cancelEncode.isPending}
+                  >
+                    {cancelEncode.isPending ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
+                  </button>
+                </Tooltip>
               </div>
+              {encodeStatus.data?.current_step && (
+                <div className="text-[10px] text-text-muted mt-1 truncate">{encodeStatus.data.current_step}</div>
+              )}
               <div className="h-1 mt-2 bg-surface rounded-full overflow-hidden">
                 <div
                   className="h-full bg-green-500 transition-all"
@@ -1125,6 +1362,12 @@ export function VideoEditorPage() {
                 </button>
               </div>
               <pre className="text-[11px] text-text-secondary leading-relaxed whitespace-pre-wrap">{lastEncodeSummary.summary}</pre>
+              <button
+                className="btn-ghost btn-xs text-orange-400 mt-1.5"
+                onClick={() => setRestoreConfirm({ videoId: lastEncodeSummary.videoId, title: lastEncodeSummary.title })}
+              >
+                <RotateCcw size={12} /> Undo encode (restore original)
+              </button>
             </div>
           )}
 
@@ -1136,15 +1379,16 @@ export function VideoEditorPage() {
               selected={selectedId === item.video_id}
               settings={getItemSettings(item.video_id)}
               isEncoding={encodingVideoIds.has(item.video_id)}
+              isActiveEncode={activeEncodeJob?.videoId === item.video_id}
               encodeProgress={activeEncodeJob?.videoId === item.video_id ? (encodeStatus.data?.progress_percent ?? 0) : undefined}
               isManual={manualIds.has(item.video_id)}
               onToggleCheck={() => toggleCheck(item.video_id)}
-              onSelect={() => setSelectedId(item.video_id === selectedId ? null : item.video_id)}
+              onSelect={() => setSelectedId(item.video_id)}
               onRemove={() => removeFromQueue(item.video_id)}
               onDetectLetterbox={() => handleDetectSingle(item.video_id)}
               onEncode={() => handleEncodeSingle(item.video_id)}
               onExclude={() => handleToggleExcludeFromScan(item.video_id, item.exclude_from_scan)}
-              excludePending={excludeFromScan.isPending}
+              excludePending={excludeFromScan.isPending && excludeFromScan.variables?.videoId === item.video_id}
             />
           ))}
 
@@ -1188,13 +1432,13 @@ export function VideoEditorPage() {
             {/* Preview Area */}
             <div className="flex-1 flex flex-col items-center justify-center p-4 min-h-0 bg-zinc-500">
               <div className="flex items-center gap-2 mb-2">
-                <Tooltip content={showOverlay ? "Hide crop overlay" : "Show crop overlay"}>
+                <Tooltip content={showOverlay ? "Hide the crop/DAR edit overlay" : "Show the crop/DAR edit overlay"}>
                   <button
                     className={`btn-secondary btn-sm ${showOverlay ? "!bg-accent/10 !text-accent" : ""}`}
                     onClick={() => setShowOverlay(!showOverlay)}
                   >
                     {showOverlay ? <Eye size={14} /> : <EyeOff size={14} />}
-                    Preview {showOverlay ? "On" : "Off"}
+                    Overlay {showOverlay ? "On" : "Off"}
                   </button>
                 </Tooltip>
                 <div className="flex items-center gap-1 ml-2">
@@ -1263,10 +1507,22 @@ export function VideoEditorPage() {
 
             {/* ── Playback Controls Bar ── */}
             <div className="flex items-center gap-2 px-4 py-1.5 bg-surface border-t border-surface-border">
-              <button onClick={togglePlay} className="btn-ghost btn-xs text-text-primary">
-                {isPlaying ? <Pause size={16} /> : <Play size={16} />}
-              </button>
-              <span className="text-[11px] text-text-muted tabular-nums w-[38px] text-right">{formatTime(currentTime)}</span>
+              <Tooltip content="Play/Pause (Space)">
+                <button onClick={togglePlay} className="btn-ghost btn-xs text-text-primary">
+                  {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+                </button>
+              </Tooltip>
+              <Tooltip content="Back 1 frame (Shift+←)">
+                <button onClick={() => frameStep(-1)} className="btn-ghost btn-xs text-text-muted hover:text-text-primary">
+                  <StepBack size={14} />
+                </button>
+              </Tooltip>
+              <Tooltip content="Forward 1 frame (Shift+→)">
+                <button onClick={() => frameStep(1)} className="btn-ghost btn-xs text-text-muted hover:text-text-primary">
+                  <StepForward size={14} />
+                </button>
+              </Tooltip>
+              <span className="text-[11px] text-text-muted tabular-nums w-[52px] text-right">{formatTime(currentTime, true)}</span>
               <input
                 type="range"
                 min={0}
@@ -1290,6 +1546,9 @@ export function VideoEditorPage() {
                 className="w-16 h-1 accent-accent cursor-pointer"
               />
             </div>
+            <div className="px-4 pb-1 bg-surface text-[10px] text-text-muted text-center">
+              Space play · ←/→ seek · Shift+←/→ frame · I/O trim in/out · Ctrl+scroll zoom · drag to pan
+            </div>
 
             {/* Edit Controls */}
             <div className="border-t border-surface-border bg-surface-light">
@@ -1310,17 +1569,29 @@ export function VideoEditorPage() {
                   {selectedItem.fps ? ` · ${selectedItem.fps}fps` : ""}
                 </span>
                 <div className="flex items-center gap-1.5 ml-2 pl-2 border-l border-surface-border">
+                  {selectedItem.has_archive && (
+                    <Tooltip content="Deletes the edited file and restores the archived original">
+                      <button
+                        className="btn-secondary btn-sm whitespace-nowrap"
+                        onClick={() => setRestoreConfirm({ videoId: selectedItem.video_id, title: `${selectedItem.artist} — ${selectedItem.title}` })}
+                        disabled={restoreFromArchive.isPending}
+                      >
+                        {restoreFromArchive.isPending ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                        Restore Original
+                      </button>
+                    </Tooltip>
+                  )}
                   <Tooltip content={selectedItem.exclude_from_scan ? "Re-include in future letterbox scans" : "Exclude from future letterbox scans (false positive)"}>
                     <button
                       className={`btn-secondary btn-sm ${selectedItem.exclude_from_scan ? "text-orange-400" : "text-text-muted"}`}
                       onClick={() => handleToggleExcludeFromScan(selectedItem.video_id, selectedItem.exclude_from_scan)}
-                      disabled={excludeFromScan.isPending}
+                      disabled={excludeFromScan.isPending && excludeFromScan.variables?.videoId === selectedItem.video_id}
                     >
-                      {excludeFromScan.isPending ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />}
+                      {(excludeFromScan.isPending && excludeFromScan.variables?.videoId === selectedItem.video_id) ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />}
                       {selectedItem.exclude_from_scan ? "Excluded" : "Exclude"}
                     </button>
                   </Tooltip>
-                  <Tooltip content="Encode this video">
+                  <Tooltip content="Encode this video (asks for confirmation)">
                     <button
                       className="btn-primary btn-sm"
                       onClick={() => handleEncodeSingle(selectedItem.video_id)}
@@ -1330,12 +1601,12 @@ export function VideoEditorPage() {
                       {encodingVideoIds.has(selectedItem.video_id) ? `Encoding ${activeEncodeJob?.videoId === selectedItem.video_id ? `${encodeStatus.data?.progress_percent ?? 0}%` : "..."}` : "Encode"}
                     </button>
                   </Tooltip>
-                  <Tooltip content="Remove from queue">
+                  <Tooltip content="Remove from queue (file is not deleted)">
                     <button
                       className="btn-secondary btn-sm text-red-400"
                       onClick={() => removeFromQueue(selectedItem.video_id)}
                     >
-                      <Trash2 size={14} />
+                      <X size={14} />
                     </button>
                   </Tooltip>
                 </div>
@@ -1350,7 +1621,7 @@ export function VideoEditorPage() {
                   </h4>
                   <div className="flex flex-wrap items-end gap-3">
                     <label className="text-xs text-text-secondary">
-                      Aspect Ratio
+                      Stretch to ratio (DAR)
                       <select
                         value={selectedSettings?.ratio ?? "original"}
                         onChange={e => handleRatioChange(selectedItem.video_id, e.target.value)}
@@ -1358,6 +1629,7 @@ export function VideoEditorPage() {
                       >
                         {RATIO_PRESETS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                       </select>
+                      <span className="text-[10px] text-text-muted block">Stretches the picture — no pixels are cropped</span>
                     </label>
 
                     {selectedSettings?.ratio === "custom" && (
@@ -1403,14 +1675,56 @@ export function VideoEditorPage() {
                       </select>
                     </label>
 
-                    <label className="flex items-center gap-2 text-xs text-text-secondary pb-1">
-                      <input
-                        type="checkbox"
-                        checked={selectedSettings?.audioPassthrough ?? globalAudioPassthrough}
-                        onChange={e => updateItemSetting(selectedItem.video_id, { audioPassthrough: e.target.checked })}
-                      />
-                      Audio copy
-                    </label>
+                    <Tooltip content={selectedSettings?.trimEnabled ? "Trim requires audio re-encoding — passthrough is unavailable while trim is enabled" : "Copy the original audio stream without re-encoding"}>
+                      <label className={`flex items-center gap-2 text-xs text-text-secondary pb-1 ${selectedSettings?.trimEnabled ? "opacity-50" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={selectedSettings?.audioPassthrough ?? globalAudioPassthrough}
+                          disabled={selectedSettings?.trimEnabled}
+                          onChange={e => updateItemSetting(selectedItem.video_id, { audioPassthrough: e.target.checked })}
+                        />
+                        Audio copy
+                      </label>
+                    </Tooltip>
+
+                    {/* Audio re-encode options — shown whenever audio passthrough is off */}
+                    {!(selectedSettings?.audioPassthrough ?? globalAudioPassthrough) && (
+                      <>
+                        <Tooltip content="AAC: universally compatible. Opus: better quality at low bitrates. FLAC: lossless (larger files).">
+                          <label className="text-xs text-text-secondary">
+                            Audio codec
+                            <select
+                              value={selectedSettings?.audioCodec ?? "aac"}
+                              onChange={e => updateItemSetting(selectedItem.video_id, { audioCodec: e.target.value })}
+                              className="input-sm w-auto mt-1 block"
+                            >
+                              <option value="aac">AAC</option>
+                              <option value="opus">Opus</option>
+                              <option value="flac">FLAC (lossless)</option>
+                            </select>
+                          </label>
+                        </Tooltip>
+
+                        {(selectedSettings?.audioCodec ?? "aac") !== "flac" && (
+                          <Tooltip content="Auto matches the source bitrate. Higher values preserve more audio quality but increase file size.">
+                            <label className="text-xs text-text-secondary">
+                              Bitrate
+                              <select
+                                value={selectedSettings?.audioBitrate ?? "auto"}
+                                onChange={e => updateItemSetting(selectedItem.video_id, { audioBitrate: e.target.value })}
+                                className="input-sm w-auto mt-1 block"
+                              >
+                                <option value="auto">Auto (match source)</option>
+                                <option value="128k">128k</option>
+                                <option value="192k">192k</option>
+                                <option value="256k">256k</option>
+                                <option value="320k">320k</option>
+                              </select>
+                            </label>
+                          </Tooltip>
+                        )}
+                      </>
+                    )}
                   </div>
                   {selectedSettings?.targetDar && (
                     <div className="text-[11px] text-blue-400 flex items-center gap-2 mt-2 pt-2 border-t border-surface-border">
@@ -1517,11 +1831,9 @@ export function VideoEditorPage() {
                       <input
                         type="checkbox"
                         checked={selectedSettings?.trimEnabled ?? false}
-                        onChange={e => updateItemSetting(selectedItem.video_id, {
-                          trimEnabled: e.target.checked,
-                          // Force audio re-encode when trim is enabled
-                          ...(e.target.checked ? { audioPassthrough: false } : {}),
-                        })}
+                        // Enabling trim forces audio re-encode; disabling restores
+                        // the previous audio passthrough setting
+                        onChange={e => setTrimEnabled(selectedItem.video_id, e.target.checked)}
                       />
                       <Timer size={11} /> Trim
                     </label>
@@ -1555,11 +1867,11 @@ export function VideoEditorPage() {
                         {/* Labels */}
                         <div className="absolute inset-0 flex items-center justify-between px-2 text-[9px] tabular-nums text-text-muted pointer-events-none">
                           <span className={selectedSettings?.trimStart ? "text-red-400" : ""}>
-                            {formatTime(selectedSettings?.trimStart ?? 0)}
+                            {formatTime(selectedSettings?.trimStart ?? 0, true)}
                           </span>
                           <span className="text-text-muted/50">▼</span>
                           <span className={selectedSettings?.trimEnd ? "text-red-400" : ""}>
-                            -{formatTime(selectedSettings?.trimEnd ?? 0)}
+                            -{formatTime(selectedSettings?.trimEnd ?? 0, true)}
                           </span>
                         </div>
                       </div>
@@ -1577,6 +1889,14 @@ export function VideoEditorPage() {
                               className="w-20"
                             />
                           </label>
+                          <Tooltip content="Set trim start from the current playhead (I)">
+                            <button
+                              className="btn-ghost btn-xs text-text-muted hover:text-accent mb-0.5"
+                              onClick={setTrimInFromPlayhead}
+                            >
+                              Set
+                            </button>
+                          </Tooltip>
                           <Tooltip content="Seek to trim start point">
                             <button
                               className="btn-ghost btn-xs text-text-muted hover:text-accent mb-0.5"
@@ -1603,6 +1923,14 @@ export function VideoEditorPage() {
                               className="w-20"
                             />
                           </label>
+                          <Tooltip content="Set trim end from the current playhead — seconds removed from the end (O)">
+                            <button
+                              className="btn-ghost btn-xs text-text-muted hover:text-accent mb-0.5"
+                              onClick={setTrimOutFromPlayhead}
+                            >
+                              Set
+                            </button>
+                          </Tooltip>
                           <Tooltip content="Seek to trim end point">
                             <button
                               className="btn-ghost btn-xs text-text-muted hover:text-accent mb-0.5"
@@ -1616,48 +1944,10 @@ export function VideoEditorPage() {
                             </button>
                           </Tooltip>
                         </div>
-
-                        <div className="border-l border-surface-border pl-3 flex items-end gap-3">
-                          {/* Audio codec */}
-                          <Tooltip content="AAC: universally compatible. Opus: better quality at low bitrates. FLAC: lossless (larger files).">
-                            <label className="text-xs text-text-secondary">
-                              Audio codec
-                              <select
-                                value={selectedSettings?.audioCodec ?? "aac"}
-                                onChange={e => updateItemSetting(selectedItem.video_id, { audioCodec: e.target.value })}
-                                className="input-sm w-auto mt-1 block"
-                              >
-                                <option value="aac">AAC</option>
-                                <option value="opus">Opus</option>
-                                <option value="flac">FLAC (lossless)</option>
-                              </select>
-                            </label>
-                          </Tooltip>
-
-                          {/* Audio bitrate (not for FLAC) */}
-                          {(selectedSettings?.audioCodec ?? "aac") !== "flac" && (
-                            <Tooltip content="Auto matches the source bitrate. Higher values preserve more audio quality but increase file size.">
-                              <label className="text-xs text-text-secondary">
-                                Bitrate
-                                <select
-                                  value={selectedSettings?.audioBitrate ?? "auto"}
-                                  onChange={e => updateItemSetting(selectedItem.video_id, { audioBitrate: e.target.value })}
-                                  className="input-sm w-auto mt-1 block"
-                                >
-                                  <option value="auto">Auto (match source)</option>
-                                  <option value="128k">128k</option>
-                                  <option value="192k">192k</option>
-                                  <option value="256k">256k</option>
-                                  <option value="320k">320k</option>
-                                </select>
-                              </label>
-                            </Tooltip>
-                          )}
-                        </div>
                       </div>
 
                       <div className="text-[10px] text-text-muted/60 mt-2 flex items-center gap-1">
-                        Trim requires audio re-encoding
+                        Trim requires audio re-encoding — codec/bitrate options are in Encode Settings
                         {selectedItem.audio_codec && (
                         <span>
                            · Source: {selectedItem.audio_codec}
@@ -1682,17 +1972,139 @@ export function VideoEditorPage() {
           onClose={() => setShowScanDialog(false)}
         />
       )}
+
+      {/* Encode confirmation dialog — gate for all three encode trigger paths */}
+      {encodeConfirmIds && (
+        <EncodeConfirmDialog
+          rows={encodeConfirmIds.map(id => {
+            const item = queueItems?.find(i => i.video_id === id);
+            const s = getItemSettings(id);
+            const hasCrop = !!(s.crop && (s.crop.crop_w !== s.crop.original_w || s.crop.crop_h !== s.crop.original_h));
+            const hasTrim = s.trimEnabled && (s.trimStart > 0 || s.trimEnd > 0);
+            const trimParts: string[] = [];
+            if (hasTrim && s.trimStart > 0) trimParts.push(`${s.trimStart}s from start`);
+            if (hasTrim && s.trimEnd > 0) trimParts.push(`${s.trimEnd}s from end`);
+            return {
+              videoId: id,
+              title: item ? `${item.artist} — ${item.title}` : `Video #${id}`,
+              cropText: hasCrop && s.crop
+                ? `${s.crop.crop_w}×${s.crop.crop_h} at +${s.crop.crop_x},+${s.crop.crop_y} (from ${s.crop.original_w}×${s.crop.original_h})`
+                : null,
+              darText: s.targetDar ? `Stretch to ${s.targetDar} (no pixels cropped)` : null,
+              trimText: trimParts.length > 0 ? `Remove ${trimParts.join(", ")}` : null,
+              crf: s.crf,
+              preset: s.preset,
+              audioText: s.audioPassthrough
+                ? "Copy original (passthrough)"
+                : `Re-encode ${s.audioCodec.toUpperCase()}${s.audioBitrate !== "auto" ? ` @ ${s.audioBitrate}` : " (auto bitrate)"}`,
+              hasEdits: hasCrop || !!s.targetDar || hasTrim,
+            };
+          })}
+          onCancel={() => setEncodeConfirmIds(null)}
+          onConfirm={() => {
+            // Re-validate the snapshot: an encode may have completed (dropping its id
+            // from the queue) while the modal was open — never re-encode a finished output.
+            const ids = (encodeConfirmIds ?? []).filter(id => queueIds.includes(id) && !encodingVideoIds.has(id));
+            setEncodeConfirmIds(null);
+            if (ids.length) startEncode(ids);
+          }}
+        />
+      )}
+
+      {/* Restore-original confirmation dialog */}
+      {restoreConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setRestoreConfirm(null)}>
+          <div className="bg-surface-light border border-surface-border rounded-lg shadow-xl w-96 max-w-[90vw] p-5" onClick={e => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-text-primary mb-1">Restore original?</h3>
+            <p className="text-xs text-text-secondary mb-1 truncate">{restoreConfirm.title}</p>
+            <p className="text-xs text-text-muted mb-4 leading-relaxed">
+              Deletes the edited file and restores the archived original.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button className="btn-ghost btn-sm" onClick={() => setRestoreConfirm(null)}>Cancel</button>
+              <button
+                className="btn-primary btn-sm"
+                onClick={handleRestoreConfirm}
+                disabled={restoreFromArchive.isPending}
+              >
+                {restoreFromArchive.isPending && <Loader2 size={14} className="animate-spin" />}
+                Restore Original
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Encode Confirmation Dialog ────────────────────────────
+function EncodeConfirmDialog({ rows, onCancel, onConfirm }: {
+  rows: {
+    videoId: number;
+    title: string;
+    cropText: string | null;
+    darText: string | null;
+    trimText: string | null;
+    crf: number;
+    preset: string;
+    audioText: string;
+    hasEdits: boolean;
+  }[];
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
+      <div className="bg-surface-light border border-surface-border rounded-lg shadow-xl w-[480px] max-w-[92vw] p-5" onClick={e => e.stopPropagation()}>
+        <h3 className="text-sm font-semibold text-text-primary mb-1">
+          Encode {rows.length} video{rows.length !== 1 ? "s" : ""}?
+        </h3>
+        <p className="text-xs text-text-muted mb-3 leading-relaxed">
+          This permanently replaces the library file{rows.length !== 1 ? "s" : ""}. The original{rows.length !== 1 ? "s" : ""} will be archived and can be restored later.
+        </p>
+
+        <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+          {rows.map(r => (
+            <div key={r.videoId} className="rounded border border-surface-border bg-surface/40 px-3 py-2">
+              <div className="text-xs font-medium text-text-primary truncate">{r.title}</div>
+              <ul className="text-[11px] text-text-secondary mt-1 space-y-0.5">
+                {r.cropText && <li className="flex items-center gap-1.5"><Scissors size={10} className="text-accent flex-shrink-0" /> Crop: {r.cropText}</li>}
+                {r.darText && <li className="flex items-center gap-1.5"><Film size={10} className="text-blue-400 flex-shrink-0" /> DAR: {r.darText}</li>}
+                {r.trimText && <li className="flex items-center gap-1.5"><Timer size={10} className="text-red-400 flex-shrink-0" /> Trim: {r.trimText}</li>}
+                <li className="text-text-muted">Video: CRF {r.crf} · {r.preset} preset · Audio: {r.audioText}</li>
+                <li className="text-text-muted flex items-center gap-1.5"><Archive size={10} className="flex-shrink-0" /> Original will be archived</li>
+              </ul>
+              {!r.hasEdits && (
+                <div className="flex items-center gap-1.5 text-[11px] text-amber-400 mt-1.5">
+                  <AlertTriangle size={11} className="flex-shrink-0" />
+                  Re-encode only — quality loss, no changes applied
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="flex justify-end gap-2 mt-4">
+          <button className="btn-ghost btn-sm" onClick={onCancel}>Cancel</button>
+          <button className="btn-primary btn-sm" onClick={onConfirm}>
+            <Play size={14} /> Encode{rows.length > 1 ? ` (${rows.length})` : ""}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
 
 // ── Queue Row Component ──────────────────────────────────
-function QueueRow({ item, checked, selected, settings, isEncoding, encodeProgress, isManual, onToggleCheck, onSelect, onRemove, onDetectLetterbox, onEncode, onExclude, excludePending }: {
+function QueueRow({ item, checked, selected, settings, isEncoding, isActiveEncode, encodeProgress, isManual, onToggleCheck, onSelect, onRemove, onDetectLetterbox, onEncode, onExclude, excludePending }: {
   item: EditorQueueItem;
   checked: boolean;
   selected: boolean;
-  settings: { ratio: string; crop?: CropPreviewResponse; targetDar?: string };
+  settings: { ratio: string; crop?: CropPreviewResponse; targetDar?: string; trimEnabled?: boolean; trimStart?: number; trimEnd?: number };
   isEncoding: boolean;
+  /** true when this row's encode job is the one actively running (others are queued) */
+  isActiveEncode: boolean;
   encodeProgress?: number;
   isManual: boolean;
   onToggleCheck: () => void;
@@ -1704,24 +2116,26 @@ function QueueRow({ item, checked, selected, settings, isEncoding, encodeProgres
   excludePending: boolean;
 }) {
   const hasCrop = settings.crop && (settings.crop.crop_w !== settings.crop.original_w || settings.crop.crop_h !== settings.crop.original_h);
+  const hasTrim = !!settings.trimEnabled && ((settings.trimStart ?? 0) > 0 || (settings.trimEnd ?? 0) > 0);
 
   return (
     <div
       className={`flex flex-col border-b border-surface-border transition-colors cursor-pointer ${
         selected ? "bg-accent/10 border-l-2 border-l-accent" : "hover:bg-surface-lighter"
       }`}
+      onClick={onSelect}
     >
       <div className="flex items-center gap-2 px-3 pt-2 pb-1">
         {/* Checkbox */}
-        <button onClick={onToggleCheck} className="flex-shrink-0 text-text-muted hover:text-text-primary">
+        <button
+          onClick={e => { e.stopPropagation(); onToggleCheck(); }}
+          className="flex-shrink-0 text-text-muted hover:text-text-primary"
+        >
           {checked ? <CheckSquare size={16} className="text-accent" /> : <Square size={16} />}
         </button>
 
         {/* Poster thumbnail */}
-        <div
-          className="w-10 h-10 rounded bg-surface-lighter flex-shrink-0 overflow-hidden"
-          onClick={onSelect}
-        >
+        <div className="w-10 h-10 rounded bg-surface-lighter flex-shrink-0 overflow-hidden">
           <img
             src={playbackApi.posterUrl(item.video_id)}
             alt=""
@@ -1731,7 +2145,7 @@ function QueueRow({ item, checked, selected, settings, isEncoding, encodeProgres
         </div>
 
         {/* Title */}
-        <div className="flex-1 min-w-0" onClick={onSelect}>
+        <div className="flex-1 min-w-0">
           <div className="text-sm font-medium text-text-primary truncate">
             {item.artist} — {item.title}
           </div>
@@ -1753,39 +2167,61 @@ function QueueRow({ item, checked, selected, settings, isEncoding, encodeProgres
           {hasCrop && (
             <span className="text-accent">· Crop set</span>
           )}
+          {hasTrim && (
+            <span className="text-red-400">· Trim</span>
+          )}
+          {settings.targetDar && (
+            <span className="text-blue-400">· DAR {settings.targetDar}</span>
+          )}
+          {item.has_archive && (
+            <span className="text-purple-400">· Original archived</span>
+          )}
+          {isEncoding && !isActiveEncode && (
+            <span className="text-green-400">· Queued</span>
+          )}
         </div>
 
         {/* Actions */}
         <div className="flex items-center gap-0.5 flex-shrink-0">
           <Tooltip content="Detect letterboxing">
-            <button className="btn-ghost btn-xs text-text-muted hover:text-text-primary" onClick={onDetectLetterbox}>
+            <button
+              className="btn-ghost btn-xs text-text-muted hover:text-text-primary"
+              onClick={e => { e.stopPropagation(); onDetectLetterbox(); }}
+            >
               <ScanLine size={13} />
             </button>
           </Tooltip>
-          <Tooltip content="Encode this video">
-            <button className="btn-ghost btn-xs text-text-muted hover:text-accent" onClick={onEncode} disabled={isEncoding}>
-              {isEncoding ? <Loader2 size={13} className="animate-spin text-green-400" /> : <Play size={13} />}
+          <Tooltip content="Encode this video (asks for confirmation)">
+            <button
+              className="btn-ghost btn-xs text-text-muted hover:text-accent"
+              onClick={e => { e.stopPropagation(); onEncode(); }}
+              disabled={isEncoding}
+            >
+              {isActiveEncode ? <Loader2 size={13} className="animate-spin text-green-400" /> : <Play size={13} />}
             </button>
           </Tooltip>
           <Tooltip content={item.exclude_from_scan ? "Re-include in future scans" : "Exclude from future scans"}>
             <button
               className={`btn-ghost btn-xs ${item.exclude_from_scan ? "text-orange-400" : "text-text-muted hover:text-orange-400"}`}
-              onClick={onExclude}
+              onClick={e => { e.stopPropagation(); onExclude(); }}
               disabled={excludePending}
             >
               {excludePending ? <Loader2 size={13} className="animate-spin" /> : <Ban size={13} />}
             </button>
           </Tooltip>
-          <Tooltip content="Remove from queue">
-            <button className="btn-ghost btn-xs text-text-muted hover:text-red-400" onClick={onRemove}>
+          <Tooltip content="Remove from queue (file is not deleted)">
+            <button
+              className="btn-ghost btn-xs text-text-muted hover:text-red-400"
+              onClick={e => { e.stopPropagation(); onRemove(); }}
+            >
               <X size={13} />
             </button>
           </Tooltip>
         </div>
       </div>
 
-      {/* Encode progress bar */}
-      {isEncoding && (
+      {/* Encode progress bar — only the actively running job has real progress */}
+      {isActiveEncode && (
         <div className="h-1 bg-surface-lighter">
           <div
             className="h-full bg-green-500 transition-all duration-500"
@@ -1810,23 +2246,12 @@ function ScanDialog({ onScan, onClose }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div className="bg-surface-light border border-surface-border rounded-lg shadow-xl w-72 p-5" onClick={e => e.stopPropagation()}>
         <h3 className="text-sm font-semibold text-text-primary mb-1">Letterbox Scan</h3>
-        <p className="text-xs text-text-muted mb-4 leading-relaxed">
+        <p className="text-xs text-text-muted mb-1 leading-relaxed">
           Scan for videos with black bars. Excluded, previously cropped, and trimmed videos are skipped by default.
         </p>
-
-        <button
-          className="btn-secondary btn-sm w-full justify-center mb-3"
-          onClick={() => {
-            onScan({
-              includeExcluded,
-              skipCropped: !includeCropped,
-              skipTrimmed: !includeTrimmed,
-            });
-            onClose();
-          }}
-        >
-          Scan
-        </button>
+        <p className="text-xs text-text-muted mb-4 leading-relaxed">
+          Scan results are added to the current queue — items already in the queue are kept.
+        </p>
 
         <div className="space-y-1.5">
           <label className="flex items-center gap-2 text-xs text-text-muted cursor-pointer">
@@ -1858,7 +2283,22 @@ function ScanDialog({ onScan, onClose }: {
           </label>
         </div>
 
-        <button className="btn-ghost btn-xs text-text-muted mt-3 w-full" onClick={onClose}>Cancel</button>
+        <div className="flex justify-end gap-2 mt-4">
+          <button className="btn-ghost btn-sm" onClick={onClose}>Cancel</button>
+          <button
+            className="btn-primary btn-sm"
+            onClick={() => {
+              onScan({
+                includeExcluded,
+                skipCropped: !includeCropped,
+                skipTrimmed: !includeTrimmed,
+              });
+              onClose();
+            }}
+          >
+            <ScanLine size={14} /> Scan
+          </button>
+        </div>
       </div>
     </div>
   );

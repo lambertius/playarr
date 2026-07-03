@@ -76,7 +76,7 @@ def run_library_import_pipeline(job_id: int) -> None:
                 try:
                     _existing_vid = _dup_db.query(_DupVI).get(_existing_id)
                     if _existing_vid:
-                        _existing_vid.review_status = "duplicate"
+                        _existing_vid.review_status = "needs_human_review"
                         _existing_vid.review_category = "duplicate"
                         _existing_vid.review_reason = (
                             f"Quality upgrade imported: {dup_check.get('incoming_resolution', '?')} "
@@ -586,7 +586,8 @@ def _step_analyze_media(ws: ImportWorkspace, file_path: str) -> None:
 
 def _step_duplicate_precheck(ws: ImportWorkspace, artist: str, title: str,
                              duplicate_action: Optional[dict] = None) -> None:
-    """Read-only duplicate check (WAL safe without lock).
+    """Duplicate check (WAL safe without lock; read-only except for
+    flagging an existing library item for duplicate review).
 
     If ``duplicate_action`` is provided (from user wizard choice), it overrides
     the default behaviour:
@@ -768,6 +769,31 @@ def _step_duplicate_precheck(ws: ImportWorkspace, artist: str, title: str,
             # Hard duplicate → skip
             ws.log(f"Duplicate found (id={existing.id}, version={existing_version}, "
                    f"match={match_type}), skipping")
+
+            # Flag the surviving library item for review so the skipped
+            # on-disk file is never invisible — the user can resolve it
+            # from the Review Queue.  Best-effort: a flagging failure must
+            # never change the skip decision.
+            try:
+                _incoming_path = (ws.read_artifact("input") or {}).get("file_path") or "?"
+                _cur_status = getattr(existing, "review_status", None) or "none"
+                if _cur_status not in ("needs_human_review", "needs_ai_review"):
+                    existing.review_status = "needs_human_review"
+                    existing.review_category = "duplicate"
+                    existing.review_reason = (
+                        f"Duplicate file skipped during import: {_incoming_path}"
+                    )
+                    db.commit()
+                    ws.log(f"Flagged existing id={existing.id} for duplicate review "
+                           f"(skipped file: {_incoming_path})")
+            except Exception as _flag_err:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                ws.log(f"Could not flag existing id={existing.id} for review: {_flag_err}",
+                       level="warning")
+
             ws.update_stage("duplicate_precheck", "complete")
             raise _DuplicateSkip(
                 existing_video_id=existing.id,

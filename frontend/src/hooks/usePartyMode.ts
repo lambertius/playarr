@@ -5,6 +5,7 @@ import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { useFireworksStore } from "@/stores/fireworksStore";
 import { useToast } from "@/components/Toast";
 import { getPref, setPref } from "@/lib/preferences";
+import { shuffle } from "@/lib/shuffle";
 import type { PartyModeParams, PartyModeExclusions } from "@/types";
 
 // Server-stored preference groups (shared with the Kodi add-on, which inherits
@@ -102,16 +103,6 @@ export function loadPartyPlaylist(): PartyPlaylistSettings {
 
 export function savePartyPlaylist(settings: PartyPlaylistSettings) {
   setPref(PLAYLIST_GROUP, settings);
-}
-
-/** In-place-safe Fisher-Yates shuffle (returns a new array). */
-function shuffle<T>(items: T[]): T[] {
-  const out = [...items];
-  for (let i = out.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [out[i], out[j]] = [out[j], out[i]];
-  }
-  return out;
 }
 
 interface LaunchOptions {

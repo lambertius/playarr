@@ -1,12 +1,13 @@
-import { useState, useMemo } from "react";
-import { ListMusic, Plus, Trash2, Play, ChevronUp, ChevronDown, ArrowDownAZ, ArrowUpAZ, Pencil, Check, X } from "lucide-react";
+import { useState, useMemo, useEffect } from "react";
+import { ListMusic, Plus, Trash2, Play, Shuffle as ShuffleIcon, ChevronUp, ChevronDown, ArrowDownAZ, ArrowUpAZ, GripVertical, Pencil, Check, X } from "lucide-react";
 import { Tooltip } from "@/components/Tooltip";
 import { EmptyState } from "@/components/Feedback";
 import { useToast } from "@/components/Toast";
 import { usePlaylists, usePlaylist, useCreatePlaylist, useUpdatePlaylist, useDeletePlaylist, useRemoveFromPlaylist, useReorderPlaylist, useSortPlaylist } from "@/hooks/queries";
 import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { playbackApi } from "@/lib/api";
-import type { PlaylistSortField } from "@/types";
+import { shuffle } from "@/lib/shuffle";
+import type { PlaylistEntry, PlaylistSortField } from "@/types";
 
 type SortDir = "asc" | "desc";
 type SortBy = "name" | "entry_count" | "created_at" | "updated_at";
@@ -145,6 +146,7 @@ export function PlaylistsPage() {
           <div className="md:col-span-2">
             {selectedId ? (
               <PlaylistDetail
+                key={selectedId}
                 playlistId={selectedId}
                 onDelete={() => {
                   deleteMutation.mutate(selectedId);
@@ -181,8 +183,36 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
+  // Local draft order: null = clean (render server order). Set on the first
+  // local move; server refetches never clobber it because the draft is
+  // separate state and we only render it while it actually differs.
+  const [draft, setDraft] = useState<PlaylistEntry[] | null>(null);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+
+  // If a manual reorder ends up matching the server order again, drop the draft
+  // so the pane returns to a clean, server-driven state. Otherwise the draft
+  // stays non-null while `dirty` reads false (bar hidden, sorts re-enabled), and
+  // a later server-side sort or refetch would resurface this stale order. Only
+  // Save/Discard would otherwise null the draft. Placed before the early return
+  // to keep hook order stable across renders where `playlist` is still loading.
+  useEffect(() => {
+    if (!playlist || draft === null) return;
+    const server = playlist.entries;
+    const matchesServerOrder =
+      draft.length === server.length && draft.every((e, i) => e.id === server[i].id);
+    if (matchesServerOrder) setDraft(null);
+  }, [draft, playlist]);
 
   if (!playlist) return null;
+
+  const serverEntries = playlist.entries;
+  const dirty =
+    draft !== null &&
+    (draft.length !== serverEntries.length || draft.some((e, i) => e.id !== serverEntries[i].id));
+  // While dirty render the draft; otherwise always render fresh server data.
+  const entries = dirty && draft ? draft : serverEntries;
+  const canReorder = entries.length > 1 && !reorderMutation.isPending;
 
   const startRename = () => { setNameDraft(playlist.name); setEditingName(true); };
   const saveRename = () => {
@@ -197,7 +227,8 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
     );
   };
 
-  const tracks: PlaybackTrack[] = playlist.entries.map((e) => ({
+  // Tracks reflect the order currently on screen (draft while dirty).
+  const tracks: PlaybackTrack[] = entries.map((e) => ({
     videoId: e.video_id,
     artist: e.artist,
     title: e.title,
@@ -205,13 +236,67 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
     duration: e.duration_seconds ?? undefined,
   }));
 
-  // Manual reorder: swap the entry with its neighbour and persist the new order.
+  // Manual reorder: swap the entry with its neighbour in the local draft.
+  // Nothing is persisted until "Save order" is clicked.
   const moveEntry = (index: number, delta: number) => {
-    const ids = playlist.entries.map((e) => e.id);
     const target = index + delta;
-    if (target < 0 || target >= ids.length) return;
-    [ids[index], ids[target]] = [ids[target], ids[index]];
-    reorderMutation.mutate({ playlistId, entryIds: ids });
+    if (target < 0 || target >= entries.length) return;
+    const next = [...entries];
+    [next[index], next[target]] = [next[target], next[index]];
+    setDraft(next);
+  };
+
+  // Native HTML5 drag-and-drop over the draft order.
+  const handleDragStart = (index: number) => (e: React.DragEvent) => {
+    setDragIndex(index);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", String(index)); // required by Firefox
+  };
+  const handleDragOver = (index: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (index !== dragOverIndex) setDragOverIndex(index);
+  };
+  const handleDrop = (index: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    if (dragIndex !== null && dragIndex !== index) {
+      const next = [...entries];
+      const [moved] = next.splice(dragIndex, 1);
+      next.splice(index, 0, moved);
+      setDraft(next);
+    }
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+  const handleDragEnd = () => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const saveOrder = () => {
+    if (!draft) return;
+    reorderMutation.mutate(
+      { playlistId, entryIds: draft.map((e) => e.id) },
+      {
+        onSuccess: () => {
+          setDraft(null);
+          toast({ type: "success", title: "Playlist order saved" });
+        },
+        onError: () => toast({ type: "error", title: "Failed to save playlist order" }),
+      },
+    );
+  };
+  const discardOrder = () => setDraft(null);
+
+  const removeEntry = (entryId: number) => {
+    removeMutation.mutate(
+      { playlistId, entryId },
+      {
+        // Keep an in-progress draft consistent with the server.
+        onSuccess: () => setDraft((d) => (d ? d.filter((e) => e.id !== entryId) : d)),
+        onError: () => toast({ type: "error", title: "Failed to remove track" }),
+      },
+    );
   };
 
   const applySort = () => sortMutation.mutate({ playlistId, field: sortField, direction: sortDir });
@@ -252,12 +337,22 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
         )}
         <div className="flex items-center gap-2 shrink-0">
           {tracks.length > 0 && (
-            <button
-              onClick={() => replaceQueue(tracks)}
-              className="btn-primary btn-sm"
-            >
-              <Play size={13} /> Play All
-            </button>
+            <>
+              <button
+                onClick={() => replaceQueue(tracks)}
+                className="btn-primary btn-sm"
+              >
+                <Play size={13} /> Play All
+              </button>
+              <Tooltip content="Shuffle & play all tracks">
+                <button
+                  onClick={() => replaceQueue(shuffle(tracks), 0)}
+                  className="btn-secondary btn-sm"
+                >
+                  <ShuffleIcon size={13} /> Shuffle
+                </button>
+              </Tooltip>
+            </>
           )}
           <button onClick={onDelete} className="btn-ghost btn-sm text-danger hover:bg-danger/10">
             <Trash2 size={13} /> Delete
@@ -270,97 +365,147 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
       )}
 
       {/* Reorganise controls */}
-      {playlist.entries.length > 1 && (
+      {serverEntries.length > 1 && (
         <div className="flex flex-wrap items-center gap-2 mb-3 pb-3 border-b border-surface-border">
           <span className="text-[11px] text-text-muted">Sort by</span>
           <select
             value={sortField}
             onChange={(e) => setSortField(e.target.value as PlaylistSortField)}
-            className="input-field w-auto py-1 text-xs"
+            disabled={dirty}
+            className="input-field w-auto py-1 text-xs disabled:opacity-40"
             aria-label="Sort tracks by"
           >
             {TRACK_SORT_FIELDS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
-          <Tooltip content={sortDir === "asc" ? "Ascending (A→Z / oldest first)" : "Descending (Z→A / newest first)"}>
+          <Tooltip content={dirty ? "Save or discard order changes first" : (sortDir === "asc" ? "Ascending (A→Z / oldest first)" : "Descending (Z→A / newest first)")}>
             <button
               onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
-              className="btn-ghost btn-sm text-xs"
+              disabled={dirty}
+              className="btn-ghost btn-sm text-xs disabled:opacity-40"
               aria-label="Toggle sort direction"
             >
               {sortDir === "asc" ? <ArrowDownAZ size={14} /> : <ArrowUpAZ size={14} />}
             </button>
           </Tooltip>
-          <button
-            onClick={applySort}
-            disabled={sortMutation.isPending}
-            className="btn-secondary btn-sm text-xs"
-          >
-            Apply
-          </button>
-          <span className="text-[10px] text-text-muted ml-auto">Or use ↑ ↓ to move tracks manually</span>
+          <Tooltip content={dirty ? "Save or discard order changes first" : "Reorder the whole playlist by this field"}>
+            <button
+              onClick={applySort}
+              disabled={dirty || sortMutation.isPending}
+              className="btn-secondary btn-sm text-xs disabled:opacity-40"
+            >
+              Apply
+            </button>
+          </Tooltip>
+          <span className="text-[10px] text-text-muted ml-auto">Or drag tracks (or use ↑ ↓) to reorder manually</span>
         </div>
       )}
 
-      {playlist.entries.length === 0 ? (
+      {/* Unsaved order bar */}
+      {dirty && (
+        <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-accent/10 border border-accent/30">
+          <span className="text-xs text-text-primary flex-1 min-w-0">Track order changed — save to keep it.</span>
+          <button
+            onClick={saveOrder}
+            disabled={reorderMutation.isPending}
+            className="btn-primary btn-sm"
+          >
+            {reorderMutation.isPending ? "Saving…" : "Save order"}
+          </button>
+          <button
+            onClick={discardOrder}
+            disabled={reorderMutation.isPending}
+            className="btn-ghost btn-sm"
+          >
+            Discard
+          </button>
+        </div>
+      )}
+
+      {entries.length === 0 ? (
         <p className="text-sm text-text-muted py-4 text-center">No tracks in this playlist yet.</p>
       ) : (
         <div className="space-y-0.5">
-          {playlist.entries.map((entry, idx) => (
-            <div
-              key={entry.id}
-              className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-surface-lighter group"
-            >
-              <span className="text-[10px] text-text-muted w-5 text-right">{idx + 1}</span>
-              {entry.has_poster ? (
-                <img
-                  src={playbackApi.posterUrl(entry.video_id)}
-                  alt=""
-                  className="h-7 w-7 rounded object-cover flex-shrink-0"
-                />
-              ) : (
-                <div className="h-7 w-7 rounded bg-surface-lighter flex-shrink-0" />
-              )}
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-text-primary truncate">{entry.artist}</p>
-                <p className="text-[11px] text-text-secondary truncate">
-                  {entry.title}{entry.year ? <span className="text-text-muted"> · {entry.year}</span> : null}
-                </p>
-              </div>
-              {/* Manual move up/down */}
-              <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-all">
-                <Tooltip content="Move up">
-                  <button
-                    onClick={() => moveEntry(idx, -1)}
-                    disabled={idx === 0 || reorderMutation.isPending}
-                    className="text-text-muted hover:text-text-primary disabled:opacity-30"
-                    aria-label="Move track up"
-                  >
-                    <ChevronUp size={13} />
-                  </button>
-                </Tooltip>
-                <Tooltip content="Move down">
-                  <button
-                    onClick={() => moveEntry(idx, 1)}
-                    disabled={idx === playlist.entries.length - 1 || reorderMutation.isPending}
-                    className="text-text-muted hover:text-text-primary disabled:opacity-30"
-                    aria-label="Move track down"
-                  >
-                    <ChevronDown size={13} />
-                  </button>
-                </Tooltip>
-              </div>
-              <Tooltip content="Remove this track from the playlist">
-              <button
-                onClick={() => removeMutation.mutate({ playlistId, entryId: entry.id })}
-                className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-danger transition-all"
+          {entries.map((entry, idx) => {
+            const isDragging = dragIndex === idx;
+            const isDropTarget = dragOverIndex === idx && dragIndex !== null && dragIndex !== idx;
+            // The dragged row lands AT the target index: dragging down inserts
+            // below the target's old slot, dragging up inserts above it.
+            const indicator = isDropTarget
+              ? dragIndex !== null && dragIndex < idx
+                ? "border-b-accent"
+                : "border-t-accent"
+              : "";
+            return (
+              <div
+                key={entry.id}
+                draggable={canReorder}
+                onDragStart={handleDragStart(idx)}
+                onDragOver={handleDragOver(idx)}
+                onDrop={handleDrop(idx)}
+                onDragEnd={handleDragEnd}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded hover:bg-surface-lighter group border-y-2 border-transparent ${indicator} ${
+                  isDragging ? "opacity-40" : ""
+                } ${isDropTarget ? "bg-surface-lighter" : ""}`}
               >
-                <Trash2 size={12} />
-              </button>
-              </Tooltip>
-            </div>
-          ))}
+                {canReorder && (
+                  <GripVertical
+                    size={13}
+                    className="text-text-muted opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing shrink-0"
+                    aria-hidden
+                  />
+                )}
+                <span className="text-[10px] text-text-muted w-5 text-right">{idx + 1}</span>
+                {entry.has_poster ? (
+                  <img
+                    src={playbackApi.posterUrl(entry.video_id)}
+                    alt=""
+                    className="h-7 w-7 rounded object-cover flex-shrink-0 pointer-events-none"
+                  />
+                ) : (
+                  <div className="h-7 w-7 rounded bg-surface-lighter flex-shrink-0" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-text-primary truncate">{entry.artist}</p>
+                  <p className="text-[11px] text-text-secondary truncate">
+                    {entry.title}{entry.year ? <span className="text-text-muted"> · {entry.year}</span> : null}
+                  </p>
+                </div>
+                {/* Manual move up/down — edits the local draft until saved */}
+                <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-all">
+                  <Tooltip content="Move up">
+                    <button
+                      onClick={() => moveEntry(idx, -1)}
+                      disabled={idx === 0 || reorderMutation.isPending}
+                      className="text-text-muted hover:text-text-primary disabled:opacity-30"
+                      aria-label="Move track up"
+                    >
+                      <ChevronUp size={13} />
+                    </button>
+                  </Tooltip>
+                  <Tooltip content="Move down">
+                    <button
+                      onClick={() => moveEntry(idx, 1)}
+                      disabled={idx === entries.length - 1 || reorderMutation.isPending}
+                      className="text-text-muted hover:text-text-primary disabled:opacity-30"
+                      aria-label="Move track down"
+                    >
+                      <ChevronDown size={13} />
+                    </button>
+                  </Tooltip>
+                </div>
+                <Tooltip content="Remove this track from the playlist">
+                <button
+                  onClick={() => removeEntry(entry.id)}
+                  className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-danger transition-all"
+                >
+                  <Trash2 size={12} />
+                </button>
+                </Tooltip>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

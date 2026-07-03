@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.9.37] - 2026-07-03
+
+### Added
+- **Drag-and-drop playlist ordering** — playlist tracks can now be reordered by dragging (grab the handle), in addition to the up/down buttons. Changes are staged locally and applied with an explicit **Save order** / **Discard** bar, so you can rearrange freely and commit once instead of a save per move.
+- **Shuffle & Play All** — a new button beside *Play All* on each playlist queues the whole playlist in a random order.
+- **Video editor — set trim points from the playhead & keyboard shortcuts** — trim in/out can be set to the current playback position with a click, and the editor now has shortcuts: **Space** play/pause, **←/→** seek, **Shift+←/→** frame-step, **I/O** set trim in/out.
+- **Video editor — Restore Original & Cancel encode** — the archived pre-edit original can now be restored directly from the editor (previously only reachable from the Archive page), and a running encode can be cancelled from the progress banner.
+- **Duplicate scan runs automatically after a library scan** — importing new files now triggers a duplicate check, and a **fingerprint (AcoustID) identifier is captured** during content identification so fingerprint-based duplicate matching actually engages.
+
+### Changed
+- **Smarter duplicate detection** — title normalisation now strips version qualifiers (remix, remaster, live, edit, …) wherever they appear in brackets — including cases like *"Kernkraft 400 (DJ Gius Remix)"* vs *"Kernkraft 400"* — as well as trailing "– Radio Edit"-style suffixes; artist matching now ignores accents (*Beyoncé* ≡ *Beyonce*) and trailing *feat./ft.* credits. A file skipped as a duplicate during import is now flagged for review instead of vanishing silently.
+- **Video editor clarity** — the "Aspect Ratio" control is relabelled **Stretch to ratio (DAR)** (it stretches, it does not crop), the overlay toggle and queue-removal buttons are relabelled to reflect what they actually do, an **encode confirmation** step summarises what will be applied before the file is replaced, and a library scan now **merges into** the editor queue instead of clearing your manually-added items.
+- **Playlists reflect edits in "Recently Updated"** — reordering, sorting, or adding/removing tracks now updates the playlist's timestamp.
+
+### Fixed
+- **Archived originals can no longer be played, scanned, or re-imported** — once a video is encoded and its original bumped to `_archive`, playback endpoints reject the archived path, the library importer refuses archive directories, and the scanner skips them. The archive is now genuinely a restore-only holding area.
+- **Re-encoding no longer overwrites the true archived original** — a second edit of the same video archives the intermediate under a timestamped name and keeps the manifest pinned to the real original, so *Restore Original* always recovers the genuine source. Restore also no longer risks deleting the true original during cleanup.
+- **Stale video after a crop/re-encode** — re-encoded videos no longer keep playing the pre-edit version from the browser cache (streaming responses now send cache validators).
+
 ## [1.9.36] - 2026-07-02
 
 ### Added

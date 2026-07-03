@@ -187,6 +187,12 @@ def scan_directory(req: ScanRequest, db: Session = Depends(get_db)):
     if not os.path.isdir(req.directory):
         raise HTTPException(status_code=400, detail=f"Directory not found: {req.directory}")
 
+    if _is_under_archive_dir(req.directory):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot import from the archive directory — use Restore from the Archive page instead",
+        )
+
     # Scan for video files
     raw_files = scan_directory_for_videos(req.directory, recursive=req.recursive)
 
@@ -354,6 +360,28 @@ def start_import(req: ImportStartRequest, db: Session = Depends(get_db)):
     if not os.path.isdir(req.directory):
         raise HTTPException(status_code=400, detail=f"Directory not found: {req.directory}")
 
+    if _is_under_archive_dir(req.directory):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot import from the archive directory — use Restore from the Archive page instead",
+        )
+
+    # Defense in depth: drop any individual selections that live inside an
+    # archive directory (in case the scan step was bypassed) — archived
+    # originals must never re-enter the library as playable items.
+    import_paths = [p for p in req.items if not _is_under_archive_dir(p)]
+    skipped_archived = len(req.items) - len(import_paths)
+    if skipped_archived:
+        logger.warning(
+            f"Library import: skipped {skipped_archived} selected file(s) "
+            "inside an _archive directory"
+        )
+    if not import_paths:
+        raise HTTPException(
+            status_code=400,
+            detail="All selected files are inside the archive directory — use Restore from the Archive page instead",
+        )
+
     # Block AI modes when no AI provider is configured
     if req.options.ai_auto_analyse or req.options.ai_auto_fallback:
         from app.models import AppSetting
@@ -375,11 +403,11 @@ def start_import(req: ImportStartRequest, db: Session = Depends(get_db)):
     parent = ProcessingJob(
         job_type="library_import",
         status=JobStatus.queued,
-        display_name=f"Library Import ({len(req.items)} videos)",
+        display_name=f"Library Import ({len(import_paths)} videos)",
         action_label=_lib_label,
         input_params={
             "directory": req.directory,
-            "file_paths": req.items,
+            "file_paths": import_paths,
             "options": req.options.model_dump(),
             "duplicate_actions": dup_actions,
         },
@@ -397,14 +425,31 @@ def start_import(req: ImportStartRequest, db: Session = Depends(get_db)):
 
     return ImportStartResponse(
         job_id=parent.id,
-        total_items=len(req.items),
-        message=f"Import started for {len(req.items)} videos",
+        total_items=len(import_paths),
+        message=f"Import started for {len(import_paths)} videos",
     )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _is_under_archive_dir(path: str) -> bool:
+    """True if *path* is (or is inside) the ``_archive`` subdirectory of any
+    configured library root.
+
+    Archived originals are bumped there by the video editor / re-download
+    flows and must never be re-imported as playable library items — they are
+    only reachable via the Archive page's explicit preview/restore flows.
+    """
+    from app.config import get_settings
+    norm = os.path.normcase(os.path.normpath(path))
+    for lib_root in get_settings().get_all_library_dirs():
+        archive_root = os.path.normcase(os.path.normpath(os.path.join(lib_root, "_archive")))
+        if norm == archive_root or norm.startswith(archive_root + os.sep):
+            return True
+    return False
+
 
 def _find_existing_video(
     db: Session,

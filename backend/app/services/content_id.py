@@ -362,6 +362,13 @@ def enrich_content_identity(video: "VideoItem", acoustid_api_key: Optional[str] 
                 if fp.best_match:
                     if fp.best_match.mb_recording_id and not video.mb_recording_id:
                         video.mb_recording_id = fp.best_match.mb_recording_id
+                    # AcoustID track ID — exact-audio identity used by the
+                    # duplicate scanner's Tier-2 bucketing.  (getattr: the
+                    # field is populated once FingerprintMatch exposes it;
+                    # until then Tier 2 also buckets on mb_recording_id.)
+                    _acoustid = getattr(fp.best_match, "acoustid_id", None)
+                    if _acoustid and not video.acoustid_id:
+                        video.acoustid_id = _acoustid
             except Exception as e:
                 logger.debug(f"Fingerprint enrichment skipped for video {getattr(video, 'id', '?')}: {e}")
 

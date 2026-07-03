@@ -56,6 +56,7 @@ class FingerprintMatch:
     year: Optional[int] = None
     mb_recording_id: Optional[str] = None
     mb_release_id: Optional[str] = None
+    acoustid_id: Optional[str] = None
     confidence: float = 0.0
 
 
@@ -333,6 +334,7 @@ def _query_acoustid(
                 match = FingerprintMatch(
                     confidence=score,
                     mb_recording_id=rec.get("id"),
+                    acoustid_id=r.get("id"),
                 )
 
                 # Artist

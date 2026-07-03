@@ -9,7 +9,7 @@
 ; Output: Output\PlayarrSetup.exe
 
 #define MyAppName "Playarr"
-#define MyAppVersion "1.9.36"
+#define MyAppVersion "1.9.37"
 #define MyAppPublisher "Playarr Contributors"
 #define MyAppURL "https://github.com/lambertius/playarr"
 #define MyAppExeName "Playarr.exe"

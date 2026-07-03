@@ -722,7 +722,8 @@ class ArchiveItemOut(BaseModel):
 def list_archive_items():
     """List all items in the archive directory with manifest metadata."""
     from app.config import get_settings as _get_settings
-    from app.routers.video_editor import _MANIFEST_NAME, _VIDEO_EXTS
+    from app.routers.video_editor import (
+        _MANIFEST_NAME, _VIDEO_EXTS, _read_folder_manifest, _manifest_video_path)
     _settings = _get_settings()
 
     results: list[dict] = []
@@ -731,22 +732,20 @@ def list_archive_items():
         if not os.path.isdir(archive_dir):
             continue
         for root, _dirs, fnames in os.walk(archive_dir):
-            video_file = None
-            for fn in fnames:
-                if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
-                    video_file = os.path.join(root, fn)
-                    break
+            # Read manifest if present
+            meta: dict = _read_folder_manifest(root) or {}
+            # Prefer the manifest-recorded TRUE original; only fall back to the
+            # first video file for legacy manifest-less folders.  Picking the
+            # first os.walk entry could surface a re-encode intermediate that
+            # was timestamp-archived alongside the original.
+            video_file = _manifest_video_path(root, meta) if meta else None
+            if not video_file:
+                for fn in fnames:
+                    if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
+                        video_file = os.path.join(root, fn)
+                        break
             if not video_file:
                 continue
-            # Read manifest if present
-            manifest_path = os.path.join(root, _MANIFEST_NAME)
-            meta: dict = {}
-            if os.path.isfile(manifest_path):
-                try:
-                    with open(manifest_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                except (json.JSONDecodeError, OSError):
-                    pass
             results.append({
                 "path": video_file,
                 "folder": root,
@@ -872,7 +871,8 @@ class RestoreArchiveRequest(BaseModel):
 def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_db)):
     """Restore an archived video back to its library location."""
     from app.config import get_settings as _get_settings
-    from app.routers.video_editor import _MANIFEST_NAME, _VIDEO_EXTS
+    from app.routers.video_editor import (
+        _MANIFEST_NAME, _VIDEO_EXTS, _read_folder_manifest, _manifest_video_path)
     from app.services.media_analyzer import extract_quality_signature
     from app.models import QualitySignature as QualitySigModel, VideoItem
 
@@ -891,24 +891,22 @@ def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_
     if not os.path.isdir(folder):
         raise HTTPException(404, "Archive folder not found")
 
-    # Find the video file in the archive folder
-    archive_file = None
-    for fn in os.listdir(folder):
-        if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
-            archive_file = os.path.join(folder, fn)
-            break
+    # Read manifest and select the TRUE original it records.  Falling back to
+    # the first listed video file (legacy manifest-less folders) is only safe
+    # when there is no manifest — otherwise a re-encode intermediate archived
+    # alongside the original (timestamp-suffixed) could be restored instead,
+    # and the rmtree below would then delete the real original.
+    manifest_path = os.path.join(folder, _MANIFEST_NAME)
+    meta: dict = _read_folder_manifest(folder) or {}
+
+    archive_file = _manifest_video_path(folder, meta) if meta else None
+    if not archive_file:
+        for fn in os.listdir(folder):
+            if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
+                archive_file = os.path.join(folder, fn)
+                break
     if not archive_file:
         raise HTTPException(404, "No video file found in archive folder")
-
-    # Read manifest
-    manifest_path = os.path.join(folder, _MANIFEST_NAME)
-    meta: dict = {}
-    if os.path.isfile(manifest_path):
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
 
     video_id = meta.get("video_id")
     video = db.query(VideoItem).get(video_id) if video_id else None
@@ -975,16 +973,37 @@ def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_
         os.makedirs(dest_folder, exist_ok=True)
         _shutil.move(archive_file, os.path.join(dest_folder, os.path.basename(archive_file)))
 
-    # Clean up archive subfolder
+    # Clean up archive subfolder.  The restored file has been moved out; remove
+    # the manifest and any timestamp-suffixed re-encode intermediates of the
+    # SAME stem (only the collision handler creates those, always after the
+    # canonical original), then remove the folder ONLY if it is now empty.
+    # A blind rmtree here would destroy any unrelated original that happened to
+    # share the folder — the exact data-loss this restore is meant to prevent.
     if os.path.isfile(manifest_path):
         try:
             os.remove(manifest_path)
         except OSError:
             pass
+    import re as _re
+    _restored_stem = os.path.splitext(os.path.basename(archive_file))[0]
+    _suffixed_pat = _re.compile(
+        _re.escape(_restored_stem) + r"_\d{8}_\d{6}$", _re.IGNORECASE)
     if os.path.isdir(folder):
         try:
-            import shutil as _shutil2
-            _shutil2.rmtree(folder)
+            for fn in os.listdir(folder):
+                stem, fext = os.path.splitext(fn)
+                fpath = os.path.join(folder, fn)
+                if (os.path.isfile(fpath) and fext.lower() in _VIDEO_EXTS
+                        and _suffixed_pat.fullmatch(stem)):
+                    try:
+                        os.remove(fpath)
+                        logger.info(f"Removed archived re-encode intermediate: {fpath}")
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        try:
+            os.rmdir(folder)  # only succeeds if now empty
         except OSError:
             pass
 

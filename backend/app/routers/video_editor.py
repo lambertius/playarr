@@ -43,6 +43,72 @@ def _file_checksum(path: str, algo: str = "md5") -> str:
     return h.hexdigest()
 
 
+def _read_folder_manifest(folder: str) -> Optional[dict]:
+    """Load the archive manifest stored in *folder*, or None if absent/invalid."""
+    import json
+    manifest_path = os.path.join(folder, _MANIFEST_NAME)
+    if not os.path.isfile(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _manifest_matches(manifest: dict, rel_norm: str, video_id: Optional[int] = None) -> bool:
+    """True if an archive manifest describes the given library file / video.
+
+    Matches on video_id when available, otherwise on original_relative_path —
+    ignoring the extension, which may change across an encode (.mkv → .mp4).
+    """
+    if video_id is not None and manifest.get("video_id") == video_id:
+        return True
+    m_rel = os.path.normcase(os.path.normpath(manifest.get("original_relative_path") or ""))
+    r_rel = os.path.normcase(os.path.normpath(rel_norm))
+    if not m_rel or m_rel == ".":
+        return False
+    if m_rel == r_rel:
+        return True
+    return os.path.splitext(m_rel)[0] == os.path.splitext(r_rel)[0]
+
+
+def _artist_title_corroborates(manifest: dict, expected_artist: Optional[str],
+                               expected_title: Optional[str]) -> bool:
+    """True if a manifest's recorded artist+title match the expected ones.
+
+    Used to corroborate a ``video_id`` hit during the archive-wide walk: row
+    ids are NOT stable (a DB rebuild from .playarr.xml sidecars reassigns every
+    id, and SQLite can reuse a deleted rowid), so an orphaned manifest carrying
+    a since-reused video_id must not be allowed to hijack an unrelated video's
+    restore.  Artist+title are stable identifiers that survive re-import.
+    Returns False when no expectation is supplied, so a bare video_id match is
+    never trusted in the global walk without corroboration.
+    """
+    if not expected_artist and not expected_title:
+        return False
+    m_a = (manifest.get("artist") or "").strip().casefold()
+    m_t = (manifest.get("title") or "").strip().casefold()
+    e_a = (expected_artist or "").strip().casefold()
+    e_t = (expected_title or "").strip().casefold()
+    return m_a == e_a and m_t == e_t
+
+
+def _manifest_video_path(archive_folder: str, manifest: dict) -> Optional[str]:
+    """Return the archived video file recorded by a manifest, if it exists.
+
+    Manifests written before the ``archived_filename`` field existed always
+    stored the archived file under its original name, so fall back to the
+    basename of ``original_relative_path``.
+    """
+    name = manifest.get("archived_filename") or os.path.basename(
+        manifest.get("original_relative_path") or "")
+    if not name or os.path.splitext(name)[1].lower() not in _VIDEO_EXTS:
+        return None
+    path = os.path.join(archive_folder, name)
+    return path if os.path.isfile(path) else None
+
+
 def write_archive_manifest(
     archive_video_path: str,
     original_library_path: str,
@@ -54,17 +120,38 @@ def write_archive_manifest(
 ) -> None:
     """Write a manifest alongside an archived video for later re-linking.
 
+    If a manifest already exists in the target folder, describes this same
+    video, and its recorded archive file is still present, it is left
+    untouched: the earliest manifest points at the TRUE original, and later
+    archives of the same video (re-encode intermediates, timestamp-suffixed
+    on collision) must never steal its identity.
+
     Args:
         archive_reason: Why this file was archived — "edit" (video editor crop/encode)
                         or "redownload" (replaced by a fresh download).
     """
     import json
     try:
+        rel_path = (os.path.relpath(original_library_path, library_dir)
+                    if original_library_path.startswith(os.path.normpath(library_dir))
+                    else os.path.basename(original_library_path))
+        archive_folder = os.path.dirname(archive_video_path)
+
+        existing = _read_folder_manifest(archive_folder)
+        if (existing
+                and _manifest_matches(existing, os.path.normpath(rel_path), video_id)
+                and _manifest_video_path(archive_folder, existing)):
+            logger.info(
+                "Archive manifest already records the true original for "
+                f"'{rel_path}'; keeping it (newly archived intermediate: "
+                f"'{os.path.basename(archive_video_path)}')"
+            )
+            return
+
         manifest = {
             "checksum_md5": _file_checksum(archive_video_path),
-            "original_relative_path": os.path.relpath(original_library_path, library_dir)
-                                      if original_library_path.startswith(os.path.normpath(library_dir))
-                                      else os.path.basename(original_library_path),
+            "original_relative_path": rel_path,
+            "archived_filename": os.path.basename(archive_video_path),
             "video_id": video_id,
             "artist": artist,
             "title": title,
@@ -72,27 +159,50 @@ def write_archive_manifest(
             "archived_at": datetime.now(timezone.utc).isoformat(),
             "archive_reason": archive_reason,
         }
-        manifest_path = os.path.join(os.path.dirname(archive_video_path), _MANIFEST_NAME)
+        manifest_path = os.path.join(archive_folder, _MANIFEST_NAME)
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
     except Exception as e:
         logger.warning(f"Failed to write archive manifest: {e}")
 
 
-def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Optional[str]:
+def find_archive_file(file_path: str, library_dir: str, archive_dir: str,
+                      video_id: Optional[int] = None,
+                      expected_artist: Optional[str] = None,
+                      expected_title: Optional[str] = None,
+                      edit_only: bool = False) -> Optional[str]:
     """Locate the archived original for a library file.
 
     Search strategy (returns first hit):
-      1. Exact relative-path match in archive_dir
-      2. Any video file in the expected archive subfolder
-      3. Manifest-based scan: walk archive_dir looking for .playarr-archive.json
-         files whose original_relative_path matches the library file path
+      1. Manifest in the expected archive subfolder that describes this file /
+         video — return the manifest-recorded archived file.  The manifest is
+         authoritative: it always points at the TRUE original, never at a
+         re-encode intermediate archived alongside it (timestamp-suffixed on
+         collision, or under a different extension).
+      2. Exact relative-path match in archive_dir
+      3. Any video file in the expected archive subfolder — only when NO
+         manifest exists there (a manifest that didn't match above means the
+         folder holds a different video's original)
+      4. Manifest-based scan: walk archive_dir looking for .playarr-archive.json
+         files describing the library file path / video id
 
     If file_path lives under a source directory rather than library_dir,
     the _archive subdir of that source directory is checked instead.
+
+    Args:
+        expected_artist/expected_title: when provided, a ``video_id``-only hit
+            in the archive-wide walk (step 4) is accepted only if the manifest's
+            artist+title also match — guarding against stale/reused row ids
+            hijacking an unrelated video's archive.
+        edit_only: skip archives written by the redownload flow
+            (archive_reason == "redownload"); used by the video editor's
+            "Restore Original", which must only undo an EDIT, not a redownload.
     """
     if not file_path:
         return None
+
+    def _reason_excluded(manifest: dict) -> bool:
+        return edit_only and (manifest.get("archive_reason") == "redownload")
 
     # Determine the correct archive_dir for this file
     from app.config import get_settings
@@ -116,37 +226,63 @@ def find_archive_file(file_path: str, library_dir: str, archive_dir: str) -> Opt
         rel = os.path.relpath(norm_fp, library_root)
     else:
         rel = os.path.basename(file_path)
+    rel_norm = os.path.normpath(rel)
 
-    # 1) Exact match (same extension and name)
     archive_path = os.path.join(actual_archive_dir, rel)
+    archive_folder = os.path.dirname(archive_path)
+
+    # 1) Manifest in the expected archive folder — authoritative when it
+    #    describes this video.  (The expected folder is derived from THIS
+    #    video's current relative path, so a video_id hit here is inherently
+    #    corroborated by location; no artist/title check is needed.)
+    folder_manifest = _read_folder_manifest(archive_folder)
+    if (folder_manifest and not _reason_excluded(folder_manifest)
+            and _manifest_matches(folder_manifest, rel_norm, video_id)):
+        recorded = _manifest_video_path(archive_folder, folder_manifest)
+        if recorded:
+            return recorded
+
+    # 2) Exact match (same extension and name)
     if os.path.isfile(archive_path):
         return archive_path
 
-    # 2) Check archive folder for ANY video file (handles extension + name changes)
-    archive_folder = os.path.dirname(archive_path)
-    if os.path.isdir(archive_folder):
+    # 3) Any video file in the expected archive folder (handles extension +
+    #    name changes for legacy archives without manifests).  Skipped when a
+    #    manifest exists: if it matched, step 1 already answered; if it did
+    #    not match, the folder belongs to a different video and returning an
+    #    arbitrary file would be wrong.
+    if folder_manifest is None and os.path.isdir(archive_folder):
         for fname in os.listdir(archive_folder):
             if os.path.splitext(fname)[1].lower() in _VIDEO_EXTS:
                 return os.path.join(archive_folder, fname)
 
-    # 3) Manifest-based fallback: scan archive_dir for matching manifests
-    import json
-    rel_norm = os.path.normpath(rel)
+    # 4) Manifest-based fallback: scan archive_dir for matching manifests.
+    #    Here the folder is NOT derived from the video's own path, so a
+    #    video_id-only hit is untrustworthy (ids are reused across DB
+    #    rebuilds).  Accept a match on relative-path (extension-insensitive);
+    #    a video_id hit is accepted only when artist+title also corroborate.
     try:
         for root, _dirs, fnames in os.walk(actual_archive_dir):
             if _MANIFEST_NAME not in fnames:
                 continue
-            manifest_path = os.path.join(root, _MANIFEST_NAME)
-            try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest = json.load(f)
-                if os.path.normpath(manifest.get("original_relative_path", "")) == rel_norm:
-                    # Found a matching manifest — return the video file in this folder
+            manifest = _read_folder_manifest(root)
+            if not manifest or _reason_excluded(manifest):
+                continue
+            rel_match = _manifest_matches(manifest, rel_norm, None)
+            id_match = (video_id is not None
+                        and manifest.get("video_id") == video_id)
+            if rel_match or (id_match and _artist_title_corroborates(
+                    manifest, expected_artist, expected_title)):
+                # Prefer the manifest-recorded file, else the first video file
+                recorded = _manifest_video_path(root, manifest)
+                if recorded:
+                    return recorded
+                try:
                     for fn in os.listdir(root):
                         if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
                             return os.path.join(root, fn)
-            except (json.JSONDecodeError, OSError):
-                continue
+                except OSError:
+                    continue
     except OSError:
         pass
 
@@ -198,15 +334,22 @@ def find_all_archive_files(file_path: str, library_dir: str, archive_dir: str) -
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
                 if os.path.normpath(manifest.get("original_relative_path", "")) == rel_norm:
-                    for fn in os.listdir(root):
-                        if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
-                            results.append({
-                                "path": os.path.join(root, fn),
-                                "reason": manifest.get("archive_reason", "edit"),
-                                "archived_at": manifest.get("archived_at", ""),
-                                "file_size_bytes": manifest.get("file_size_bytes", 0),
-                            })
-                            break
+                    # Prefer the manifest-recorded archived file (the TRUE
+                    # original); fall back to the first video in the folder
+                    # for legacy manifests whose recorded file is gone.
+                    candidate = _manifest_video_path(root, manifest)
+                    if candidate is None:
+                        for fn in os.listdir(root):
+                            if os.path.splitext(fn)[1].lower() in _VIDEO_EXTS:
+                                candidate = os.path.join(root, fn)
+                                break
+                    if candidate:
+                        results.append({
+                            "path": candidate,
+                            "reason": manifest.get("archive_reason", "edit"),
+                            "archived_at": manifest.get("archived_at", ""),
+                            "file_size_bytes": manifest.get("file_size_bytes", 0),
+                        })
             except (json.JSONDecodeError, OSError):
                 continue
     except OSError:
@@ -387,8 +530,13 @@ def get_editor_queue(
     for v in videos:
         qs = db.query(QualitySignature).filter(QualitySignature.video_id == v.id).first()
 
-        # Check if archived original exists (extension-agnostic)
-        archive_file = find_archive_file(v.file_path, _settings.library_dir, _settings.archive_dir) if v.file_path else None
+        # Check if archived EDITED original exists (extension-agnostic).
+        # edit_only: the editor's Restore Original must not surface redownload
+        # archives; artist/title corroborate any cross-folder video_id hit.
+        archive_file = find_archive_file(
+            v.file_path, _settings.library_dir, _settings.archive_dir,
+            video_id=v.id, expected_artist=v.artist, expected_title=v.title,
+            edit_only=True) if v.file_path else None
 
         result.append(EditorQueueItem(
             video_id=v.id,
@@ -702,6 +850,19 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
         archive_path = os.path.join(_archive_dir, rel)
         os.makedirs(os.path.dirname(archive_path), exist_ok=True)
 
+        # Never overwrite an existing archived file — the first archived copy
+        # is the TRUE original.  On re-encode of the same video, suffix the
+        # newly archived intermediate with a timestamp instead (same
+        # convention as file_organizer.archive_folder).
+        if os.path.exists(archive_path):
+            _a_base, _a_ext = os.path.splitext(archive_path)
+            _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_path = f"{_a_base}_{_ts}{_a_ext}"
+            logger.info(
+                f"Archive collision for '{rel}' — archiving intermediate as "
+                f"'{os.path.basename(archive_path)}'"
+            )
+
         # Kill any active streaming processes holding the file
         from app.routers.playback import kill_streams_for_file
         kill_streams_for_file(input_path)
@@ -747,7 +908,11 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
         write_archive_manifest(
             archive_video_path=archive_path,
             original_library_path=norm_input,
-            library_dir=_settings.library_dir,
+            # Use the library root that actually contains this file (which may
+            # be a source directory, not the main library dir) so the manifest
+            # records the TRUE relative path — otherwise find_archive_file
+            # stores/compares a bare basename and can't re-link source-dir files.
+            library_dir=_lib_root,
             video_id=video_id,
             artist=_v_artist,
             title=_v_title,
@@ -947,7 +1112,10 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
         raise HTTPException(400, "Video has no file path")
 
     _settings = _get_settings()
-    archive_file = find_archive_file(video.file_path, _settings.library_dir, _settings.archive_dir)
+    archive_file = find_archive_file(
+        video.file_path, _settings.library_dir, _settings.archive_dir,
+        video_id=video_id, expected_artist=video.artist,
+        expected_title=video.title, edit_only=True)
 
     if not archive_file:
         raise HTTPException(404, "Archived original not found")
@@ -987,14 +1155,73 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
     shutil.move(archive_file, restored_path)
 
     # Clean up archive manifest if it exists
-    archive_manifest = os.path.join(os.path.dirname(archive_file), _MANIFEST_NAME)
+    archive_subdir = os.path.dirname(archive_file)
+    archive_manifest = os.path.join(archive_subdir, _MANIFEST_NAME)
+    # Before deleting the manifest, note whether it identified the restored
+    # file as the recorded TRUE original — this gates how aggressively the
+    # intermediate cleanup below may act.
+    _pre_manifest = _read_folder_manifest(archive_subdir)
+    _recorded_name = ""
+    if _pre_manifest:
+        _recorded_name = (_pre_manifest.get("archived_filename")
+                          or os.path.basename(_pre_manifest.get("original_relative_path") or ""))
+    restored_was_true_original = bool(
+        _recorded_name
+        and os.path.normcase(_recorded_name) == os.path.normcase(os.path.basename(archive_file)))
     if os.path.isfile(archive_manifest):
         try:
             os.remove(archive_manifest)
         except OSError:
             pass
+
+    # Clean up re-encode intermediates left in the archive folder.  Colliding
+    # archives are timestamp-suffixed (so the original is never overwritten),
+    # and an extension-changing encode can leave the first encode's output
+    # alongside the original.  Now that the true original is restored, these
+    # by-products would otherwise let a second "restore" replace the freshly
+    # restored original with an encoded intermediate.
+    import re as _re
+    restored_stem = os.path.splitext(os.path.basename(restored_path))[0]
+    _suffixed_pat = _re.compile(
+        _re.escape(restored_stem) + r"_\d{8}_\d{6}$", _re.IGNORECASE)
+    _samestem_pat = _re.compile(_re.escape(restored_stem) + r"$", _re.IGNORECASE)
+    try:
+        _restored_mtime = os.path.getmtime(restored_path)
+    except OSError:
+        _restored_mtime = None
+    if os.path.isdir(archive_subdir):
+        try:
+            for fn in os.listdir(archive_subdir):
+                stem, fext = os.path.splitext(fn)
+                fpath = os.path.join(archive_subdir, fn)
+                if not os.path.isfile(fpath) or fext.lower() not in _VIDEO_EXTS:
+                    continue
+                # Timestamp-suffixed files are always collision-archived
+                # intermediates: the first archive of a video takes the
+                # canonical (unsuffixed) name, so anything suffixed postdates
+                # the original.
+                is_intermediate = bool(_suffixed_pat.fullmatch(stem))
+                # A same-stem file under another extension is only removed
+                # when the manifest identified the restored file as the
+                # recorded original AND the leftover is newer than it —
+                # encode outputs always postdate the archived original.
+                if (not is_intermediate and restored_was_true_original
+                        and _samestem_pat.fullmatch(stem)
+                        and _restored_mtime is not None):
+                    try:
+                        is_intermediate = os.path.getmtime(fpath) > _restored_mtime
+                    except OSError:
+                        is_intermediate = False
+                if is_intermediate:
+                    try:
+                        os.remove(fpath)
+                        logger.info(f"Removed archived re-encode intermediate: {fpath}")
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
     # Remove empty archive subfolder
-    archive_subdir = os.path.dirname(archive_file)
     if os.path.isdir(archive_subdir):
         try:
             os.rmdir(archive_subdir)  # only removes if empty
@@ -1007,6 +1234,11 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
         # Also update folder name if the extension is in the folder name
         folder_name = os.path.basename(os.path.dirname(restored_path))
         video.folder_path = os.path.dirname(restored_path)
+
+    # The restored file is the unedited original — clear the edit-type flag
+    # so the library no longer reports the video as cropped/trimmed.
+    video.editor_edit_type = None
+    db.commit()
 
     # Re-analyze quality signature
     try:
@@ -1021,6 +1253,14 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
         db.commit()
     except Exception as e:
         logger.warning(f"Post-restore analysis failed: {e}")
+
+    # Persist the cleared edit flag to the sidecar XML so a future DB rebuild
+    # doesn't resurrect the stale "edited" state.
+    try:
+        from app.services.playarr_xml import write_playarr_xml
+        write_playarr_xml(video, db)
+    except Exception:
+        pass
 
     logger.info(f"Restored video {video_id} from archive: {archive_file} -> {video.file_path}")
     return {"message": "Original restored from archive", "archive_path": archive_file}

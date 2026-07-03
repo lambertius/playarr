@@ -5800,6 +5800,30 @@ def library_scan_task(self, job_id: int, import_new: bool = True,
         _update_job(job_id, status=JobStatus.complete, progress_percent=100,
                     completed_at=datetime.now(timezone.utc))
 
+        # ── Phase 3: auto-chain a duplicate scan when new items arrived ──
+        # Guarded so a dedup dispatch failure can never fail the library scan
+        # (the scan job is already marked complete above).
+        if new_count:
+            try:
+                dup_job = ProcessingJob(
+                    job_type="duplicate_scan",
+                    status=JobStatus.queued,
+                    display_name="Duplicate Scan (post library scan)",
+                    action_label="Duplicate Scan",
+                    input_params={"rescan_all": False, "triggered_by_job_id": job_id},
+                )
+                db.add(dup_job)
+                db.commit()
+                dispatch_task(duplicate_scan_task, job_id=dup_job.id, rescan_all=False)
+                _append_job_log(job_id, f"Queued follow-up duplicate scan (job {dup_job.id})")
+            except Exception as dup_err:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                logger.warning(f"Failed to queue follow-up duplicate scan: {dup_err}")
+                _append_job_log(job_id, f"Could not queue follow-up duplicate scan: {dup_err}")
+
     except Exception as e:
         db.rollback()
         logger.error(f"Library scan failed: {e}")
@@ -5813,20 +5837,81 @@ def library_scan_task(self, job_id: int, import_new: bool = True,
 # ---------------------------------------------------------------------------
 
 def _normalize_for_dup(s: str) -> str:
-    """Lower-case, strip articles, collapse whitespace for duplicate comparison."""
+    """Lower-case, strip accents/articles/punctuation, collapse whitespace for
+    duplicate comparison.  Accents are removed via NFKD decomposition +
+    combining-mark strip (mirrors make_comparison_key): 'Beyoncé' → 'beyonce'."""
     import re as _re
+    import unicodedata as _ud
+    # Decompose accented characters, drop combining marks (Björk → Bjork)
+    s = _ud.normalize("NFKD", s)
+    s = "".join(ch for ch in s if _ud.category(ch) != "Mn")
     s = s.strip().lower()
     s = _re.sub(r"^(the|a|an)\s+", "", s)
     s = _re.sub(r"[^\w\s]", "", s)
     return _re.sub(r"\s+", " ", s).strip()
 
 
-def _normalize_title_for_dup(title: str) -> str:
-    """Normalize title: strip trailing parenthetical version labels like
-    '(Alternate Version)', '(Live)', '(Clean Version)', etc."""
+def _normalize_artist_for_dup(artist: str) -> str:
+    """Artist key for duplicate comparison — like _normalize_for_dup, but also
+    strips a trailing featuring credit so 'Zombie Nation feat. X' and
+    'Zombie Nation' bucket together.  Title normalization is unaffected."""
     import re as _re
-    # Strip trailing parenthetical/bracketed suffixes that indicate versions
-    stripped = _re.sub(r'\s*[\(\[](alternate|live|acoustic|clean|explicit|remix|remaster|censored|uncensored|extended|short|radio|bonus|demo|instrumental|karaoke|version|edit|deluxe|remastered|official|hd|hq|lyric|lyrics|official\s*video|music\s*video|official\s*music\s*video)(?:\s+\w+)*[\)\]]\s*$', '', title, flags=_re.IGNORECASE)
+    stripped = _re.sub(
+        r"[\s\(\[]+(?:feat\.?|featuring|ft\.?)\s+.*$",
+        "", artist, flags=_re.IGNORECASE,
+    ).strip()
+    # Never strip to nothing (defensive: artist string starting with 'feat')
+    return _normalize_for_dup(stripped if stripped else artist)
+
+
+# Version-qualifier keywords for duplicate title matching.  A trailing
+# bracketed group or dash-suffix is stripped when one of these appears as a
+# whole word ANYWHERE inside it — so '(DJ Gius Remix)', '(2009 Remaster)'
+# and ' - Radio Edit' all strip, while '(Ebony)' or ' - Ivory' do not.
+_DUP_QUALIFIER_WORDS = (
+    "alternate|live|acoustic|clean|explicit|remix|remaster|remastered|"
+    "censored|uncensored|extended|short|radio|bonus|demo|instrumental|"
+    "karaoke|version|edit|deluxe|official|hd|hq|lyric|lyrics|video|audio|"
+    "mix|dub|mono|stereo|single"
+)
+
+
+def _normalize_title_for_dup(title: str) -> str:
+    """Normalize title for duplicate comparison.
+
+    Strips trailing version qualifiers before normalizing:
+      - Bracketed suffixes containing a qualifier keyword as a whole word
+        anywhere inside ('(DJ Gius Remix)', '(Live)', '(2009 Remaster)').
+        Multiple trailing groups strip: 'Song (Live) (Official Video)' → 'Song'.
+      - Dash-style suffixes (' - Radio Edit', ' - Live at Wembley') — but ONLY
+        when the suffix contains a qualifier keyword, so legitimate dashed
+        titles ('Ebony - Ivory') are untouched.
+    """
+    import re as _re
+    qualifier_re = _re.compile(r"\b(?:%s)\b" % _DUP_QUALIFIER_WORDS, _re.IGNORECASE)
+    # Trailing bracketed group with no nested brackets
+    bracket_re = _re.compile(r"\s*[\(\[]([^\(\)\[\]]*)[\)\]]\s*$")
+    # Trailing spaced-dash segment (spaces required so hyphenated words survive)
+    dash_re = _re.compile(r"\s+[-–—]\s+([^-–—]+)$")
+
+    stripped = title.strip()
+    changed = True
+    while changed:
+        changed = False
+        m = bracket_re.search(stripped)
+        if m and qualifier_re.search(m.group(1)):
+            candidate = stripped[: m.start()].strip()
+            if candidate:  # never strip a title down to nothing
+                stripped = candidate
+                changed = True
+                continue
+        m = dash_re.search(stripped)
+        if m and qualifier_re.search(m.group(1)):
+            candidate = stripped[: m.start()].strip()
+            if candidate:
+                stripped = candidate
+                changed = True
+
     return _normalize_for_dup(stripped)
 
 
@@ -5886,17 +5971,22 @@ def duplicate_scan_task(self, job_id: int, rescan_all: bool = False):
         for vi in all_items:
             if not vi.artist or not vi.title:
                 continue
-            key = f"{_normalize_for_dup(vi.artist)}||{_normalize_title_for_dup(vi.title)}"
+            key = f"{_normalize_artist_for_dup(vi.artist)}||{_normalize_title_for_dup(vi.title)}"
             name_buckets.setdefault(key, []).append(vi)
 
         dup_groups = {k: v for k, v in name_buckets.items() if len(v) > 1}
         _append_job_log(job_id, f"Name match: {len(dup_groups)} groups")
 
-        # ── Phase 2: acoustid_id buckets ──────────────────────────────
+        # ── Phase 2: recording-identity buckets ───────────────────────
+        # Exact AcoustID track ID match, plus MusicBrainz recording ID match
+        # (mb_recording_id is populated by fingerprint enrichment and metadata
+        # resolution, so this tier works even before acoustid_id is set).
         acoustid_buckets: dict[str, list[VideoItem]] = {}
         for vi in all_items:
             if vi.acoustid_id:
-                acoustid_buckets.setdefault(vi.acoustid_id, []).append(vi)
+                acoustid_buckets.setdefault(f"acoustid:{vi.acoustid_id}", []).append(vi)
+            if getattr(vi, "mb_recording_id", None):
+                acoustid_buckets.setdefault(f"mbrec:{vi.mb_recording_id}", []).append(vi)
 
         acoustid_groups = {k: v for k, v in acoustid_buckets.items() if len(v) > 1}
         # Merge acoustid groups that aren't already covered by name buckets
@@ -5914,7 +6004,7 @@ def duplicate_scan_task(self, job_id: int, rescan_all: bool = False):
                 already_paired.add(ids)
                 acoustid_new += 1
         if acoustid_new:
-            _append_job_log(job_id, f"AcoustID match: {acoustid_new} additional groups")
+            _append_job_log(job_id, f"Recording-ID match (AcoustID/MusicBrainz): {acoustid_new} additional groups")
 
         # ── Phase 3: fingerprint similarity ───────────────────────────
         # For videos with stored fingerprints that aren't already in a
