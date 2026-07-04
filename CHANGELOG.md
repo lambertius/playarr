@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.9.39] - 2026-07-04
+
+### Fixed
+- **Video editor crop panel no longer shifts when you enter the first value** — a follow-up to the earlier crop-jump fix. The crop *result* readout (e.g. `1920×800+0+140`) only appeared once a value went non-zero, which grew the panel and nudged the stepper controls out from under the cursor. It's now always shown — displaying the source dimensions (`1920×1080 · no crop`) when there's no crop — so the panel height stays constant and the arrows don't move.
+
 ## [1.9.38] - 2026-07-04
 
 ### Added

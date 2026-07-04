@@ -1825,13 +1825,29 @@ export function VideoEditorPage() {
                       />
                     </label>
                   </div>
-                  {selectedSettings?.crop && (selectedSettings.crop.crop_w !== selectedSettings.crop.original_w || selectedSettings.crop.crop_h !== selectedSettings.crop.original_h) && (
-                    <div className="text-[11px] text-accent flex items-center gap-2 mt-2 pt-2 border-t border-surface-border">
-                      <Scissors size={11} />
-                      {selectedSettings.crop.crop_w}×{selectedSettings.crop.crop_h}+{selectedSettings.crop.crop_x}+{selectedSettings.crop.crop_y}
-                      <span className="text-text-muted">({selectedSettings.crop.effective_ratio})</span>
-                    </div>
-                  )}
+                  {/* Result line is ALWAYS rendered (showing the original dimensions
+                      when there's no crop) so it can't appear the moment the first
+                      non-zero value is entered — which grew the panel and shifted the
+                      crop controls out from under the user's cursor. */}
+                  {(() => {
+                    const c = selectedSettings?.crop;
+                    const cropped = !!(c && (c.crop_w !== c.original_w || c.crop_h !== c.original_h));
+                    const ow = c?.original_w ?? selectedItem.width ?? 0;
+                    const oh = c?.original_h ?? selectedItem.height ?? 0;
+                    return (
+                      <div className="text-[11px] flex items-center gap-2 mt-2 pt-2 border-t border-surface-border">
+                        <Scissors size={11} className={cropped ? "text-accent" : "text-text-muted/40"} />
+                        {cropped ? (
+                          <>
+                            <span className="text-accent">{c!.crop_w}×{c!.crop_h}+{c!.crop_x}+{c!.crop_y}</span>
+                            <span className="text-text-muted">({c!.effective_ratio})</span>
+                          </>
+                        ) : (
+                          <span className="text-text-muted/60">{ow}×{oh} · no crop</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
