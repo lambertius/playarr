@@ -51,6 +51,10 @@ export function NewVideosPage() {
 
   const cartCount = cart?.count ?? feed?.cart_count ?? 0;
   const cartItemCount = cart?.items?.length ?? 0;
+  // Refresh runs in the background; the feed reports `refreshing` until it's
+  // done. Keep the button spinning across the whole background run, not just
+  // the (now instant) POST.
+  const isRefreshing = refreshMutation.isPending || !!feed?.refreshing;
 
   const handleAddVideo = useCallback((url: string) => {
     setImportUrl(url);
@@ -104,11 +108,11 @@ export function NewVideosPage() {
           <Tooltip content="Re-fetch suggestions for all categories">
           <button
             onClick={() => refreshMutation.mutate({ force: true })}
-            disabled={refreshMutation.isPending}
+            disabled={isRefreshing}
             className="btn btn-sm"
           >
-            <RefreshCw size={16} className={refreshMutation.isPending ? "animate-spin" : ""} />
-            <span className="ml-1">Refresh</span>
+            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+            <span className="ml-1">{isRefreshing ? "Refreshing…" : "Refresh"}</span>
           </button>
           </Tooltip>
         </div>
@@ -164,14 +168,17 @@ export function NewVideosPage() {
       {feed && CATEGORY_ORDER.every(cat => (feed.categories[cat]?.videos?.length ?? 0) === 0) && !isLoading && (
         <div className="text-center py-20 text-text-muted">
           <Trophy size={48} className="mx-auto mb-4 opacity-30" />
-          <p className="text-lg">No recommendations yet</p>
-          <p className="text-sm mt-1">Click Refresh to discover music videos</p>
+          <p className="text-lg">{isRefreshing ? "Generating recommendations…" : "No recommendations yet"}</p>
+          <p className="text-sm mt-1">
+            {isRefreshing ? "This can take a minute" : "Click Refresh to discover music videos"}
+          </p>
           <button
             onClick={() => refreshMutation.mutate({ force: true })}
+            disabled={isRefreshing}
             className="btn-primary btn-sm mt-4"
           >
-            <RefreshCw size={14} className="mr-1" />
-            Generate Recommendations
+            <RefreshCw size={14} className={`mr-1 ${isRefreshing ? "animate-spin" : ""}`} />
+            {isRefreshing ? "Generating…" : "Generate Recommendations"}
           </button>
         </div>
       )}

@@ -470,16 +470,18 @@ export function VideoEditorPage() {
     try { localStorage.setItem(AUTO_DETECTED_KEY, JSON.stringify([...autoDetectedRef.current])); } catch {}
   }, []);
 
-  // Auto-detect letterboxing for new queue items without existing crop settings.
-  // If the backend already has stored letterbox data, use that instead of re-detecting.
+  // Load stored crop / auto-detect letterboxing for queue items.
   useEffect(() => {
     if (!queueItems || queueItems.length === 0) return;
     for (const item of queueItems) {
       const vid = item.video_id;
-      if (itemSettings[vid]?.crop || autoDetectedRef.current.has(vid)) continue;
-      markAutoDetected(vid);
+      // Already have crop settings for this item in the current session.
+      if (itemSettings[vid]?.crop) continue;
 
-      // Use stored letterbox data from backend if available
+      // Always re-apply a previously-scanned crop from the backend. itemSettings
+      // is in-memory and resets on navigation, so returning to the editor must
+      // restore the stored crop from QualitySignature (the source of truth)
+      // without a rescan — this runs regardless of autoDetectedRef.
       if (item.letterbox_detected && item.crop_w != null && item.crop_h != null) {
         updateItemSetting(vid, {
           crop: {
@@ -495,6 +497,12 @@ export function VideoEditorPage() {
         });
         continue;
       }
+
+      // No stored crop. Skip the expensive ffmpeg detection if the backend has
+      // already scanned this video (scanned with no letterbox found) or we've
+      // already auto-detected it in this browser session.
+      if (item.letterbox_scanned || autoDetectedRef.current.has(vid)) continue;
+      markAutoDetected(vid);
 
       detectLetterbox.mutateAsync(vid).then(result => {
         if (result.detected) {
@@ -1740,14 +1748,18 @@ export function VideoEditorPage() {
                     <h4 className="text-[10px] font-semibold uppercase tracking-wider text-text-muted flex items-center gap-1.5">
                       <Scissors size={11} /> Crop
                     </h4>
-                    {selectedSettings?.crop && (selectedSettings.crop.crop_w !== selectedSettings.crop.original_w || selectedSettings.crop.crop_h !== selectedSettings.crop.original_h) && (
-                      <button
-                        className="btn-secondary btn-xs text-red-400"
-                        onClick={() => handleClearCrop(selectedItem.video_id)}
-                      >
-                        <X size={11} /> Clear
-                      </button>
-                    )}
+                    {/* Always rendered (visibility toggled) so the button appearing
+                        after the first non-zero crop value can't grow the header and
+                        shift the stepper arrows out from under the user's cursor. */}
+                    <button
+                      className={`btn-secondary btn-xs text-red-400 ${
+                        selectedSettings?.crop && (selectedSettings.crop.crop_w !== selectedSettings.crop.original_w || selectedSettings.crop.crop_h !== selectedSettings.crop.original_h)
+                          ? "" : "invisible"
+                      }`}
+                      onClick={() => handleClearCrop(selectedItem.video_id)}
+                    >
+                      <X size={11} /> Clear
+                    </button>
                   </div>
                   <div className="flex flex-wrap items-end gap-3">
                     <label className="text-xs text-text-secondary">
@@ -1879,16 +1891,24 @@ export function VideoEditorPage() {
                       <div className="flex flex-wrap items-end gap-3">
                         {/* Trim start */}
                         <div className="flex items-end gap-1.5">
+                          <Tooltip content="Cuts this many seconds off the BEGINNING of the video. The playhead jumps to the new start so you can see exactly what's removed.">
                           <label className="text-xs text-text-secondary">
-                            Start trim (s)
+                            Trim off start (s)
                             <NumericStepper
                               min={0} step={0.1}
                               max={selectedItem.duration_seconds ? selectedItem.duration_seconds - (selectedSettings?.trimEnd ?? 0) - 0.1 : undefined}
                               value={selectedSettings?.trimStart ?? 0}
-                              onChange={v => updateItemSetting(selectedItem.video_id, { trimStart: v })}
+                              onChange={v => {
+                                updateItemSetting(selectedItem.video_id, { trimStart: v });
+                                // Move the playhead to the new start point so the user
+                                // sees the frame they're trimming to.
+                                const el = videoRef.current;
+                                if (el) { el.currentTime = v; setCurrentTime(v); }
+                              }}
                               className="w-20"
                             />
                           </label>
+                          </Tooltip>
                           <Tooltip content="Set trim start from the current playhead (I)">
                             <button
                               className="btn-ghost btn-xs text-text-muted hover:text-accent mb-0.5"
@@ -1913,16 +1933,25 @@ export function VideoEditorPage() {
 
                         {/* Trim end */}
                         <div className="flex items-end gap-1.5">
+                          <Tooltip content="Cuts this many seconds off the END of the video. The playhead jumps to the new end point so you can see exactly what's removed.">
                           <label className="text-xs text-text-secondary">
-                            End trim (s)
+                            Trim off end (s)
                             <NumericStepper
                               min={0} step={0.1}
                               max={selectedItem.duration_seconds ? selectedItem.duration_seconds - (selectedSettings?.trimStart ?? 0) - 0.1 : undefined}
                               value={selectedSettings?.trimEnd ?? 0}
-                              onChange={v => updateItemSetting(selectedItem.video_id, { trimEnd: v })}
+                              onChange={v => {
+                                updateItemSetting(selectedItem.video_id, { trimEnd: v });
+                                // trimEnd is seconds removed from the END; move the
+                                // playhead to the new end point (duration − trimEnd).
+                                const el = videoRef.current;
+                                const dur = selectedItem.duration_seconds ?? el?.duration ?? 0;
+                                if (el && dur) { const t = Math.max(0, dur - v); el.currentTime = t; setCurrentTime(t); }
+                              }}
                               className="w-20"
                             />
                           </label>
+                          </Tooltip>
                           <Tooltip content="Set trim end from the current playhead — seconds removed from the end (O)">
                             <button
                               className="btn-ghost btn-xs text-text-muted hover:text-accent mb-0.5"

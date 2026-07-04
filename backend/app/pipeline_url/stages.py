@@ -510,7 +510,10 @@ def _step_resolve_metadata_url(ws: ImportWorkspace, artist: str, title: str,
     finally:
         _db.close()
 
-    if metadata.get("plot"):
+    # Only rewrite the plot with AI when the user actually selected AI for this
+    # import. Without this guard an env-configured provider would spend tokens
+    # on every import that produced a scraped plot, even with AI mode off.
+    if metadata.get("plot") and not _skip_ai:
         try:
             from app.pipeline_url.services.ai_summary import generate_ai_summary
             summary = generate_ai_summary(metadata["plot"], source_url=canonical)

@@ -1132,8 +1132,9 @@ def _step_resolve_metadata(ws: ImportWorkspace, artist: str, title: str,
     finally:
         _db.close()
 
-    # AI summary
-    if metadata.get("plot"):
+    # AI summary — only when AI was selected for this import, so an
+    # env-configured provider can't spend tokens while AI mode is off.
+    if metadata.get("plot") and not _skip_ai:
         try:
             from app.pipeline_lib.services.ai_summary import generate_ai_summary
             summary = generate_ai_summary(metadata["plot"],

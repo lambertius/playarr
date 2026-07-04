@@ -795,10 +795,15 @@ export const newVideosApi = {
     api.get<import("@/types").NewVideosFeed>("/new-videos/").then(r => r.data),
 
   refresh: (categories?: string[], force = false) =>
-    api.post<{ status: string; refreshed: Record<string, number> }>("/new-videos/refresh", {
+    api.post<{ status: string; refreshing: boolean }>("/new-videos/refresh", {
       categories: categories ?? null,
       force,
     }).then(r => r.data),
+
+  refreshStatus: () =>
+    api.get<{ status: string; refreshing: boolean; refreshed: Record<string, number>; error: string | null }>(
+      "/new-videos/refresh/status",
+    ).then(r => r.data),
 
   cart: () =>
     api.get<import("@/types").CartResponse>("/new-videos/cart").then(r => r.data),

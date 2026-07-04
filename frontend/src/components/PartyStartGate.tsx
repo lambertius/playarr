@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Play, Sparkles, Tv, Maximize2 } from "lucide-react";
+import { Play, Sparkles, Tv, Maximize2, Loader2 } from "lucide-react";
 import { loadExclusions } from "@/hooks/usePartyMode";
 
 export interface PartyStartChoice {
@@ -30,6 +30,7 @@ export function PartyStartGate({
   const currentYear = new Date().getFullYear();
   const [year, setYear] = useState(currentYear);
   const [layout, setLayout] = useState<"theater" | "video">("theater");
+  const [starting, setStarting] = useState(false);
   const startRef = useRef<HTMLButtonElement>(null);
 
   // Read once on mount — reflects the server-cached partyExclusions preference.
@@ -41,6 +42,10 @@ export function PartyStartGate({
   }, []);
 
   const start = () => {
+    if (starting) return;
+    // Flip the button to a "starting" state immediately so the press is
+    // acknowledged even before the surface swaps in its loading screen.
+    setStarting(true);
     onStart({
       // Current year (or later) = whole library, no era bias.
       partyYear: year < currentYear ? year : undefined,
@@ -168,9 +173,18 @@ export function PartyStartGate({
         <button
           ref={startRef}
           onClick={start}
-          className="btn-primary flex w-full items-center justify-center gap-2 py-3 text-base"
+          disabled={starting}
+          className="btn-primary flex w-full items-center justify-center gap-2 py-3 text-base disabled:opacity-100"
         >
-          <Play className="h-5 w-5" /> Start the Party
+          {starting ? (
+            <>
+              <Loader2 className="h-5 w-5 animate-spin" /> Starting the party…
+            </>
+          ) : (
+            <>
+              <Play className="h-5 w-5" /> Start the Party
+            </>
+          )}
         </button>
       </div>
     </div>

@@ -1286,6 +1286,9 @@ export function useNewVideosFeed() {
     queryKey: ["newVideosFeed"],
     queryFn: () => newVideosApi.feed(),
     staleTime: 60_000,
+    // While a background refresh is generating suggestions, poll so results
+    // stream in as each category completes; stop once it's done.
+    refetchInterval: (query) => (query.state.data?.refreshing ? 3000 : false),
   });
 }
 

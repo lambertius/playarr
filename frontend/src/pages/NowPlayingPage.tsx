@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, memo } from "react";
 import ReactDOM from "react-dom";
-import { Play, Monitor, Maximize, X, ListPlus, Star } from "lucide-react";
+import { Play, Monitor, Maximize, X, ListPlus, Star, Film } from "lucide-react";
 import { Tooltip } from "@/components/Tooltip";
 import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
@@ -8,6 +8,7 @@ import { playbackApi, libraryApi } from "@/lib/api";
 import { usePlaybackDiagnostics } from "@/hooks/usePlaybackDiagnostics";
 import { useUpdateVideo } from "@/hooks/queries";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
+import { addToVideoEditorQueue } from "@/pages/VideoEditorPage";
 import { useToast } from "@/components/Toast";
 import { FullscreenControls } from "@/components/FullscreenControls";
 import type { VideoItemDetail } from "@/types";
@@ -406,7 +407,7 @@ const ArtworkBackground = memo(function ArtworkBackground({ profile = "browser" 
   );
 });
 
-export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0 }: { profile?: PlaybackProfile; tvCanvasHeight?: number } = {}) {
+export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeedsGesture }: { profile?: PlaybackProfile; tvCanvasHeight?: number; onNeedsGesture?: (needs: boolean) => void } = {}) {
   // TV and Cast both drive the <video> as a single combined (self-clocked)
   // stream; only the browser profile uses the dual audio-master/video-only split.
   const tvMode = profile !== "browser";
@@ -452,6 +453,12 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0 }: { pr
   const setCurrentTime = usePlaybackStore((s) => s.setCurrentTime);
   const setDuration = usePlaybackStore((s) => s.setDuration);
   const [needsGesture, setNeedsGesture] = useState(false);
+
+  // Let a host surface (TV mode) know when a manual "Press OK" gesture is
+  // required, so it can move its own "Starting…" overlay out of the way.
+  useEffect(() => {
+    onNeedsGesture?.(needsGesture);
+  }, [needsGesture, onNeedsGesture]);
 
   const videoSrc = (videoId: number) =>
     tvMode
@@ -1435,6 +1442,17 @@ const QueueRow = forwardRef<
           >
             <ListPlus size={14} />
             Add to playlist…
+          </button>
+          <button
+            onClick={() => {
+              setMenuPos(null);
+              addToVideoEditorQueue([track.videoId]);
+              toast({ type: "success", title: "Added to Video Editor queue" });
+            }}
+            className="w-full px-3 py-1.5 text-left text-sm text-white/80 hover:bg-white/10 hover:text-white flex items-center gap-2"
+          >
+            <Film size={14} />
+            Send to Video Editor
           </button>
           <div className="my-1 border-t border-white/10" />
           <div className="flex items-center justify-between px-3 py-1.5 text-sm text-white/80">

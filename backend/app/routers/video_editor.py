@@ -389,6 +389,7 @@ class EditorQueueItem(BaseModel):
     audio_bitrate: Optional[int] = None
     audio_channels: Optional[int] = None
     # Letterbox info
+    letterbox_scanned: bool = False
     letterbox_detected: bool = False
     crop_w: Optional[int] = None
     crop_h: Optional[int] = None
@@ -555,6 +556,7 @@ def get_editor_queue(
             audio_codec=qs.audio_codec if qs else None,
             audio_bitrate=qs.audio_bitrate if qs else None,
             audio_channels=qs.audio_channels if qs else None,
+            letterbox_scanned=bool(qs.letterbox_scanned) if qs else False,
             letterbox_detected=qs.letterbox_detected if qs and qs.letterbox_scanned else False,
             crop_w=qs.letterbox_crop_w if qs and qs.letterbox_detected else None,
             crop_h=qs.letterbox_crop_h if qs and qs.letterbox_detected else None,

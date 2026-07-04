@@ -1795,6 +1795,14 @@ def _deferred_ai_enrichment(video_id: int, ws: ImportWorkspace) -> None:
     from app.database import SessionLocal
     from app.models import VideoItem
 
+    # Defence in depth: never spend AI tokens unless the user selected AI for
+    # this import. The mutation plan already gates dispatch, but re-check here so
+    # this task can never call a provider when AI mode was off.
+    _input = ws.read_artifact("input") or {}
+    if not (_input.get("ai_auto_analyse") or _input.get("ai_auto_fallback")):
+        ws.log("AI enrichment skipped: AI mode not selected for this import")
+        return
+
     def _write():
         db = SessionLocal()
         try:

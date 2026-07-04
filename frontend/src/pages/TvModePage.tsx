@@ -1,9 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Loader2, Sparkles } from "lucide-react";
 import { usePartyMode } from "@/hooks/usePartyMode";
 import { usePlaybackStore } from "@/stores/playbackStore";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
 import { NowPlayingPage } from "@/pages/NowPlayingPage";
 import { PartyStartGate, type PartyStartChoice } from "@/components/PartyStartGate";
+
+/** Full-screen "the party is spinning up" overlay, shown from the moment Start
+ *  is pressed until the first video frame actually plays. Covers both the queue
+ *  fetch and the on-the-fly transcode/buffer window, which is otherwise a black
+ *  screen with no feedback. */
+function StartingPartyOverlay() {
+  return (
+    <div className="pointer-events-none fixed inset-0 z-40 flex flex-col items-center justify-center gap-6 bg-black text-white">
+      <div className="flex items-center gap-3">
+        <Sparkles className="h-8 w-8 text-accent animate-pulse" />
+        <span className="text-3xl font-bold tracking-tight">Starting the party…</span>
+      </div>
+      <Loader2 className="h-10 w-10 animate-spin text-accent" />
+      <span className="text-sm uppercase tracking-widest text-white/50">
+        Cueing up your videos — this takes a moment
+      </span>
+      <span className="text-xs text-white/30">Press OK if it doesn't begin on its own</span>
+    </div>
+  );
+}
 
 /**
  * TV / kiosk mode (`/tv`) — opens the exact Party Mode visual full-screen with
@@ -34,6 +55,9 @@ export function TvModePage() {
   // Every access is a fresh first access — start at the prompt on every mount.
   const [phase, setPhase] = useState<"prompt" | "loading" | "ready" | "error">("prompt");
   const startedRef = useRef(false);
+  // The "Starting the party…" overlay stays up until the video actually plays.
+  const [playbackStarted, setPlaybackStarted] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const update = () => {
@@ -59,6 +83,29 @@ export function TvModePage() {
       setTvMode(false);
     };
   }, [clearQueue, setFullscreenMode, setTvMode]);
+
+  // Detect the moment real playback begins so the overlay can step aside.
+  // Media `playing` events don't bubble, so listen in the capture phase on the
+  // wrapper. A safety timeout reveals the surface even if `playing` never fires
+  // (e.g. autoplay was blocked and the user hasn't pressed OK yet).
+  useEffect(() => {
+    if (phase !== "loading" && phase !== "ready") return;
+    const el = wrapRef.current;
+    if (!el) return;
+    const onPlaying = () => setPlaybackStarted(true);
+    el.addEventListener("playing", onPlaying, true);
+    const safety = window.setTimeout(() => setPlaybackStarted(true), 15000);
+    return () => {
+      el.removeEventListener("playing", onPlaying, true);
+      window.clearTimeout(safety);
+    };
+  }, [phase]);
+
+  // If autoplay is blocked, NowPlayingPage shows its own "Press OK" prompt —
+  // step our overlay aside so that prompt is visible and tappable.
+  const handleNeedsGesture = useCallback((needs: boolean) => {
+    if (needs) setPlaybackStarted(true);
+  }, []);
 
   const handleStart = useCallback((choice: PartyStartChoice) => {
     if (startedRef.current) return;
@@ -91,29 +138,29 @@ export function TvModePage() {
     );
   }
 
-  if (phase === "loading") {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-black">
-        <span className="text-sm uppercase tracking-widest text-white/50 animate-pulse">Loading Party Mode…</span>
-      </div>
-    );
-  }
+  // From here on the surface is mounted. The video element only exists once
+  // `phase === "ready"`, so during "loading" the overlay stands alone; once
+  // ready it sits on top of the (buffering) player until the first frame plays.
+  const showStartingOverlay = phase === "loading" || (phase === "ready" && !playbackStarted);
 
   return (
-    <div className="fixed inset-0 overflow-hidden bg-black">
-      <div
-        style={{
-          position: "absolute",
-          width: canvasW,
-          height: canvasH,
-          left: fit.x,
-          top: fit.y,
-          transform: `scale(${fit.scale})`,
-          transformOrigin: "top left",
-        }}
-      >
-        <NowPlayingPage profile="tv" tvCanvasHeight={canvasH} />
-      </div>
+    <div ref={wrapRef} className="fixed inset-0 overflow-hidden bg-black">
+      {phase === "ready" && (
+        <div
+          style={{
+            position: "absolute",
+            width: canvasW,
+            height: canvasH,
+            left: fit.x,
+            top: fit.y,
+            transform: `scale(${fit.scale})`,
+            transformOrigin: "top left",
+          }}
+        >
+          <NowPlayingPage profile="tv" tvCanvasHeight={canvasH} onNeedsGesture={handleNeedsGesture} />
+        </div>
+      )}
+      {showStartingOverlay && <StartingPartyOverlay />}
     </div>
   );
 }

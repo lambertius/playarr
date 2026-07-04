@@ -1,4 +1,5 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Search, ChevronLeft, ChevronRight, CheckCircle2, XCircle,
@@ -440,36 +441,67 @@ function VersionTypeDropdown({ currentType, onSelect }: {
   currentType?: string; onSelect: (vt: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  // Menu is rendered in a portal (positioned via the button rect) so it can't
+  // be clipped by the duplicate-group card's overflow-hidden or the scroll
+  // container — which previously cut the options off and made it unusable.
+  const [menu, setMenu] = useState<{ left: number; top: number; up: boolean } | null>(null);
+
+  const toggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (open) { setOpen(false); return; }
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) {
+      const estHeight = 8 + VERSION_TYPE_OPTIONS.length * 30;
+      const spaceBelow = window.innerHeight - r.bottom;
+      const up = spaceBelow < estHeight && r.top > spaceBelow;
+      setMenu({ left: r.right, top: up ? r.top - 4 : r.bottom + 4, up });
+    }
+    setOpen(true);
+  };
+
   return (
     <div className="relative">
       <Tooltip content="Change the version type for this track (e.g. Cover, Live, Alternate)">
         <button
-          onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+          ref={btnRef}
+          onClick={toggle}
           className="btn-ghost btn-sm text-xs gap-1"
         >
           <Tag size={12} /> Reclassify <ChevronDown size={10} />
         </button>
       </Tooltip>
-      {open && (
-        <div className="absolute right-0 bottom-full mb-1 bg-surface-light border border-surface-border rounded-lg shadow-xl z-50 min-w-[140px] py-1">
-          {VERSION_TYPE_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={(e) => {
-                e.stopPropagation();
-                onSelect(opt.value);
-                setOpen(false);
-              }}
-              className={cn(
-                "w-full text-left px-3 py-1.5 text-xs hover:bg-surface-hover transition-colors",
-                currentType === opt.value ? "text-accent font-medium" : "text-text-secondary",
-              )}
-            >
-              {opt.label}
-              {currentType === opt.value && <Check size={10} className="inline ml-2" />}
-            </button>
-          ))}
-        </div>
+      {open && menu && createPortal(
+        <div
+          className="fixed inset-0 z-[70]"
+          onClick={() => setOpen(false)}
+          onContextMenu={(e) => { e.preventDefault(); setOpen(false); }}
+        >
+          <div
+            className="fixed bg-surface-light border border-surface-border rounded-lg shadow-xl min-w-[150px] py-1"
+            style={{ left: menu.left, top: menu.top, transform: `translate(-100%, ${menu.up ? "-100%" : "0"})` }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {VERSION_TYPE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelect(opt.value);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "w-full text-left px-3 py-1.5 text-xs hover:bg-surface-hover transition-colors",
+                  currentType === opt.value ? "text-accent font-medium" : "text-text-secondary",
+                )}
+              >
+                {opt.label}
+                {currentType === opt.value && <Check size={10} className="inline ml-2" />}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -1385,19 +1417,16 @@ function DuplicateGroupCard({
                   <QualitySpecs item={item} />
                 </div>
               </div>
+              {/* Both the flagged duplicate and the existing library partner get
+                  actions — the user may want to reclassify or delete either one.
+                  The "Existing" badge above marks the pre-existing library item. */}
               <div className="flex items-center justify-between mt-1.5" onClick={(e) => e.stopPropagation()}>
-                {!isComparisonOnly ? (
-                  <>
-                    <VersionTypeDropdown currentType={item.version_type} onSelect={(vt) => onSetVersion(item.video_id, vt)} />
-                    <Tooltip content="Delete this video and its files from disk">
-                      <button onClick={() => onDelete(item.video_id)} className="btn-ghost btn-sm text-xs text-red-400/60 hover:text-red-300">
-                        <Trash2 size={13} />
-                      </button>
-                    </Tooltip>
-                  </>
-                ) : (
-                  <span className="text-[10px] text-zinc-500 italic">Not in review queue</span>
-                )}
+                <VersionTypeDropdown currentType={item.version_type} onSelect={(vt) => onSetVersion(item.video_id, vt)} />
+                <Tooltip content={isComparisonOnly ? "Delete this existing library video and its files from disk" : "Delete this video and its files from disk"}>
+                  <button onClick={() => onDelete(item.video_id)} className="btn-ghost btn-sm text-xs text-red-400/60 hover:text-red-300">
+                    <Trash2 size={13} />
+                  </button>
+                </Tooltip>
               </div>
             </div>
           );

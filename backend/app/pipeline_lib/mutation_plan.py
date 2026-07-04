@@ -319,7 +319,11 @@ def build_plan_from_workspace(ws) -> dict:
     deferred = ["preview", "matching", "entity_artwork"]
     if mode == "advanced":
         deferred.extend(["kodi_export", "orphan_cleanup"])
-        if not metadata.get("ai_final_review") or not metadata.get("plot"):
+        # Only run AI enrichment when the user selected AI for this import —
+        # otherwise the deferred task would call the DB-configured provider and
+        # spend tokens on every advanced import with AI mode off.
+        _ai_requested = bool(opts.get("ai_auto_analyse") or opts.get("ai_auto_fallback"))
+        if _ai_requested and (not metadata.get("ai_final_review") or not metadata.get("plot")):
             deferred.append("ai_enrichment")
         deferred.append("scene_analysis")
     plan["deferred_tasks"] = deferred

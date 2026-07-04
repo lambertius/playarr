@@ -351,7 +351,14 @@ def test_shared_lock_exists_and_is_singleton():
         "pipeline/db_apply._apply_lock is NOT the shared lock!"
     assert shared_lock is pipeline_lib_lock, \
         "pipeline_lib/db_apply._apply_lock is NOT the shared lock!"
-    assert isinstance(shared_lock, type(threading.Lock()))
+    # The shared lock is a re-entrant lock (RLock): the request-scoped write
+    # guard in app.database can re-acquire it on the same thread that already
+    # holds it explicitly (e.g. routers/jobs.py wraps its commit in
+    # `with _apply_lock:`). A plain Lock would self-deadlock there.
+    assert isinstance(shared_lock, type(threading.RLock())), \
+        "shared lock must be a re-entrant RLock"
+    # Sanity: it must support the context-manager protocol used everywhere.
+    assert hasattr(shared_lock, "acquire") and hasattr(shared_lock, "release")
 
 
 def test_write_queue_acquires_shared_lock():

@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.database import SessionLocal
+from app.database import RequestSessionLocal
 from app.config import get_settings
 from app.matching.models import (
     MatchResult, MatchCandidate, NormalizationResult as NormalizationResultModel,
@@ -103,7 +103,9 @@ export_router = APIRouter(prefix="/api/export", tags=["export"])
 
 
 def _get_db():
-    db = SessionLocal()
+    # Guarded request session: writes committed here serialise against the
+    # pipeline write queue via _apply_lock (see app.database).
+    db = RequestSessionLocal()
     try:
         yield db
     finally:

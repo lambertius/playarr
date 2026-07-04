@@ -38,23 +38,99 @@ ASPECT_RATIOS = {
 }
 
 
-def detect_letterbox(file_path: str, sample_duration: int = 30, skip_seconds: int = 60) -> Dict[str, Any]:
-    """Detect letterboxing (black bars) using ffmpeg cropdetect.
+# ── Letterbox detection tunables ────────────────────────────────────────────
+# Luminance (0-255) at or below which a pixel counts as "black". Kept low so
+# only *true* black bars qualify — dark scene content (shadows, night) reads
+# well above this, which prevents the over-cropping the looser old limit (64)
+# caused.
+_CROPDETECT_LIMIT = 24
+# A cropdetect reading whose detected content area is smaller than this fraction
+# of the frame comes from a near-black frame (fade, dark scene) and is unreliable
+# — discard it.
+_MIN_CONTENT_AREA_FRAC = 0.35
 
-    Samples `sample_duration` seconds of video starting at `skip_seconds`
-    (to avoid intros/fades) and returns the detected crop geometry.
 
-    Returns dict with:
-        detected: bool — whether letterboxing was found
-        crop_w, crop_h, crop_x, crop_y — detected crop rect
-        original_w, original_h — original video dimensions
-        bar_top, bar_bottom, bar_left, bar_right — black bar sizes
+def _parse_cropdetect_lines(stderr: str, orig_w: int, orig_h: int) -> list:
+    """Extract valid, plausible crop=W:H:X:Y readings from cropdetect stderr."""
+    crops = []
+    for line in stderr.splitlines():
+        idx = line.find("crop=")
+        if idx == -1:
+            continue
+        crop_str = line[idx + 5:].split()[0]
+        parts = crop_str.split(":")
+        if len(parts) != 4:
+            continue
+        try:
+            w, h, x, y = (int(p) for p in parts)
+        except (ValueError, TypeError):
+            continue
+        # Reject out-of-bounds / degenerate rects.
+        if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > orig_w or y + h > orig_h:
+            continue
+        # Reject near-black frames (content area too small to trust).
+        if (w * h) < _MIN_CONTENT_AREA_FRAC * (orig_w * orig_h):
+            continue
+        crops.append((w, h, x, y))
+    return crops
+
+
+def _cropdetect_window(ffmpeg: str, file_path: str, start: float, dur: float,
+                       orig_w: int, orig_h: int):
+    """Run cropdetect over one short window and return its modal crop, or None.
+
+    Uses round=2 (accurate, even-aligned) and reset=1 so each frame produces an
+    independent reading; the per-window mode is the stable crop for that window.
     """
+    cmd = [
+        ffmpeg,
+        "-ss", f"{max(0.0, start):.3f}",
+        "-i", file_path,
+        "-t", f"{dur:.3f}",
+        "-vf", f"cropdetect=limit={_CROPDETECT_LIMIT}:round=2:reset=1",
+        "-f", "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90, **HIDE_WINDOW)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"cropdetect window at {start:.1f}s failed: {e}")
+        return None
+    crops = _parse_cropdetect_lines(result.stderr, orig_w, orig_h)
+    if not crops:
+        return None
+    from collections import Counter
+    return Counter(crops).most_common(1)[0][0]
+
+
+def detect_letterbox(file_path: str, sample_duration: int = 30, skip_seconds: int = 60) -> Dict[str, Any]:
+    """Detect letterboxing (black bars) via multi-window ffmpeg cropdetect.
+
+    Rather than trusting a single 30s window (which is easily fooled by one
+    dark or bright scene), this samples several short windows spread across the
+    whole video and reaches a robust consensus:
+
+      1. Multi-window temporal sampling — up to 6 windows between 8%–92% of the
+         runtime, so no single scene dominates.
+      2. Per-window mode + across-window median of each bar — outlier windows
+         (a fade-to-black, a bright flash) can't skew the result.
+      3. Dark-frame rejection — readings from near-black frames are discarded.
+      4. Symmetry snapping — real letterbox/pillarbox bars are symmetric; an
+         axis whose two bars disagree beyond tolerance is treated as unreliable
+         (no crop) rather than producing a lopsided crop into real content.
+      5. Relative + absolute thresholds + even alignment — a bar must exceed
+         both ~8px and ~1.8% of the dimension to count, and crops are even.
+
+    Returns dict with (unchanged contract):
+        detected, crop_w, crop_h, crop_x, crop_y,
+        original_w, original_h, bar_top, bar_bottom, bar_left, bar_right
+    """
+    import statistics
+
     settings = get_settings()
     ffmpeg = settings.resolved_ffmpeg
-    ffprobe = settings.resolved_ffprobe
 
-    # Get original dimensions first
+    # Get original dimensions + duration first
     probe = probe_file(file_path)
     original_w, original_h = None, None
     duration = None
@@ -65,81 +141,100 @@ def detect_letterbox(file_path: str, sample_duration: int = 30, skip_seconds: in
             break
     fmt = probe.get("format", {})
     if fmt.get("duration"):
-        duration = float(fmt["duration"])
+        try:
+            duration = float(fmt["duration"])
+        except (ValueError, TypeError):
+            duration = None
 
     if not original_w or not original_h:
         raise ValueError(f"Could not determine video dimensions for {file_path}")
 
-    # Clamp skip to avoid seeking past end
-    if duration and skip_seconds >= duration:
-        skip_seconds = max(0, int(duration * 0.3))
-    actual_sample = min(sample_duration, int(duration - skip_seconds)) if duration else sample_duration
-
-    cmd = [
-        ffmpeg,
-        "-ss", str(skip_seconds),
-        "-i", file_path,
-        "-t", str(actual_sample),
-        "-vf", "cropdetect=64:16:0",
-        "-f", "null",
-        "-",
-    ]
-
-    logger.info(f"Running cropdetect on {file_path}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, **HIDE_WINDOW)
-
-    # Parse cropdetect output from stderr — lines like:
-    #   [Parsed_cropdetect_0 @ ...] x1:0 x2:1919 y1:140 y2:939 w:1920 h:800 ...
-    #   crop=1920:800:0:140
-    crop_lines = []
-    for line in result.stderr.splitlines():
-        if "crop=" in line:
-            # Extract the crop=W:H:X:Y value
-            idx = line.index("crop=")
-            crop_str = line[idx + 5:].split()[0]
-            crop_lines.append(crop_str)
-
-    if not crop_lines:
+    def _no_letterbox() -> Dict[str, Any]:
         return {
             "detected": False,
-            "original_w": original_w,
-            "original_h": original_h,
-            "crop_w": original_w,
-            "crop_h": original_h,
-            "crop_x": 0,
-            "crop_y": 0,
-            "bar_top": 0,
-            "bar_bottom": 0,
-            "bar_left": 0,
-            "bar_right": 0,
+            "original_w": original_w, "original_h": original_h,
+            "crop_w": original_w, "crop_h": original_h,
+            "crop_x": 0, "crop_y": 0,
+            "bar_top": 0, "bar_bottom": 0, "bar_left": 0, "bar_right": 0,
         }
 
-    # Use the most common crop value (mode) for stability
-    from collections import Counter
-    mode_crop = Counter(crop_lines).most_common(1)[0][0]
-    parts = mode_crop.split(":")
-    crop_w, crop_h, crop_x, crop_y = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+    # ── Build sample windows spread across the runtime ───────────────────────
+    windows: list = []
+    if duration and duration > 12:
+        usable_start = duration * 0.08
+        usable_end = duration * 0.92
+        span = max(0.0, usable_end - usable_start)
+        n = 6 if duration > 90 else (4 if duration > 30 else 2)
+        win_dur = min(4.0, max(2.0, span / max(1, n * 2)))
+        for k in range(n):
+            frac = (k / (n - 1)) if n > 1 else 0.5
+            windows.append((usable_start + frac * max(0.0, span - win_dur), win_dur))
+    else:
+        # Short / unknown duration — fall back to a single window like before.
+        start = skip_seconds if (duration and skip_seconds < duration) else 0
+        windows.append((float(start), float(min(sample_duration, 10))))
 
-    bar_top = crop_y
-    bar_bottom = original_h - (crop_y + crop_h)
-    bar_left = crop_x
-    bar_right = original_w - (crop_x + crop_w)
+    logger.info(f"Running letterbox detection on {file_path} ({len(windows)} windows)")
 
-    # Consider letterboxing detected if bars are significant (> 10px to avoid compression artifacts)
-    detected = (bar_top > 10 or bar_bottom > 10 or bar_left > 10 or bar_right > 10)
+    per_window = []
+    for (start, dur) in windows:
+        crop = _cropdetect_window(ffmpeg, file_path, start, dur, original_w, original_h)
+        if crop:
+            per_window.append(crop)
+
+    if not per_window:
+        return _no_letterbox()
+
+    # ── Robust consensus: median of each bar across the sampled windows ──────
+    tops = [y for (_w, _h, _x, y) in per_window]
+    bottoms = [original_h - (y + h) for (_w, h, _x, y) in per_window]
+    lefts = [x for (_w, _h, x, _y) in per_window]
+    rights = [original_w - (x + w) for (w, _h, x, _y) in per_window]
+
+    bt = max(0, int(statistics.median(tops)))
+    bb = max(0, int(statistics.median(bottoms)))
+    bl = max(0, int(statistics.median(lefts)))
+    br = max(0, int(statistics.median(rights)))
+
+    # ── Symmetry snapping ────────────────────────────────────────────────────
+    def _reconcile(a: int, b: int, dim: int):
+        tol = max(4, int(dim * 0.02))
+        if abs(a - b) <= tol:
+            v = min(a, b)          # symmetric bars → conservative common value
+            return v, v
+        return 0, 0                # lopsided → unreliable, don't auto-crop this axis
+
+    bt, bb = _reconcile(bt, bb, original_h)
+    bl, br = _reconcile(bl, br, original_w)
+
+    # ── Relative + absolute threshold, then even-align ───────────────────────
+    def _thr(v: int, dim: int) -> int:
+        v = v if v >= max(8, int(dim * 0.018)) else 0
+        return v - (v % 2)
+
+    bt = _thr(bt, original_h)
+    bb = _thr(bb, original_h)
+    bl = _thr(bl, original_w)
+    br = _thr(br, original_w)
+
+    crop_x = bl
+    crop_y = bt
+    crop_w = original_w - bl - br
+    crop_h = original_h - bt - bb
+
+    # Guard against an implausible over-crop (would destroy the frame).
+    if crop_w < original_w * 0.2 or crop_h < original_h * 0.2:
+        logger.warning(f"Letterbox detection produced implausible crop for {file_path}; ignoring")
+        return _no_letterbox()
+
+    detected = (bt > 0 or bb > 0 or bl > 0 or br > 0)
 
     return {
         "detected": detected,
-        "original_w": original_w,
-        "original_h": original_h,
-        "crop_w": crop_w,
-        "crop_h": crop_h,
-        "crop_x": crop_x,
-        "crop_y": crop_y,
-        "bar_top": bar_top,
-        "bar_bottom": bar_bottom,
-        "bar_left": bar_left,
-        "bar_right": bar_right,
+        "original_w": original_w, "original_h": original_h,
+        "crop_w": crop_w, "crop_h": crop_h,
+        "crop_x": crop_x, "crop_y": crop_y,
+        "bar_top": bt, "bar_bottom": bb, "bar_left": bl, "bar_right": br,
     }
 
 

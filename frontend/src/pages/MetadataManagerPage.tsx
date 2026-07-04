@@ -39,38 +39,50 @@ const TABS: { id: TabId; label: string; icon: typeof Database }[] = [
 export function MetadataManagerPage() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
 
+  const navItemClass = (id: TabId) =>
+    `flex items-center gap-2.5 w-full px-3 py-1.5 rounded-md text-sm text-left transition-colors ${
+      activeTab === id
+        ? "bg-accent/15 text-accent font-medium"
+        : "text-text-muted hover:text-text-secondary hover:bg-white/5"
+    }`;
+
   return (
-    <div className="p-4 md:p-6 max-w-4xl">
+    <div className="p-4 md:p-6">
       <h1 className="text-2xl font-bold text-text-primary mb-1">Metadata Manager</h1>
       <p className="text-sm text-text-muted mb-4">
         MusicBrainz ID coverage, artist name consolidation, and genre management.
       </p>
 
-      {/* Tab bar */}
-      <div className="flex gap-1 border-b border-white/10 mb-6 overflow-x-auto">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
-              activeTab === tab.id
-                ? "border-accent text-accent"
-                : "border-transparent text-text-muted hover:text-text-secondary hover:border-white/20"
-            }`}
-          >
-            <tab.icon size={16} />
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      <div className="flex flex-col md:flex-row gap-6">
+        {/* ── Sidebar (md+) ── */}
+        <nav className="hidden md:block md:w-56 shrink-0 self-start md:sticky md:top-6">
+          {TABS.map((tab) => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={navItemClass(tab.id)}>
+              <tab.icon size={16} />
+              {tab.label}
+            </button>
+          ))}
+        </nav>
 
-      {/* Tab content */}
-      <div className="space-y-6">
-        {activeTab === "overview" && <MbidOverview />}
-        {activeTab === "artists" && <ArtistConsolidation />}
-        {activeTab === "genre-consolidation" && <GenreConsolidation />}
-        {activeTab === "genres" && <GenreManager />}
-        {activeTab === "artwork" && <ArtworkManager />}
+        {/* ── Mobile section picker ── */}
+        <select
+          value={activeTab}
+          onChange={(e) => setActiveTab(e.target.value as TabId)}
+          className="input-field md:hidden"
+        >
+          {TABS.map((tab) => (
+            <option key={tab.id} value={tab.id}>{tab.label}</option>
+          ))}
+        </select>
+
+        {/* ── Content ── */}
+        <div className="flex-1 min-w-0 max-w-4xl space-y-6">
+          {activeTab === "overview" && <MbidOverview onGoToArtists={() => setActiveTab("artists")} />}
+          {activeTab === "artists" && <ArtistConsolidation />}
+          {activeTab === "genre-consolidation" && <GenreConsolidation />}
+          {activeTab === "genres" && <GenreManager />}
+          {activeTab === "artwork" && <ArtworkManager />}
+        </div>
       </div>
     </div>
   );
@@ -78,7 +90,7 @@ export function MetadataManagerPage() {
 
 // ─── MBID Coverage Overview ──────────────────────────────
 
-function MbidOverview() {
+function MbidOverview({ onGoToArtists }: { onGoToArtists?: () => void }) {
   const { data: stats, isLoading } = useMbidStats();
 
   if (isLoading || !stats) {
@@ -123,6 +135,37 @@ function MbidOverview() {
           </div>
         )}
       </div>
+
+      {/* Artist-conflicts explanation + call to action */}
+      {stats.artist_conflicts > 0 && (
+        <div className="card border-yellow-500/30 bg-yellow-500/5 px-4 py-3">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle size={16} className="text-yellow-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-text-primary mb-1">
+                {stats.artist_conflicts} artist name conflict{stats.artist_conflicts !== 1 ? "s" : ""}
+              </p>
+              <p className="text-xs text-text-muted leading-relaxed">
+                The same artist (matched by MusicBrainz ID) is stored under two or more different name
+                spellings in your library — for example <span className="text-text-secondary">"Beyoncé"</span> and{" "}
+                <span className="text-text-secondary">"Beyonce"</span>, or a name with and without a featured
+                artist. This splits the artist across multiple cards and folders. Fixing a conflict picks one
+                canonical name and applies it to every affected video (updating files and NFOs). It's optional
+                — nothing breaks if you leave them.
+              </p>
+              {onGoToArtists && (
+                <button
+                  onClick={onGoToArtists}
+                  className="btn-sm text-xs px-3 py-1.5 mt-2 rounded-lg btn-secondary inline-flex items-center gap-1.5"
+                >
+                  <Users size={13} />
+                  Review &amp; fix in Artist Consolidation
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MBID coverage pie charts */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

@@ -42,7 +42,7 @@ backend/
 ├── app/
 │   ├── main.py                # FastAPI app, lifespan, startup tasks
 │   ├── config.py              # Pydantic-settings configuration
-│   ├── database.py            # SQLAlchemy engine, sessions, dual pool
+│   ├── database.py            # SQLAlchemy engines, sessions, request write-guard
 │   ├── models.py              # ORM models (~30 tables)
 │   ├── schemas.py             # Pydantic request/response schemas
 │   ├── tasks.py               # Celery task definitions
@@ -151,9 +151,35 @@ A failed job may be → retried (re-queued)
 
 ## Database
 
-SQLite in WAL mode with dual connection pools:
-- **Main pool** (20 connections) — General read/write operations
+SQLite in WAL mode with three connection pools, all sharing one global write lock:
+- **Main pool** (20 connections) — Pipeline / background read/write operations
 - **Cosmetic pool** (10 connections) — Lightweight UI updates (ratings, play counts)
+- **Request pool** (20 connections) — Interactive HTTP requests; carries the automatic write-serialisation guard (see below)
+
+### Write serialisation
+
+SQLite permits only one writer at a time. To make write contention impossible by
+construction, **every write serialises through a single global re-entrant lock**
+(`app/db_lock.py::_apply_lock`):
+
+- **Pipeline writes** funnel through the write queue (`pipeline_url/write_queue.py`),
+  whose daemon thread holds the lock around each queued write; the
+  `pipeline` / `pipeline_lib` deferred tasks acquire it directly (`with _apply_lock:`).
+- **Interactive request writes** run on the guarded request engine (`app/database.py`).
+  An engine-level event acquires `_apply_lock` on the first `INSERT`/`UPDATE`/`DELETE`
+  of a transaction (before it reaches SQLite) and releases it on commit/rollback. This
+  serialises router endpoints that commit on the request session against the pipeline
+  **without any per-endpoint changes**, eliminating the busy-timeout stalls and
+  "database is locked" errors that previously made interactive actions (New Videos,
+  video editor, review queue, library/metadata edits) appear to lock during imports.
+
+The lock is a `threading.RLock` so an endpoint that both runs on the guarded session
+*and* wraps a commit in an explicit `with _apply_lock:` (e.g. `routers/jobs.py`)
+re-enters cleanly instead of self-deadlocking. The guard is scoped to the request
+engine only — pipeline coordinator threads interleave bare `flush()`es with network
+I/O and hand their commit to the write queue, so guarding their engine could hold the
+lock across network calls (or deadlock against `db_write()`); request handlers never
+call blocking `db_write()` mid-transaction, so guarding only their engine is safe.
 
 ### Core Tables
 

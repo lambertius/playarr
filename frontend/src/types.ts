@@ -1520,6 +1520,7 @@ export interface EditorQueueItem {
   audio_codec?: string | null;
   audio_bitrate?: number | null;
   audio_channels?: number | null;
+  letterbox_scanned?: boolean;
   letterbox_detected: boolean;
   crop_w?: number | null;
   crop_h?: number | null;
@@ -1750,6 +1751,8 @@ export interface NewVideosCategoryData {
 export interface NewVideosFeed {
   categories: Record<NewVideoCategory, NewVideosCategoryData>;
   cart_count: number;
+  /** True while a background feed refresh is generating suggestions. */
+  refreshing?: boolean;
 }
 
 export interface CartItem {

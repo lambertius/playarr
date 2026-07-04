@@ -364,11 +364,11 @@ const SETTINGS_NAV: NavGroup[] = [
     { id: "partymode",  label: "Party Mode",  icon: <Music size={16} /> },
     { id: "tvmode",     label: "TV Mode",     icon: <Tv size={16} /> },
     { id: "castmode",   label: "Cast Mode",   icon: <Cast size={16} /> },
+    { id: "kodi",       label: "Kodi Add-on", icon: <Puzzle size={16} /> },
   ]},
   { heading: "System", items: [
     { id: "server",     label: "Server",             icon: <Server size={16} /> },
     { id: "startup",    label: "Startup & Behaviour", icon: <Power size={16} /> },
-    { id: "kodi",       label: "Kodi Add-on",        icon: <Puzzle size={16} /> },
     { id: "management", label: "Server Management",  icon: <Wrench size={16} /> },
     { id: "logs",       label: "Logs",               icon: <ScrollText size={16} /> },
   ]},

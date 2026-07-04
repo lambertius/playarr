@@ -4,10 +4,11 @@ New Videos API Router — Discovery feed, cart, dismissals, feedback, and settin
 All endpoints are under /api/new-videos/*.
 """
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,73 @@ from app.new_videos import recommendation_service, feedback_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/new-videos", tags=["New Videos"])
+
+
+# ── Background refresh state ────────────────────────────────────────────────
+# Feed refresh runs many 30 s yt-dlp searches; doing that synchronously in the
+# request thread made the Refresh button "appear to lock" for minutes and tied
+# up a request worker. Instead we run it in a background thread and expose a
+# ``refreshing`` flag (on the feed + a status endpoint) so the UI can poll.
+
+_refresh_lock = threading.Lock()
+_refresh_info: dict = {
+    "status": "idle",       # idle | running | done | error
+    "started_at": None,
+    "finished_at": None,
+    "refreshed": {},
+    "error": None,
+}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _is_refreshing() -> bool:
+    with _refresh_lock:
+        return _refresh_info["status"] == "running"
+
+
+def _run_refresh_bg(categories: Optional[List[str]], force: bool) -> None:
+    """Regenerate the feed on a background thread using a guarded session."""
+    from app.database import RequestSessionLocal
+    db = RequestSessionLocal()
+    try:
+        if categories:
+            results = {
+                cat: recommendation_service.refresh_category(db, cat, force=force)
+                for cat in categories
+            }
+        else:
+            results = recommendation_service.refresh_all_categories(db, force=force)
+        with _refresh_lock:
+            _refresh_info.update(status="done", finished_at=_now_iso(),
+                                 refreshed=results, error=None)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[new-videos] background refresh failed")
+        with _refresh_lock:
+            _refresh_info.update(status="error", finished_at=_now_iso(),
+                                 error=str(exc))
+    finally:
+        db.close()
+
+
+def _start_background_refresh(categories: Optional[List[str]], force: bool) -> bool:
+    """Start a background refresh unless one is already running.
+
+    Returns True if a new refresh was started, False if one was in flight.
+    """
+    with _refresh_lock:
+        if _refresh_info["status"] == "running":
+            return False
+        _refresh_info.update(status="running", started_at=_now_iso(),
+                             finished_at=None, error=None)
+    t = threading.Thread(
+        target=_run_refresh_bg, args=(categories, force),
+        daemon=True, name="nv-refresh",
+    )
+    t.start()
+    return True
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
@@ -76,45 +144,52 @@ class SettingUpdateRequest(BaseModel):
 def get_feed(db: Session = Depends(get_db)):
     """Return the full discovery feed grouped by category.
 
-    Returns cached suggestions. If the feed has never been generated,
-    triggers an initial generation.
+    Returns cached suggestions immediately. If the feed has never been
+    generated, kicks off a background generation (non-blocking) so the request
+    returns straight away; the ``refreshing`` flag lets the UI poll for results.
     """
     feed = recommendation_service.get_feed(db)
 
-    # If all categories are empty, do an initial generation
+    # If all categories are empty, start an initial generation in the
+    # background instead of blocking the request for minutes on yt-dlp.
     has_any = any(
         len(cat_data["videos"]) > 0
         for cat_data in feed["categories"].values()
     )
-    if not has_any:
-        recommendation_service.refresh_all_categories(db, force=True)
-        feed = recommendation_service.get_feed(db)
+    if not has_any and not _is_refreshing():
+        _start_background_refresh(None, True)
 
+    feed["refreshing"] = _is_refreshing()
     return feed
 
 
 @router.post("/refresh")
-def refresh_feed(
-    req: RefreshRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
+def refresh_feed(req: RefreshRequest):
     """Regenerate the discovery feed (all or selected categories).
 
-    Runs generation synchronously for immediate feedback. For large-scale
-    generation, this could be moved to background tasks.
+    Generation runs on a background thread (it performs many slow yt-dlp
+    searches). Returns immediately; poll ``/refresh/status`` or the feed's
+    ``refreshing`` flag for completion.
     """
     if req.categories:
         invalid = [c for c in req.categories if c not in recommendation_service.CATEGORIES]
         if invalid:
             raise HTTPException(400, f"Unknown categories: {invalid}")
-        results = {}
-        for cat in req.categories:
-            results[cat] = recommendation_service.refresh_category(db, cat, force=req.force)
-    else:
-        results = recommendation_service.refresh_all_categories(db, force=req.force)
 
-    return {"status": "ok", "refreshed": results}
+    started = _start_background_refresh(req.categories, req.force)
+    return {
+        "status": "started" if started else "already_running",
+        "refreshing": True,
+    }
+
+
+@router.get("/refresh/status")
+def refresh_status():
+    """Report the state of the background feed refresh."""
+    with _refresh_lock:
+        info = dict(_refresh_info)
+    info["refreshing"] = info["status"] == "running"
+    return info
 
 
 # ── Cart endpoints ────────────────────────────────────────────────────────────
