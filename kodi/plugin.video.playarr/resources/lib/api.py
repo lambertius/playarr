@@ -124,6 +124,27 @@ class PlayarrApi(object):
             "min_video_rating": ex.get("min_video_rating"),
         }
 
+    def get_party_playlist(self):
+        """The configured Party Mode playlist as {"id", "name"}, or None.
+
+        When set (Settings -> Party Mode on the server), the server plays this
+        playlist shuffled for Party Mode, overriding the exclusion filters, so
+        the add-on shows its name instead of the exclusions summary."""
+        prefs = self.get_preferences()
+        pl = prefs.get("partyPlaylist") or {}
+        pid = pl.get("playlistId") if isinstance(pl, dict) else None
+        if not pid:
+            return None
+        name = None
+        try:
+            for p in (self.list_playlists() or []):
+                if p.get("id") == pid:
+                    name = p.get("name")
+                    break
+        except Exception:
+            pass
+        return {"id": pid, "name": name or u"playlist {0}".format(pid)}
+
     # ── playlists ──────────────────────────────────────────
 
     def list_playlists(self):

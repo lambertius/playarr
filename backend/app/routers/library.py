@@ -357,6 +357,55 @@ def party_mode(
     db: Session = Depends(get_db),
 ):
     """Return all matching video IDs shuffled randomly for party mode queue."""
+    from app.routers.preferences import get_preference
+
+    # ── Party Mode playlist override ─────────────────────────────────────
+    # If a Party Mode playlist is configured (Settings → Party Mode) it is
+    # authoritative: play its videos shuffled, ignoring the filters/exclusions
+    # below. This mirrors the web client's launch() playlist path so the *same*
+    # chosen playlist plays everywhere Party Mode runs — the web player, TV,
+    # Cast, and the Kodi add-on (which reaches Party Mode only via this endpoint
+    # and had no way to inherit the playlist before).
+    _pl_pref = get_preference(db, "partyPlaylist", {}) or {}
+    _pl_id = _pl_pref.get("playlistId") if isinstance(_pl_pref, dict) else None
+    if _pl_id:
+        from app.models import PlaylistEntry
+        _pl_rows = (
+            db.query(VideoItem.id, VideoItem.artist, VideoItem.title, QualitySignature.duration_seconds)
+            .join(PlaylistEntry, PlaylistEntry.video_id == VideoItem.id)
+            .outerjoin(QualitySignature, QualitySignature.video_id == VideoItem.id)
+            .filter(PlaylistEntry.playlist_id == _pl_id)
+            .all()
+        )
+        if _pl_rows:
+            _pl_ids = [r[0] for r in _pl_rows]
+            _pl_posters = {
+                row[0] for row in db.query(MediaAsset.video_id).filter(
+                    MediaAsset.asset_type == "poster",
+                    MediaAsset.video_id.in_(_pl_ids),
+                ).all()
+            }
+            _pl_plays = {
+                vid: cnt for vid, cnt in db.query(
+                    PlaybackHistory.video_id, func.count(PlaybackHistory.id)
+                ).filter(PlaybackHistory.video_id.in_(_pl_ids))
+                 .group_by(PlaybackHistory.video_id).all()
+            }
+            _pl_tracks = [
+                {
+                    "videoId": r[0],
+                    "artist": r[1],
+                    "title": r[2],
+                    "hasPoster": r[0] in _pl_posters,
+                    "playCount": _pl_plays.get(r[0], 0),
+                    "duration": r[3],
+                }
+                for r in _pl_rows
+            ]
+            random.shuffle(_pl_tracks)
+            return {"tracks": _pl_tracks, "total": len(_pl_tracks)}
+        # Empty or missing playlist → fall through to filter-based generation.
+
     query = db.query(VideoItem.id, VideoItem.artist, VideoItem.title, VideoItem.version_type, VideoItem.year, QualitySignature.duration_seconds).outerjoin(QualitySignature, QualitySignature.video_id == VideoItem.id)
 
     # --- Inclusion filters (same as list_videos) ---

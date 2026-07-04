@@ -142,16 +142,28 @@ def party_prompt(layout):
     plays what the server returns."""
     api = _api()
 
-    # Read-only summary, like the web TV/Cast prompt.
+    # Read-only summary, like the web TV/Cast prompt. When a Party Mode playlist
+    # is configured on the server it is authoritative (played shuffled, ignoring
+    # exclusions), so show that instead of the exclusions summary.
     try:
-        ex = api.get_exclusions()
+        playlist = api.get_party_playlist()
     except PlayarrApiError as exc:
         ku.error(str(exc))
         _end(succeeded=False)
         return
-    lines = _exclusion_summary(ex)
-    summary = u"\n".join(lines) if lines else u"No exclusions set."
-    message = u"{0}\n\nTo change what plays, open Playarr Settings on the server.".format(summary)
+    if playlist:
+        message = (u"Playing playlist: {0}\n\nShuffled. Change it in Playarr "
+                   u"Settings → Party Mode on the server.").format(playlist["name"])
+    else:
+        try:
+            ex = api.get_exclusions()
+        except PlayarrApiError as exc:
+            ku.error(str(exc))
+            _end(succeeded=False)
+            return
+        lines = _exclusion_summary(ex)
+        summary = u"\n".join(lines) if lines else u"No exclusions set."
+        message = u"{0}\n\nTo change what plays, open Playarr Settings on the server.".format(summary)
     if not ku.yesno(u"Start the Party?", message, yeslabel=u"Start", nolabel=u"Cancel"):
         _end(succeeded=False)
         return

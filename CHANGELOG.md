@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.9.40] - 2026-07-04
+
+### Fixed
+- **Party Mode playlist now applies everywhere, including Kodi** — choosing a Party Mode playlist (Settings → Party Mode) is now honoured by the server's party-mode endpoint, so the same playlist plays across the web player, TV, Cast, and the Kodi add-on. Previously the choice only took effect in the browser/TV/Cast (applied client-side); Kodi reached Party Mode only through the server and so ignored the playlist, falling back to filter-based generation. The Kodi "Start the Party" prompt now shows the active playlist name instead of the (now-overridden) exclusions summary.
+
 ## [1.9.39] - 2026-07-04
 
 ### Fixed
