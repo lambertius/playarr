@@ -758,7 +758,7 @@ def clear_history(
 def list_jobs(
     status: Optional[str] = None,
     job_type: Optional[str] = None,
-    limit: int = Query(200, ge=1, le=10000),
+    limit: int = Query(200, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
@@ -1343,9 +1343,6 @@ def retry_job(job_id: int, db: Session = Depends(get_db)):
         from app.tasks import metadata_refresh_task
         dispatch_task(metadata_refresh_task, job_id=job.id,
                       video_id=job.video_id, force=True)
-    elif job.job_type == "kodi_export":
-        from app.tasks import kodi_export_task as _kodi_task
-        dispatch_task(_kodi_task, job_id=job.id)
     elif job.job_type == "video_editor_scan":
         # Video editor scans run in a thread, not via dispatch_task
         import threading

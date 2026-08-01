@@ -54,7 +54,7 @@ celery_app = Celery(
     "playarr",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks"],
+    include=["app.tasks", "app.mutation_tasks"],
 )
 
 celery_app.conf.update(
@@ -66,6 +66,10 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    task_default_queue="processing",
+    task_routes={
+        "app.mutation_tasks.process_mutation_queue": {"queue": "mutations"},
+    },
     # Retry settings
     task_default_retry_delay=30,
     task_max_retries=3,

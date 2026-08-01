@@ -9,6 +9,7 @@ which pipeline stages have completed, enabling crash-recovery and resumability. 
 (logs.ndjson) replaces per-step DB log writes.
 """
 import json
+import hashlib
 import os
 import shutil
 import time
@@ -61,6 +62,19 @@ class ImportWorkspace:
                 os.remove(log_file)
         except Exception:
             pass
+
+    def prepare_run(self, input_data: dict) -> bool:
+        """Preserve valid checkpoints when the job input/policy is unchanged."""
+        encoded = json.dumps(input_data, sort_keys=True, default=str).encode("utf-8")
+        input_hash = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+        previous = self.read_artifact("run_identity")
+        resumed = bool(previous and previous.get("input_hash") == input_hash)
+        if not resumed:
+            self.reset()
+            self.write_artifact("input", input_data)
+            self.write_artifact("run_identity", {"input_hash": input_hash})
+        self.log(("Resuming" if resumed else "Starting") + f" job input {input_hash}")
+        return resumed
 
     # ── Path helpers ──────────────────────────────────────────────────
     @property
@@ -123,14 +137,30 @@ class ImportWorkspace:
         entry = data["stages"].get(stage, {})
         entry["status"] = status
         now = datetime.now(timezone.utc).isoformat()
-        if status == "running" and "started_at" not in entry:
+        if status == "running":
             entry["started_at"] = now
+            entry["attempt"] = int(entry.get("attempt", 0)) + 1
         if status in ("complete", "failed", "skipped"):
             entry["completed_at"] = now
         if extra:
             entry.update(extra)
         data["stages"][stage] = entry
         self._write_status(data)
+        try:
+            started = datetime.fromisoformat(entry["started_at"]) if entry.get("started_at") else None
+            duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000) if started and status != "running" else None
+            artifact = self.read_artifact(stage)
+            output = {"artifact": stage, "keys": sorted(artifact)[:30]} if isinstance(artifact, dict) else None
+            run_identity = self.read_artifact("run_identity") or {}
+            from app.services.stage_events import append_stage_event
+            append_stage_event(
+                self.job_id, stage, status, attempt=int(entry.get("attempt", 1)),
+                input_hash=run_identity.get("input_hash"), output=output,
+                duration_ms=duration_ms,
+                error={"message": str(extra.get("error"))} if extra.get("error") else None,
+            )
+        except Exception as exc:
+            logger.warning("Could not persist stage event %s/%s: %s", stage, status, exc)
 
     def is_stage_complete(self, stage: str) -> bool:
         data = self._read_status()
@@ -227,7 +257,7 @@ class ImportWorkspace:
                 finally:
                     db.close()
 
-            db_write_soon(_write)
+            db_write_soon(_write, coalesce_key=("job-log-sync", self.job_id))
         except Exception:
             pass  # logging sync must never crash the pipeline
 

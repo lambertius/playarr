@@ -318,7 +318,7 @@ def build_plan_from_workspace(ws) -> dict:
     # ── Deferred tasks ───────────────────────────────────────────────
     deferred = ["preview", "matching", "entity_artwork"]
     if mode == "advanced":
-        deferred.extend(["kodi_export", "orphan_cleanup"])
+        deferred.extend(["orphan_cleanup"])
         # Only run AI enrichment when the user selected AI for this import —
         # otherwise the deferred task would call the DB-configured provider and
         # spend tokens on every advanced import with AI mode off.

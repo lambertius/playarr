@@ -449,8 +449,9 @@ def _frontend_poll(Session, job_ids: list[int], tracker: StatusTracker):
             job = db.query(QueueJob).get(jid)
             if not job:
                 continue
-            # Record the status the frontend sees
-            tracker.record(jid, job.status)
+            # The transition writer records status while preserving event order.
+            # Poll observations can race the writer's post-commit instrumentation
+            # and must not be mixed into that ordered event stream.
             if job.status in ACTIVE_STATUSES:
                 active += 1
             elif job.status in TERMINAL_STATUSES:

@@ -6,7 +6,7 @@ All endpoints are under /api/new-videos/*.
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -99,6 +99,7 @@ class RefreshRequest(BaseModel):
 
 class CartAddRequest(BaseModel):
     suggested_video_id: int
+    idempotency_key: Optional[str] = Field(default=None, max_length=200)
 
 
 class CartRemoveRequest(BaseModel):
@@ -115,8 +116,9 @@ class CartImportAllRequest(BaseModel):
 
 class DismissRequest(BaseModel):
     suggested_video_id: int
-    dismissal_type: str = "temporary"  # temporary | permanent
+    dismissal_type: Literal["temporary", "permanent"] = "temporary"
     reason: Optional[str] = None
+    idempotency_key: Optional[str] = Field(default=None, max_length=200)
 
 
 class UndismissRequest(BaseModel):
@@ -363,41 +365,23 @@ def import_all_cart(req: CartImportAllRequest = CartImportAllRequest(), db: Sess
 
 # ── Dismissal endpoints ──────────────────────────────────────────────────────
 
-@router.post("/dismiss")
+@router.post("/dismiss", status_code=202)
 def dismiss_video(req: DismissRequest, db: Session = Depends(get_db)):
-    """Dismiss a suggested video (temporarily or permanently)."""
+    """Queue an idempotent interactive dismissal and return immediately."""
     sv = db.query(SuggestedVideo).filter(SuggestedVideo.id == req.suggested_video_id).first()
     if not sv:
         raise HTTPException(404, "Suggested video not found")
-
-    dismissal = SuggestedVideoDismissal(
-        suggested_video_id=sv.id,
-        dismissal_type=req.dismissal_type,
-        reason=req.reason,
-        provider=sv.provider,
-        provider_video_id=sv.provider_video_id,
-    )
-    db.add(dismissal)
-
-    feedback_service.record_feedback(
-        db,
-        feedback_type="permanently_dismissed" if req.dismissal_type == "permanent" else "dismissed",
-        suggested_video_id=sv.id,
-        provider=sv.provider,
-        provider_video_id=sv.provider_video_id,
-        artist=sv.artist,
-        category=sv.category,
-    )
-
-    category = sv.category
-    db.commit()
-    category_feed = recommendation_service.get_feed(db)["categories"][category]["videos"]
-    return {
-        "status": "dismissed",
-        "type": req.dismissal_type,
-        "replacement": category_feed[-1] if category_feed else None,
-        "exhausted": not bool(category_feed),
-    }
+    from app.services.mutation_api import accept_mutation, mutation_idempotency_key
+    from app.services.mutation_coordinator import CommandRequest, MutationPriority
+    stable_id = f"{sv.provider}:{sv.provider_video_id}"
+    return accept_mutation(db, CommandRequest(
+        command_type="new_videos.dismiss", entity_type="suggested_video",
+        entity_stable_id=stable_id,
+        payload=req.model_dump(exclude={"idempotency_key"}),
+        idempotency_key=mutation_idempotency_key(
+            "new_videos.dismiss", stable_id, req.idempotency_key,
+        ), priority=MutationPriority.INTERACTIVE,
+    ))
 
 
 @router.post("/undismiss")
@@ -441,62 +425,22 @@ def list_dismissed(
 
 # ── Quick-add (bypasses cart) ─────────────────────────────────────────────────
 
-@router.post("/add")
+@router.post("/add", status_code=202)
 def add_video(req: CartAddRequest, db: Session = Depends(get_db)):
-    """Import a suggested video immediately (bypasses cart).
-
-    Creates an import job using the standard Playarr pipeline.
-    """
-    from app.models import ProcessingJob, JobStatus
-    from app.worker import dispatch_task
-    from app.tasks import import_video_task
-
+    """Queue a New Videos import through the priority mutation actor."""
     sv = db.query(SuggestedVideo).filter(SuggestedVideo.id == req.suggested_video_id).first()
     if not sv:
         raise HTTPException(404, "Suggested video not found")
-
-    job = ProcessingJob(
-        job_type="import_url",
-        status=JobStatus.queued,
-        input_url=sv.url,
-        display_name=f"{sv.artist} \u2013 {sv.title} \u203a New Videos Quick Add" if sv.artist and sv.title else sv.url,
-        action_label="New Videos quick add",
-    )
-    db.add(job)
-    db.flush()
-
-    # Auto-dismiss so the suggestion disappears from the feed
-    dismissal = SuggestedVideoDismissal(
-        suggested_video_id=sv.id,
-        dismissal_type="permanent",
-        reason="auto-dismissed on add",
-        provider=sv.provider,
-        provider_video_id=sv.provider_video_id,
-    )
-    db.add(dismissal)
-
-    feedback_service.record_feedback(
-        db,
-        feedback_type="added",
-        suggested_video_id=sv.id,
-        provider=sv.provider,
-        provider_video_id=sv.provider_video_id,
-        artist=sv.artist,
-        category=sv.category,
-    )
-
-    db.commit()
-    dispatch_task(import_video_task, job_id=job.id, url=sv.url,
-                  normalize=True, scrape=True, scrape_musicbrainz=True)
-
-    category_feed = recommendation_service.get_feed(db)["categories"][sv.category]["videos"]
-    return {
-        "status": "importing",
-        "job_id": job.id,
-        "category": sv.category,
-        "replacement": category_feed[-1] if category_feed else None,
-        "exhausted": not bool(category_feed),
-    }
+    from app.services.mutation_api import accept_mutation, mutation_idempotency_key
+    from app.services.mutation_coordinator import CommandRequest, MutationPriority
+    stable_id = f"{sv.provider}:{sv.provider_video_id}"
+    return accept_mutation(db, CommandRequest(
+        command_type="new_videos.add", entity_type="suggested_video",
+        entity_stable_id=stable_id, payload={"suggested_video_id": sv.id},
+        idempotency_key=mutation_idempotency_key(
+            "new_videos.add", stable_id, req.idempotency_key,
+        ), priority=MutationPriority.INTERACTIVE,
+    ))
 
 
 # ── Feedback endpoint ────────────────────────────────────────────────────────

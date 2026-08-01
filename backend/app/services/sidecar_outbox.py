@@ -28,14 +28,23 @@ def schedule_sidecar_write(
     if not video.playarr_track_id:
         video.playarr_track_id = ids["playarr_track_id"]
     video.revision = max(1, int(video.revision or 1))
-    video.sidecar_revision = max(int(video.sidecar_revision or 0) + 1, video.revision)
-
-    existing = db.query(SidecarOutbox).filter(
-        SidecarOutbox.video_id == video.id,
-        SidecarOutbox.entity_revision == video.sidecar_revision,
-    ).one_or_none()
+    existing = (
+        db.query(SidecarOutbox)
+        .filter(
+            SidecarOutbox.video_id == video.id,
+            SidecarOutbox.status.in_(("pending", "retry")),
+        )
+        .order_by(SidecarOutbox.created_at.desc())
+        .first()
+    )
     if existing is not None:
+        video.sidecar_revision = max(int(video.sidecar_revision or 0), video.revision)
+        existing.entity_revision = video.sidecar_revision
+        existing.entity_stable_id = video.playarr_video_id
+        existing.operation_id = operation_id or existing.operation_id
         return existing
+
+    video.sidecar_revision = max(int(video.sidecar_revision or 0) + 1, video.revision)
 
     target_path = None
     if video.folder_path:
@@ -86,8 +95,8 @@ def process_next_sidecar(session_factory: sessionmaker) -> bool:
         if video.playarr_video_id != entry.entity_stable_id:
             raise ValueError("sidecar stable identity changed before reconciliation")
 
-        from app.services.playarr_xml import parse_playarr_xml, write_playarr_xml
-        path = write_playarr_xml(video, db)
+        from app.services.playarr_xml import parse_playarr_xml, _write_playarr_xml_now
+        path = _write_playarr_xml_now(video, db)
         if not path:
             raise FileNotFoundError("video folder is unavailable")
         parsed = parse_playarr_xml(path)

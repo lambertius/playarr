@@ -6,13 +6,16 @@
 ;   2. Run `python -c "..."` icon generation (or build_installer.py does it)
 ;   3. Compile with: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ;
-; Output: Output\PlayarrSetup.exe
+; Output: Output\PlayarrSetup-1.11.0.exe
 
 #define MyAppName "Playarr"
-#define MyAppVersion "1.10.0"
+#define MyAppVersion "1.11.0"
 #define MyAppPublisher "Playarr Contributors"
 #define MyAppURL "https://github.com/lambertius/playarr"
 #define MyAppExeName "Playarr.exe"
+#ifndef BuildDir
+#define BuildDir "dist\Playarr"
+#endif
 
 [Setup]
 AppId={{E7A3F1B2-4C5D-4E6F-8A9B-0C1D2E3F4A5B}
@@ -27,7 +30,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=LICENSE
 OutputDir=Output
-OutputBaseFilename=PlayarrSetup
+OutputBaseFilename=PlayarrSetup-{#MyAppVersion}
 SetupIconFile=playarr.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
@@ -53,10 +56,10 @@ Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; Main executable
-Source: "dist\Playarr\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 ; All supporting files and folders from the PyInstaller output
-Source: "dist\Playarr\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Icon file
 Source: "playarr.ico"; DestDir: "{app}"; Flags: ignoreversion

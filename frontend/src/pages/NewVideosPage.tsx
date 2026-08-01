@@ -176,7 +176,6 @@ export function NewVideosPage() {
 }
 
 function CategorySection({
-  category: _category,
   label,
   description,
   icon: Icon,

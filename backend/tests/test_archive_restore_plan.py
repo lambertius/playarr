@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -46,14 +47,21 @@ def test_restore_requires_persisted_preview_and_reports_integrity(tmp_path, monk
     db = _session()
     video = VideoItem(
         artist="Artist", title="Title", file_path=str(current), folder_path=str(current_dir),
+        playarr_video_id="PVD-archive001",
     )
     db.add(video)
     db.commit()
     db.refresh(video)
     write_archive_manifest(
         str(archived), str(current), str(library), video_id=video.id,
-        video_stable_id=video.stable_id, artist="Artist", title="Title",
+        playarr_video_id=video.playarr_video_id, operation_id="archive-operation-1",
+        artist="Artist", title="Title",
     )
+    manifest = json.loads((archive_dir / ".playarr-archive.json").read_text())
+    assert manifest["playarr_video_id"] == video.playarr_video_id
+    assert manifest["operation_id"] == "archive-operation-1"
+    assert len(manifest["checksum_sha256"]) == 64
+    assert "video_stable_id" not in manifest
 
     preview = preview_archive_restore(
         ArchiveRestorePreviewRequest(folder=str(archive_dir)), db,
@@ -73,6 +81,57 @@ def test_restore_requires_persisted_preview_and_reports_integrity(tmp_path, monk
     assert integrity["checked"] == 1
     assert integrity["ok"] == 1
     assert integrity["deleted"] == 0
+
+
+def test_archive_resolves_rebuilt_database_by_stable_id_not_reused_row_id(
+    tmp_path, monkeypatch,
+):
+    library = tmp_path / "library"
+    archive_dir = library / "_archive" / "Artist" / "Title"
+    archive_dir.mkdir(parents=True)
+    archived = archive_dir / "Title.mkv"
+    archived.write_bytes(b"portable-original")
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: SimpleNamespace(get_all_library_dirs=lambda: [str(library)]),
+    )
+    db = _session()
+    original = VideoItem(
+        stable_id="stable-portable-video", artist="Artist", title="Title",
+        playarr_video_id="PVD-portable01",
+        file_path=str(library / "old.mkv"), folder_path=str(library),
+    )
+    db.add(original)
+    db.commit()
+    original_numeric_id = original.id
+    write_archive_manifest(
+        str(archived), str(library / "old.mkv"), str(library),
+        video_id=original.id, playarr_video_id=original.playarr_video_id,
+        operation_id="portable-archive-operation",
+    )
+
+    db.delete(original)
+    db.commit()
+    unrelated = VideoItem(
+        stable_id="unrelated", artist="Wrong", title="Video",
+        file_path=str(library / "wrong.mkv"), folder_path=str(library),
+    )
+    rebuilt = VideoItem(
+        stable_id="stable-portable-video", artist="Artist", title="Title",
+        playarr_video_id="PVD-portable01",
+        file_path=str(library / "rebuilt.mkv"), folder_path=str(library),
+    )
+    db.add_all([unrelated, rebuilt])
+    db.commit()
+    assert unrelated.id == original_numeric_id
+    assert rebuilt.id != original_numeric_id
+
+    preview = preview_archive_restore(
+        ArchiveRestorePreviewRequest(folder=str(archive_dir)), db,
+    )
+    assert preview["video_id"] == rebuilt.id
+    assert preview["playarr_video_id"] == rebuilt.playarr_video_id
+    assert preview["archive_operation_id"] == "portable-archive-operation"
 
 
 def test_processing_job_inherits_request_and_gets_operation_id():

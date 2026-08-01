@@ -141,10 +141,7 @@ def execute_command(
             command.status = "succeeded"
             command.completed_at = datetime.now(timezone.utc)
             command.error_json = None
-            # Handler output is diagnostic only and never changes the original
-            # immutable command payload.
-            if output:
-                command.error_json = {"result": output}
+            command.result_json = output or None
             db.commit()
             db.refresh(command)
             return command
@@ -154,7 +151,16 @@ def execute_command(
             if not locked or attempt >= max_attempts:
                 _mark_failed(session_factory, command_id, exc, retryable=locked)
                 raise
+            _record_database_retry(session_factory, command_id, exc, attempt)
             time.sleep(min(0.5, 0.025 * (2 ** (attempt - 1))) + random.uniform(0, 0.025))
+        except StaleRevisionError as exc:
+            db.rollback()
+            _mark_failed(
+                session_factory, command_id, exc, retryable=False,
+                code="stale_revision",
+                extra={"expected_revision": exc.expected, "current_revision": exc.current},
+            )
+            raise
         except Exception as exc:
             db.rollback()
             _mark_failed(session_factory, command_id, exc, retryable=False)
@@ -169,6 +175,8 @@ def _mark_failed(
     exc: Exception,
     *,
     retryable: bool,
+    code: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     db = session_factory()
     try:
@@ -177,9 +185,32 @@ def _mark_failed(
             command.status = "failed"
             command.completed_at = datetime.now(timezone.utc)
             command.error_json = {
-                "code": "database_locked" if retryable else "mutation_failed",
+                "code": code or ("database_locked" if retryable else "mutation_failed"),
                 "message": str(exc),
                 "retryable": retryable,
+                **(extra or {}),
+            }
+            db.commit()
+    finally:
+        db.close()
+
+
+def _record_database_retry(
+    session_factory: sessionmaker,
+    command_id: str,
+    exc: OperationalError,
+    attempt: int,
+) -> None:
+    db = session_factory()
+    try:
+        command = db.get(MutationCommand, command_id)
+        if command is not None:
+            command.attempts += 1
+            command.error_json = {
+                "code": "database_locked_retry",
+                "message": str(exc),
+                "retryable": True,
+                "attempt": attempt,
             }
             db.commit()
     finally:
@@ -187,14 +218,32 @@ def _mark_failed(
 
 
 def backlog_stats(db: Session) -> dict[str, Any]:
-    rows = db.query(MutationCommand).filter(
+    pending_query = db.query(MutationCommand).filter(
         MutationCommand.status.in_(("pending", "running"))
-    ).order_by(MutationCommand.created_at.asc()).all()
+    )
+    pending = pending_query.count()
+    created = pending_query.with_entities(func.min(MutationCommand.created_at)).scalar()
     now = datetime.now(timezone.utc)
     oldest_age = 0.0
-    if rows:
-        created = rows[0].created_at
+    if created:
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
         oldest_age = max(0.0, (now - created).total_seconds())
-    return {"pending": len(rows), "oldest_age_seconds": round(oldest_age, 3)}
+    return {"pending": pending, "oldest_age_seconds": round(oldest_age, 3)}
+
+
+def recover_interrupted_commands(db: Session) -> int:
+    """Return commands abandoned by a stopped actor to the durable queue."""
+    recovered = db.query(MutationCommand).filter(
+        MutationCommand.status == "running"
+    ).update({
+        MutationCommand.status: "pending",
+        MutationCommand.started_at: None,
+        MutationCommand.error_json: {
+            "code": "worker_restarted",
+            "message": "Mutation worker stopped before recording a terminal result",
+            "retryable": True,
+        },
+    }, synchronize_session=False)
+    db.commit()
+    return recovered

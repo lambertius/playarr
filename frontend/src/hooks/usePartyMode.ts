@@ -7,8 +7,8 @@ import { useToast } from "@/components/Toast";
 import { getPref, setPref } from "@/lib/preferences";
 import type { PartyModeParams, PartyModeExclusions } from "@/types";
 
-// Server-stored preference groups (shared with the Kodi add-on, which inherits
-// the exclusions server-side).  LEGACY_* keys seed the one-time migration.
+// Server-stored preference groups shared by browser, TV and cast clients.
+// LEGACY_* keys seed the one-time migration.
 const EXCLUSIONS_GROUP = "partyExclusions";
 const ANIMATION_GROUP = "partyAnimation";
 const ERA_GROUP = "partyEra";
@@ -69,7 +69,7 @@ export function saveAnimationSettings(settings: PartyModeAnimationSettings) {
 }
 
 // "Party like it's…" — cap playback at a target year and weight the queue
-// toward that era.  Stored server-side so the Kodi add-on inherits it too.
+// toward that era. Stored server-side so every client inherits it.
 export interface PartyModeEraSettings {
   enabled: boolean;
   year: number;

@@ -45,6 +45,7 @@ def _redis_health(settings) -> dict:
 def operation_health(db: Session = Depends(get_db)) -> dict:
     settings = get_settings()
     from app.version import APP_VERSION
+    from app.pipeline_url.write_queue import stats as cosmetic_write_stats
     file_counts = {
         status: count
         for status, count in db.query(
@@ -82,6 +83,7 @@ def operation_health(db: Session = Depends(get_db)) -> dict:
         },
         "mutation_queue_limit": settings.mutation_queue_max,
         "mutations": backlog_stats(db),
+        "cosmetic_writes": cosmetic_write_stats(),
         "sidecars": outbox_stats(db),
         "tmvdb_contributions": contribution_counts,
         "files": file_counts,
@@ -111,10 +113,33 @@ def migration_reconciliation_report(db: Session = Depends(get_db)) -> dict:
     return post_migration_reconciliation(db)
 
 
+@router.get("/migration/status")
+def migration_status_report() -> dict:
+    """Return the persisted startup preflight/backup/reconciliation report."""
+    from app.runtime_dirs import get_runtime_dirs
+    from app.services.startup_migration import load_migration_report
+    report_path = get_runtime_dirs().data_dir / "migration-status.json"
+    report = load_migration_report(report_path)
+    if report is None:
+        raise HTTPException(status_code=404, detail={
+            "code": "migration_report_not_found",
+            "message": "No startup migration report has been recorded",
+            "operation_id": None,
+            "retryable": False,
+            "field_errors": {},
+            "diagnostics_id": None,
+        })
+    return report
+
+
 @router.get("/{operation_id}")
 def operation_status(operation_id: str, db: Session = Depends(get_db)) -> dict:
     command = db.get(MutationCommand, operation_id)
     if command is not None:
+        linked_file = None
+        if command.result_json and command.result_json.get("file_operation_id"):
+            linked_file = db.get(FileOperation, command.result_json["file_operation_id"])
+        effective_status = linked_file.status if linked_file is not None else command.status
         return {
             "operation_id": command.id,
             "request_id": command.request_id,
@@ -122,9 +147,13 @@ def operation_status(operation_id: str, db: Session = Depends(get_db)) -> dict:
             "operation_type": command.command_type,
             "entity_type": command.entity_type,
             "entity_stable_id": command.entity_stable_id,
-            "status": command.status,
+            "status": effective_status,
             "attempts": command.attempts,
-            "error": command.error_json,
+            "result": {
+                **(command.result_json or {}),
+                **({"file_operation": linked_file.plan_json} if linked_file else {}),
+            } or None,
+            "error": linked_file.error_json if linked_file else command.error_json,
             "created_at": command.created_at,
             "started_at": command.started_at,
             "completed_at": command.completed_at,

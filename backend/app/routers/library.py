@@ -10,13 +10,11 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Optional, List
-
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.attributes import flag_modified
-
 from app.database import get_db
 from app.models import VideoItem, Genre, MediaAsset, video_genres, PlaybackHistory, QualitySignature
 from app.metadata.models import ArtistEntity, AlbumEntity, TrackEntity
@@ -27,11 +25,8 @@ from app.schemas import (
     SetParentVideoRequest, ArtistEntityOut, ProcessingStateOut,
     SourceOut, SourceCreate, SourceUpdate,
 )
-
 logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/library", tags=["Library"])
-
 # Quality bucket boundaries (upper limits, inclusive) — resolutions in-between
 # round UP to the next bucket.  e.g. 944p → 1080p bucket.
 QUALITY_BUCKETS = [
@@ -1602,8 +1597,8 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
     item = db.query(VideoItem).get(video_id)
     if not item:
         raise HTTPException(status_code=404, detail="Video not found")
-
-    # Save snapshot before editing
+    from app.services.optimistic_revision import require_expected_revision
+    require_expected_revision(item, update.expected_revision, current_state=lambda: get_video(video_id, db))
     from app.tasks import _save_metadata_snapshot, _get_or_create_genre
     from app.user_identity import get_instance_user_id
     _uid = get_instance_user_id(db)
@@ -1771,7 +1766,7 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
             _fp_flag(item, "field_verifications")
 
         item.last_edited_by = _uid
-
+    item.revision += 1
     db.commit()
     db.refresh(item)
 
@@ -2573,13 +2568,18 @@ def open_folder(video_id: int, db: Session = Depends(get_db)):
 
 # ─── Rename files to expected pattern ─────────────────────
 
-@router.post("/{video_id}/rename", response_model=VideoItemOut)
+@router.post("/{video_id}/rename", status_code=410)
 def rename_to_expected(video_id: int, db: Session = Depends(get_db)):
     """
     Rename the video's folder, video file, NFO, and all associated files
     to match the expected naming pattern (Artist - Title [Resolution]).
     Updates all DB path references.
     """
+    raise HTTPException(status_code=410, detail={
+        "code": "preview_required",
+        "message": "Use /api/library/{video_id}/rename-preview then rename-commit",
+        "video_id": video_id,
+    })
     from app.services.file_organizer import build_folder_name, sanitize_filename, write_nfo_file, build_library_subpath
     from app.ai.models import AIThumbnail
     from app.models import Source

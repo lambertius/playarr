@@ -554,7 +554,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
   }, [tvMode, track?.queueEntryId, track?.videoId, transcode]);
 
   const [videoHovered, setVideoHovered] = useState(false);
-  const [_videoAspect, setVideoAspect] = useState("16 / 9");
+  const [, setVideoAspect] = useState("16 / 9");
   const [nativeWidth, setNativeWidth] = useState(1920);
   const [nativeHeight, setNativeHeight] = useState(1080);
   const [boxSize, setBoxSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
@@ -1060,7 +1060,6 @@ function ScrollingText({ text, className, overlayDuration = 30 }: { text: string
 // ── Metadata overlay card ──
 function MetadataOverlay({
   detail,
-  track: _track,
   fading,
   opacity,
   overlaySize,

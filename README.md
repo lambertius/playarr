@@ -3,7 +3,7 @@
 A self-hosted music video manager inspired by Sonarr, Radarr, and Lidarr. Download, organise, enrich, and browse your music video collection through a modern web interface.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.10.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.11.0-green.svg)
 
 > **Note:** Playarr is in its first public release. Contributions, issues, and feedback are welcome.
 
@@ -228,7 +228,7 @@ Configure your preferred AI provider and API key in Settings > AI.
 - [x] Windows desktop launcher with system tray
 - [x] In-process background tasks (no Redis required)
 - [x] Platform-appropriate data directories
-- [ ] Windows installer (Inno Setup / NSIS)
+- [x] Windows installer (Inno Setup)
 - [ ] Consolidate pipeline implementations into a single unified pipeline
 - [ ] Expand test coverage (unit + integration)
 - [ ] PostgreSQL as a first-class database option

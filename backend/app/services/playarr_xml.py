@@ -12,6 +12,7 @@ The Kodi .nfo is left untouched — this is a separate, Playarr-specific file.
 import logging
 import os
 import hashlib
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import NAMESPACE_URL, uuid5
@@ -50,10 +51,12 @@ def _now_iso() -> str:
 def _rel_path(file_path: str, folder_path: str) -> str:
     """Convert an absolute path to a path relative to the video folder."""
     try:
-        return os.path.relpath(file_path, folder_path)
+        relative = os.path.relpath(file_path, folder_path)
     except ValueError:
-        # Different drive on Windows
-        return file_path
+        relative = os.path.basename(file_path)
+    if os.path.isabs(relative) or relative == ".." or relative.startswith(f"..{os.sep}"):
+        return Path(file_path).name
+    return Path(relative).as_posix()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -374,9 +377,15 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
 
     # Dismissed duplicate IDs — video IDs confirmed as "not a duplicate"
     if video.dismissed_duplicate_ids:
-        dd = SubElement(flags, "dismissed_duplicate_ids")
+        dd = SubElement(flags, "dismissed_duplicate_refs")
         for did in video.dismissed_duplicate_ids:
-            _txt(dd, "id", did)
+            related = db.get(VideoItem, int(did)) if str(did).isdigit() else None
+            stable_ref = getattr(related, "playarr_video_id", None) if related else str(did)
+            if related and not stable_ref:
+                from app.services.content_id import compute_ids_for_video
+                stable_ref = compute_ids_for_video(related)["playarr_video_id"]
+            if stable_ref and not str(stable_ref).isdigit():
+                _txt(dd, "video_ref", stable_ref)
 
     # Rename dismissed — user accepted the current filename
     if video.rename_dismissed:
@@ -389,7 +398,15 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
         rv_data = video.related_versions if isinstance(video.related_versions, list) else []
         for rv in rv_data:
             entry = SubElement(rv_el, "entry")
-            _opt(entry, "video_id", rv.get("video_id"))
+            related_id = rv.get("video_id")
+            related = db.get(VideoItem, int(related_id)) if str(related_id).isdigit() else None
+            stable_ref = rv.get("playarr_video_id") or (
+                getattr(related, "playarr_video_id", None) if related else None
+            )
+            if related and not stable_ref:
+                from app.services.content_id import compute_ids_for_video
+                stable_ref = compute_ids_for_video(related)["playarr_video_id"]
+            _opt(entry, "video_ref", stable_ref)
             _opt(entry, "label", rv.get("label"))
 
     # ── entity references (for cross-referencing on reimport) ──
@@ -486,7 +503,7 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     return root
 
 
-def write_playarr_xml(video, db: Session) -> Optional[str]:
+def _write_playarr_xml_now(video, db: Session) -> Optional[str]:
     """
     Write the .playarr.xml sidecar for a VideoItem.
 
@@ -520,6 +537,23 @@ def write_playarr_xml(video, db: Session) -> Optional[str]:
 
     logger.info(f"Wrote Playarr XML: {xml_path}")
     return xml_path
+
+
+def write_playarr_xml(video, db: Session, *, operation_id: str | None = None) -> Optional[str]:
+    """Queue a crash-safe sidecar write in the caller's transaction.
+
+    This compatibility entry point deliberately performs no filesystem I/O.
+    Existing mutation paths therefore gain the durable outbox boundary while
+    callers are migrated to the more explicit ``schedule_sidecar_write`` API.
+    The reconciliation actor is the only code allowed to materialise XML.
+    """
+    if not video.folder_path:
+        return None
+    if video.id is None:
+        db.flush()
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    entry = schedule_sidecar_write(db, video, operation_id=operation_id)
+    return entry.target_path
 
 
 # ═══════════════════════════════════════════════════════════
@@ -874,11 +908,16 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
                 })
 
         # Dismissed duplicate IDs
+        dd_refs = flags_el.find("dismissed_duplicate_refs")
+        if dd_refs is not None:
+            refs = [_text(el) for el in dd_refs.findall("video_ref") if _text(el)]
+            if refs:
+                result["dismissed_duplicate_refs"] = refs
         dd_el = flags_el.find("dismissed_duplicate_ids")
         if dd_el is not None:
             ids = [_int(id_el) for id_el in dd_el.findall("id") if _int(id_el)]
             if ids:
-                result["dismissed_duplicate_ids"] = ids
+                result["legacy_dismissed_duplicate_ids"] = ids
 
         # Rename dismissed
         rd_text = _text(flags_el.find("rename_dismissed"))
@@ -891,7 +930,8 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         result["related_versions"] = []
         for entry in rv_el.findall("entry"):
             result["related_versions"].append({
-                "video_id": _int(entry.find("video_id")),
+                "video_ref": _text(entry.find("video_ref")) or None,
+                "legacy_video_id": _int(entry.find("video_id")),
                 "label": _text(entry.find("label")) or None,
             })
 
@@ -963,6 +1003,29 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
     if ts is not None:
         result["original_created_at"] = _text(ts.find("created_at")) or None
         result["original_updated_at"] = _text(ts.find("updated_at")) or None
+
+    known_top_level = {
+        "portable_identity", "identity", "genres", "musicbrainz", "playarr_ids",
+        "artists", "artist_consolidation", "sources", "quality", "artwork",
+        "scene_analysis", "file", "ratings", "archive", "processing_state",
+        "flags", "related_versions", "entity_refs", "field_provenance", "timestamps",
+    }
+    known_attributes = {
+        "version", "schemaVersion", "playarrVersion", "sidecarRevision",
+        "entityRevision", "generatedAt", "exported", "playarrVideoId",
+        "playarrTrackId", "entityId", "contentHash",
+    }
+    unknown_fields = [
+        f"/{child.tag}" for child in root if child.tag not in known_top_level
+    ] + [
+        f"/@{name}" for name in root.attrib if name not in known_attributes
+    ]
+    result["validation_report"] = {
+        "source_schema_version": result["xml_version"],
+        "target_schema_version": PLAYARR_XML_VERSION,
+        "migrated": result["xml_version"] != PLAYARR_XML_VERSION,
+        "unknown_fields": sorted(unknown_fields),
+    }
 
     return result
 

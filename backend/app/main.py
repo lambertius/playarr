@@ -31,12 +31,13 @@ from app.routers import scraper_test as scraper_test_router
 from app.routers import tmvdb as tmvdb_router
 from app.routers import tools as tools_router
 from app.routers import operations as operations_router
+from app.routers import mutations as mutations_router
 from app.new_videos import router as new_videos_router
-
 
 def _apply_schema_upgrades(eng):
     """Add columns that don't exist yet (SQLite create_all won't alter existing tables)."""
     from sqlalchemy import text, inspect
+    from app.services.operation_schema import apply_operation_schema_repairs
     insp = inspect(eng)
     if "processing_jobs" not in insp.get_table_names():
         return  # Fresh install — create_all already handles it
@@ -48,8 +49,28 @@ def _apply_schema_upgrades(eng):
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN pipeline_steps JSON"))
         if "action_label" not in cols:
             conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN action_label VARCHAR(200)"))
+        # Migration 024 added request/operation correlation through Alembic,
+        # but bundled installs upgrade existing SQLite databases through this
+        # function.  Keep the repair resumable because a previous startup may
+        # have stopped after adding only part of the schema.
+        if "request_id" not in cols:
+            conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN request_id VARCHAR(80)"))
+        if "operation_id" not in cols:
+            conn.execute(text("ALTER TABLE processing_jobs ADD COLUMN operation_id VARCHAR(80)"))
+        conn.execute(text(
+            "UPDATE processing_jobs SET operation_id = 'legacy_job_' || id "
+            "WHERE operation_id IS NULL OR operation_id = ''"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_processing_jobs_request_id "
+            "ON processing_jobs(request_id)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_processing_jobs_operation_id "
+            "ON processing_jobs(operation_id)"
+        ))
 
-    # VideoItem entity FK columns
+    apply_operation_schema_repairs(eng)
     if "video_items" in insp.get_table_names():
         vi_cols = {c["name"] for c in insp.get_columns("video_items")}
         with eng.begin() as conn:
@@ -1233,8 +1254,8 @@ async def lifespan(app: FastAPI):
 
     s = get_settings()
     s.ensure_directories()
-
-    # Enable persistent file logging now that directories exist
+    from app.services.deployment_profile import validate_deployment_profile
+    validate_deployment_profile(s)
     _setup_file_logging()
 
     # Log runtime paths for diagnostics
@@ -1248,16 +1269,16 @@ async def lifespan(app: FastAPI):
     if _is_first_run:
         logger.info("First run detected — initializing database...")
 
-    # Create tables (dev convenience; production uses Alembic)
-    Base.metadata.create_all(bind=engine)
-
-    # Add new columns to existing tables (SQLite doesn't do this via create_all)
-    _apply_schema_upgrades(engine)
-
-    # Stamp the current application version into the DB and check for
-    # forward-compatibility (newer DB accessed by older app).
-    _stamp_db_version(engine)
-
+    # MIG-001/MIG-003: preflight, backup, restore-on-failure, reconciliation.
+    from app.services.migration_audit import post_migration_reconciliation
+    from app.services.startup_migration import run_startup_migration
+    run_startup_migration(
+        engine, create_schema=lambda: Base.metadata.create_all(bind=engine),
+        apply_upgrades=lambda: _apply_schema_upgrades(engine), stamp_version=lambda: _stamp_db_version(engine),
+        backup_dir=rdirs.data_dir / "backups",
+        report_path=rdirs.data_dir / "migration-status.json",
+        reconcile=post_migration_reconciliation, target_version=APP_VERSION,
+    )
     # Kill zombie ffmpeg processes left over from a previous crash/restart
     _kill_zombie_ffmpeg()
 
@@ -1318,18 +1339,8 @@ async def lifespan(app: FastAPI):
         logger.exception("Could not install asyncio exception handler")
     heartbeat_task = asyncio.create_task(_diagnostics_heartbeat())
 
-    # Reconcile committed database mutations to portable sidecars without
-    # delaying request acknowledgement. Failures remain visible in the outbox.
-    async def _sidecar_reconciler():
-        from app.database import SessionLocal
-        from app.services.sidecar_outbox import process_next_sidecar
-        from app.services.contribution_outbox import process_next_contribution
-        while True:
-            processed = await asyncio.to_thread(process_next_sidecar, SessionLocal)
-            contribution = await asyncio.to_thread(process_next_contribution, SessionLocal)
-            await asyncio.sleep(0.05 if processed or contribution else 1.0)
-
-    sidecar_task = asyncio.create_task(_sidecar_reconciler())
+    from app.services.reconciliation_runtime import durable_reconciler
+    sidecar_task = asyncio.create_task(durable_reconciler())
 
     yield
 
@@ -1377,6 +1388,8 @@ async def correlation_id_middleware(request: Request, call_next):
         reset_request_id(token)
 
 
+from app.services.api_errors import error_envelope, install_structured_error_handlers
+install_structured_error_handlers(app)
 @app.exception_handler(Exception)
 async def _log_unhandled_exception(request: Request, exc: Exception):
     """Record the traceback for any unhandled request error to playarr.log (and
@@ -1395,13 +1408,14 @@ async def _log_unhandled_exception(request: Request, exc: Exception):
     except Exception:
         pass
     from fastapi.responses import JSONResponse
-    return JSONResponse({
-        "detail": "Internal Server Error",
-        "request_id": getattr(request.state, "request_id", None),
-    }, status_code=500)
+    return JSONResponse(error_envelope(
+        request, code="internal_error", message="Internal Server Error",
+        retryable=True, diagnostics_id=getattr(request.state, "request_id", None),
+    ), status_code=500)
 
 # Include routers
 app.include_router(library.router)
+app.include_router(mutations_router.router)
 app.include_router(jobs.router)
 app.include_router(playback.router)
 app.include_router(settings_router.router)

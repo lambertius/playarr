@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Verification-only dependencies. Runtime dependencies remain declared in
+# requirements.txt; requirements.lock.txt is the reproducible resolved set.
+pytest>=8.0
+pytest-cov>=5.0

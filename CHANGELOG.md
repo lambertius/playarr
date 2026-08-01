@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.11.0] - 2026-08-01
+
+### Added
+- Hash-locked backend and frontend verification, Windows CI, sanitised media fixtures, generated OpenAPI types and module-growth gates.
+- Durable priority mutation commands, bounded write queues, operation polling, optimistic video revisions and recoverable managed-file rename plans.
+- Sidecar v2 validation, atomic backups, transactional outbox reconciliation and a two-pass portable-identity rebuild service.
+- Migration preflight, online backup, integrity verification, logical reconciliation, inspectable reports and automatic restore on failed upgrades.
+
+### Changed
+- URL and disk imports share the same workspace, policy, mutation-plan builder, Stage-C actor and deferred dispatcher, with resumable checkpoints and structured stage events.
+- Library/navigation list views use aligned sortable columns and URL-backed query state; permanent UI actions consistently use Save, Undo, Cancel, Remove and Delete language.
+- Resolve video routes use explicit `/api/resolve/videos/{video_id}` paths and frontend types are checked against the generated API contract.
+
+### Removed
+- Kodi add-on routes, settings, export commands, exporter source and bundled plug-in assets. Existing NFO sidecars and media files are unaffected; see `docs/KODI_REMOVAL.md`.
+
+### Fixed
+- Legacy databases are backed up and migrated before startup recovery queries, preventing the v1.10 startup crash.
+- Archive manifests resolve videos by portable Playarr ID instead of transient SQL row IDs.
+- Committed sidecar changes survive a process stop between the database commit and filesystem write.
+
+## [1.10.1] - 2026-08-01
+
+### Fixed
+- **Legacy database startup migration** — bundled installs now add and backfill the processing-job request and operation correlation columns before startup recovery queries run. The repair is idempotent and resumes safely after a partially completed upgrade.
+
 ## [1.10.0] - 2026-08-01
 
 ### Added

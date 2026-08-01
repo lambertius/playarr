@@ -19,7 +19,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-from app.pipeline_lib.workspace import ImportWorkspace
+from app.pipeline_url.workspace import ImportWorkspace
 from app.pipeline_lib.mutation_plan import build_plan_from_workspace
 from app.pipeline_lib.db_apply import apply_mutation_plan, TocTouDuplicateError
 
@@ -37,7 +37,6 @@ def run_library_import_pipeline(job_id: int) -> None:
 
     ws = ImportWorkspace(job_id)
     try:
-        ws.reset()  # clear stale artifacts from recycled job IDs
         # Stage A — coarse status
         params = _load_job_params(job_id)
         if params is None:
@@ -47,7 +46,7 @@ def run_library_import_pipeline(job_id: int) -> None:
         from app.services.import_policy import policy_from_pipeline_options
         import_policy = policy_from_pipeline_options(params, library=True)
         params = {**params, "import_policy": import_policy.model_dump(mode="json")}
-        ws.write_artifact("input", {**params, "import_type": "library"})
+        ws.prepare_run({**params, "import_type": "library"})
         _basename = os.path.basename(params.get("file_path", ""))
         _mode = (params.get("options") or {}).get("mode", "simple")
         _mode_label = "Advanced Import" if _mode == "advanced" else "Import"
@@ -61,12 +60,16 @@ def run_library_import_pipeline(job_id: int) -> None:
         ws.sync_logs_to_db()
 
         # Stage C — apply mutation plan (short serialised DB transaction)
-        ws.update_stage("apply", "running")
-        _coarse_update(job_id, JobStatus.analyzing, step="Applying to database", progress=85)
         plan = ws.read_artifact("mutation_plan")
-        video_id = apply_mutation_plan(plan)
-        ws.update_stage("apply", "complete")
-        ws.write_artifact("apply_result", {"video_id": video_id})
+        prior_apply = ws.read_artifact("apply_result") if ws.is_stage_complete("apply") else None
+        if prior_apply:
+            video_id = int(prior_apply["video_id"])
+        else:
+            ws.update_stage("apply", "running")
+            _coarse_update(job_id, JobStatus.analyzing, step="Applying to database", progress=85)
+            video_id = apply_mutation_plan(plan)
+            ws.write_artifact("apply_result", {"video_id": video_id})
+            ws.update_stage("apply", "complete")
         ws.log(f"Applied to DB — video_id={video_id}")
 
         # Flag the existing video for duplicate review when quality upgrade
@@ -115,7 +118,7 @@ def run_library_import_pipeline(job_id: int) -> None:
         ws.log("Import complete")
 
         # Stage D — deferred tasks (cleanup handled by dispatch_deferred)
-        from app.pipeline_lib.deferred import dispatch_deferred
+        from app.pipeline_url.deferred import dispatch_deferred
         dispatch_deferred(video_id, plan.get("deferred_tasks", []), ws)
 
     except JobCancelledError:
@@ -136,7 +139,8 @@ def run_library_import_pipeline(job_id: int) -> None:
         # the library.  Clean up the organized files to avoid orphans.
         _toctou_reason = toctou.reason or "TOCTOU duplicate"
         ws.log(f"TOCTOU duplicate — cleaning up: {_toctou_reason}")
-        _cleanup_organized_artifacts(ws)
+        from app.services.import_cleanup import cleanup_import_artifacts
+        cleanup_import_artifacts(ws)
         _coarse_update(job_id, JobStatus.skipped,
                        step=f"Skipped: {_toctou_reason[:200]}",
                        progress=100,
@@ -1621,61 +1625,6 @@ def _flag_existing_for_duplicate_review(existing_video_id: int,
     queue entry redundant.
     """
     return
-
-
-def _cleanup_organized_artifacts(ws: ImportWorkspace) -> None:
-    """Remove files placed in the library during Stage B when the import
-    is being rolled back (e.g. TOCTOU duplicate detected in Stage C)."""
-    organized = ws.read_artifact("organized")
-    if not organized:
-        return
-
-    # Remove the organized video file
-    new_file = organized.get("new_file")
-    if new_file and os.path.isfile(new_file):
-        try:
-            os.remove(new_file)
-            ws.log(f"Cleaned up organized file: {os.path.basename(new_file)}")
-        except Exception as e:
-            ws.log(f"Failed to clean up {new_file}: {e}", level="warning")
-
-    # Remove copied artwork assets
-    artwork_source = ws.read_artifact("artwork_source") or {}
-    for asset in artwork_source.get("assets", []):
-        art_path = asset.get("file_path")
-        if art_path and os.path.isfile(art_path):
-            try:
-                os.remove(art_path)
-            except Exception:
-                pass
-
-    # Remove artwork fetched during scraping
-    artwork_results = ws.read_artifact("artwork_results") or {}
-    for asset in artwork_results.get("assets", []):
-        art_path = asset.get("file_path")
-        if art_path and os.path.isfile(art_path):
-            try:
-                os.remove(art_path)
-            except Exception:
-                pass
-
-    # Remove NFO file
-    new_folder = organized.get("new_folder", "")
-    if new_folder and os.path.isdir(new_folder):
-        for f in os.listdir(new_folder):
-            if f.endswith(".nfo"):
-                try:
-                    os.remove(os.path.join(new_folder, f))
-                except Exception:
-                    pass
-
-    # Remove folder only if now empty
-    if new_folder and os.path.isdir(new_folder):
-        try:
-            os.rmdir(new_folder)  # Only removes if empty
-            ws.log(f"Cleaned up empty folder: {os.path.basename(new_folder)}")
-        except OSError:
-            pass  # Folder not empty, leave it
 
 
 def _load_job_params(job_id: int) -> Optional[dict]:

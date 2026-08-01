@@ -164,7 +164,7 @@ export function AIPanel({ videoId }: { videoId: number }) {
                   { videoId, data: { ai_result_id: aiResultId, fields: fieldNames, rename_files: renameFiles } },
                   {
                     onSuccess: () => toast({ type: "success", title: "Changes applied" }),
-                    onError: () => toast({ type: "error", title: "Apply failed" }),
+                    onError: () => toast({ type: "error", title: "Save failed" }),
                   },
                 )
               }
@@ -637,7 +637,7 @@ function CorrectionTable({
               <th className="px-3 py-2">Current Value</th>
               <th className="px-3 py-2">{suggestionLabel}</th>
               <th className="px-3 py-2 w-16 text-center">Conf</th>
-              <th className="px-3 py-2 w-14 text-center">Apply</th>
+              <th className="px-3 py-2 w-14 text-center">Save</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-white/5">
@@ -670,26 +670,26 @@ function CorrectionTable({
       {/* Action buttons */}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {anyAccepted && (
-          <Tooltip content="Apply only the corrections you've selected above">
+          <Tooltip content="Save only the corrections you've selected above">
           <button onClick={applyAccepted} disabled={isPending} className="btn-primary btn-sm">
             {isPending ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-            Apply Selected ({acceptedCount})
+            Save selected ({acceptedCount})
           </button>
           </Tooltip>
         )}
         {totalChanges > 0 && !anyAccepted && (
-          <Tooltip content="Apply all suggested corrections at once">
+          <Tooltip content="Save all suggested corrections at once">
           <button onClick={applyAll} disabled={isPending} className="btn-secondary btn-sm">
             <CheckCheck size={14} />
-            Apply All Changes ({totalChanges})
+            Save all changes ({totalChanges})
           </button>
           </Tooltip>
         )}
         {highConfFields.length > 0 && highConfFields.length < changedFields.length && !anyAccepted && (
-          <Tooltip content="Apply only corrections with 85%+ confidence">
+          <Tooltip content="Save only corrections with 85%+ confidence">
           <button onClick={applyHighConfidence} disabled={isPending} className="btn-secondary btn-sm">
             <Zap size={14} />
-            Apply High Confidence ({highConfFields.length})
+            Save high-confidence ({highConfFields.length})
           </button>
           </Tooltip>
         )}

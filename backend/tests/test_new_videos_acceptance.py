@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401 - register shared tables
 import app.new_videos.models  # noqa: F401 - register recommendation tables
 from app.database import Base
-from app.models import ProcessingJob
+from app.models import MutationCommand, ProcessingJob
 from app.new_videos.models import (
     RecommendationSnapshot,
     SuggestedVideo,
@@ -15,6 +15,7 @@ from app.new_videos.models import (
 from app.new_videos.recommendation_ranker import RecommendationCandidate
 from app.new_videos.recommendation_service import _diversity_rerank, _serialize_video
 from app.new_videos.router import CartAddRequest, add_video
+from app.services.mutation_runtime import process_next_mutation
 
 
 def _session():
@@ -88,7 +89,7 @@ def test_incomplete_provider_metadata_is_explicit_in_api_response():
     assert payload["provider_errors"] == ["provider timed out"]
 
 
-def test_quick_add_commits_job_and_dismissal_before_dispatch(monkeypatch):
+def test_quick_add_acknowledges_before_actor_commits_and_dispatches(monkeypatch):
     db = _session()
     current = SuggestedVideo(
         provider="youtube",
@@ -124,8 +125,24 @@ def test_quick_add_commits_job_and_dismissal_before_dispatch(monkeypatch):
         dispatched.append(kwargs)
 
     monkeypatch.setattr("app.worker.dispatch_task", capture_dispatch)
-    response = add_video(CartAddRequest(suggested_video_id=current.id), db)
+    request = CartAddRequest(
+        suggested_video_id=current.id,
+        idempotency_key="new-videos-add-current",
+    )
+    response = add_video(request, db)
+    duplicate = add_video(request, db)
 
-    assert response["status"] == "importing"
-    assert response["replacement"]["provider_video_id"] == "replacement"
-    assert dispatched[0]["job_id"] == response["job_id"]
+    assert response["status"] == "pending"
+    assert duplicate["operation_id"] == response["operation_id"]
+    assert db.query(MutationCommand).count() == 1
+    assert db.query(ProcessingJob).count() == 0
+
+    session_factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+    assert process_next_mutation(session_factory) is True
+    db.expire_all()
+
+    command = db.get(MutationCommand, response["operation_id"])
+    assert command.status == "succeeded"
+    assert command.result_json["status"] == "importing"
+    assert command.result_json["replacement"]["provider_video_id"] == "replacement"
+    assert dispatched[0]["job_id"] == command.result_json["job_id"]

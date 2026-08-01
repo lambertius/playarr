@@ -10,8 +10,6 @@ Endpoints:
     POST /api/metadata/refresh/{video_id}   — force refresh for one video
     POST /api/metadata/refresh-all          — force refresh entire library
     POST /api/metadata/refresh-missing      — refresh only low-confidence / missing
-    POST /api/metadata/export               — full Kodi re-export
-    POST /api/metadata/export/{video_id}    — export single video + its artist/album
     POST /api/metadata/undo/{entity_type}/{entity_id} — undo last refresh
     GET  /api/metadata/revisions/{entity_type}/{entity_id} — list revisions
 """
@@ -31,7 +29,6 @@ from app.metadata.models import (
     ArtistEntity, AlbumEntity, TrackEntity, MetadataRevision, ExportManifest,
 )
 from app.metadata.revisions import list_revisions, rollback, save_revision
-from app.metadata.exporters.kodi import export_all, export_artist, export_album, export_video
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +116,6 @@ class RevisionOut(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class ExportResult(BaseModel):
-    artists: int = 0
-    albums: int = 0
-    videos: int = 0
-    message: str = ""
 
 
 class RefreshResult(BaseModel):
@@ -433,70 +423,6 @@ def refresh_missing(db: Session = Depends(get_db)):
 # Export
 # ---------------------------------------------------------------------------
 
-@router.post("/export", response_model=ExportResult)
-def full_export(db: Session = Depends(get_db)):
-    """Full re-export of all Kodi NFO + artwork."""
-    from app.tasks import kodi_export_task
-    from app.worker import dispatch_task
-
-    job = ProcessingJob(
-        job_type="kodi_export",
-        status=JobStatus.queued,
-        display_name="Full Kodi export",
-        action_label="Kodi Export",
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
-    dispatch_task(kodi_export_task, job_id=job.id)
-    return ExportResult(message=f"Export queued (job {job.id})")
-
-
-@router.post("/export/{video_id}", response_model=ExportResult)
-def export_single(video_id: int, db: Session = Depends(get_db)):
-    """Export Kodi outputs for a single video and its linked artist/album."""
-    item = db.query(VideoItem).get(video_id)
-    if not item:
-        raise HTTPException(404, "Video not found")
-
-    files_written = 0
-
-    # Export video
-    source_url = item.sources[0].canonical_url if item.sources else ""
-    genres = [g.name for g in item.genres]
-    written = export_video(
-        db, item.id, artist=item.artist, title=item.title,
-        album=item.album or "", year=item.year,
-        genres=genres, plot=item.plot or "",
-        source_url=source_url, folder_path=item.folder_path,
-        resolution_label=item.resolution_label or "",
-    )
-    files_written += len(written)
-
-    # Export linked artist
-    if item.artist_entity_id:
-        artist_ent = db.query(ArtistEntity).get(item.artist_entity_id)
-        if artist_ent:
-            written = export_artist(db, artist_ent)
-            files_written += len(written)
-
-    # Export linked album
-    if item.album_entity_id:
-        album_ent = db.query(AlbumEntity).get(item.album_entity_id)
-        if album_ent:
-            written = export_album(db, album_ent)
-            files_written += len(written)
-
-    db.commit()
-    return ExportResult(
-        videos=1,
-        artists=1 if item.artist_entity_id else 0,
-        albums=1 if item.album_entity_id else 0,
-        message=f"Exported {files_written} files",
-    )
-
-
 # ---------------------------------------------------------------------------
 # Revisions & Undo
 # ---------------------------------------------------------------------------
@@ -513,16 +439,10 @@ def get_revisions(entity_type: str, entity_id: int, db: Session = Depends(get_db
 
 @router.post("/undo/{entity_type}/{entity_id}")
 def undo_refresh(entity_type: str, entity_id: int, db: Session = Depends(get_db)):
-    """Undo the last metadata refresh, restoring previous state + re-exporting."""
+    """Undo the last metadata refresh and restore the previous state."""
     entity = rollback(db, entity_type, entity_id)
     if not entity:
         raise HTTPException(400, "No previous revision to restore")
-
-    # Re-export
-    if entity_type == "artist":
-        export_artist(db, entity)
-    elif entity_type == "album":
-        export_album(db, entity)
 
     db.commit()
     return {"detail": f"Rolled back {entity_type}#{entity_id}", "entity_id": entity_id}

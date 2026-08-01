@@ -19,6 +19,7 @@ if backend_root not in sys.path:
 # Import models so Alembic sees them
 from app.database import Base
 from app.models import *  # noqa
+from app.new_videos.models import *  # noqa: F401,F403
 from app.config import get_settings
 
 config = context.config

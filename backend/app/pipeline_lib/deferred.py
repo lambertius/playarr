@@ -73,7 +73,7 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace) -> N
 
     ws.log(f"Dispatching deferred tasks: {tasks}")
 
-    # Tasks that must complete BEFORE entity_artwork / kodi_export run,
+    # Tasks that must complete before entity artwork runs,
     # because they can reassign entity IDs (e.g. AI correction).
     _PHASE1_TASKS = {"ai_enrichment"}
 
@@ -394,63 +394,6 @@ def _deferred_scene_analysis(video_id: int, ws: ImportWorkspace) -> None:
                 return
         finally:
             db.close()
-
-
-def _deferred_kodi_export(video_id: int, ws: ImportWorkspace) -> None:
-    """Export Kodi-format NFO/artwork for video and its entities."""
-    from app.database import SessionLocal
-    from app.models import VideoItem
-
-    db = SessionLocal()
-    try:
-        item = db.query(VideoItem).get(video_id)
-        if not item:
-            return
-
-        from app.metadata.exporters.kodi import (
-            export_video, export_artist, export_album,
-        )
-
-        try:
-            # Build source_url from the primary video source
-            _source_url = ""
-            try:
-                from app.models import Source
-                _primary_src = (
-                    db.query(Source)
-                    .filter(Source.video_id == video_id, Source.source_type == "video")
-                    .first()
-                )
-                if _primary_src:
-                    _source_url = _primary_src.canonical_url or _primary_src.original_url or ""
-            except Exception:
-                pass
-
-            export_video(
-                db, video_id, item.artist or "", item.title or "",
-                album=item.album or "",
-                year=item.year,
-                genres=[g.name for g in item.genres] if item.genres else [],
-                plot=item.plot or "",
-                source_url=_source_url,
-                folder_path=item.folder_path,
-                resolution_label=item.resolution_label or "",
-            )
-        except Exception as e:
-            ws.log(f"Kodi video export: {e}", level="warning")
-
-        if item.artist_entity:
-            try:
-                export_artist(db, item.artist_entity)
-            except Exception:
-                pass
-        if item.album_entity:
-            try:
-                export_album(db, item.album_entity)
-            except Exception:
-                pass
-    finally:
-        db.close()
 
 
 def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
@@ -1725,7 +1668,6 @@ def _deferred_orphan_cleanup(video_id: int, ws: ImportWorkspace) -> None:
 _DISPATCH = {
     "preview": _deferred_preview,
     "scene_analysis": _deferred_scene_analysis,
-    "kodi_export": _deferred_kodi_export,
     "entity_artwork": _deferred_entity_artwork,
     "ai_enrichment": _deferred_ai_enrichment,
     "matching": _deferred_matching,

@@ -1,7 +1,7 @@
 /**
  * Library browse preferences (view mode, sort, direction, page size), stored
  * server-side via the preferences layer so they're consistent across browsers
- * and the Kodi add-on inherits the default sort.
+ * and other Playarr clients inherit the default sort.
  */
 import { getPref, setPref } from "@/lib/preferences";
 

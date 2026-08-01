@@ -40,13 +40,6 @@ datas = [
     (str(BACKEND / ".env.example"), "."),
 ]
 
-# Kodi add-on source — bundled so the server can hand out a plugin zip that is
-# always version-matched to itself (Settings → System → Kodi).  The download
-# endpoint stamps addon.xml's version to APP_VERSION at request time.
-_KODI_ADDON = ROOT / "kodi" / "plugin.video.playarr"
-if (_KODI_ADDON / "addon.xml").is_file():
-    datas.append((str(_KODI_ADDON), "kodi/plugin.video.playarr"))
-
 # ---------------------------------------------------------------------------
 # Hidden imports — packages PyInstaller can miss
 # ---------------------------------------------------------------------------

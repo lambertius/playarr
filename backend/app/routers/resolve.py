@@ -18,7 +18,6 @@ POST /api/review/batch/dismiss   — batch dismiss
 GET  /api/search/artist          — manual artist search
 GET  /api/search/recording       — manual recording search
 GET  /api/search/release         — manual release search
-POST /api/export/kodi            — export trigger
 """
 from __future__ import annotations
 
@@ -44,7 +43,6 @@ from app.matching.schemas import (
     PinRequest, BatchResolveRequest, BatchResolveOut, UndoResultOut,
     ReviewItemOut, ReviewListOut, ApplyRequest, DuplicateVideoSummary,
     ManualSearchResultOut, ManualSearchResponse,
-    ExportKodiRequest, ExportKodiResponse,
 )
 from app.models import (
     VideoItem, ProcessingJob, JobStatus, ReviewActionPlan, ReviewCase,
@@ -101,7 +99,6 @@ def _persist_duplicate_dismissal(vi: VideoItem, db) -> None:
 resolve_router = APIRouter(prefix="/api/resolve", tags=["resolve"])
 review_router = APIRouter(prefix="/api/review", tags=["review"])
 search_router = APIRouter(prefix="/api/search", tags=["search"])
-export_router = APIRouter(prefix="/api/export", tags=["export"])
 
 
 def _get_db():
@@ -184,7 +181,7 @@ def _output_to_response(out: ResolveOutput) -> ResolveResultOut:
 
 # ── Routes ────────────────────────────────────────────────────────────────
 
-@resolve_router.post("/{video_id}", response_model=ResolveResultOut)
+@resolve_router.post("/videos/{video_id}", response_model=ResolveResultOut)
 def trigger_resolve(
     video_id: int,
     force: bool = Query(False, description="Ignore hysteresis"),
@@ -205,7 +202,7 @@ def trigger_resolve(
         raise HTTPException(500, f"Resolve failed: {e}")
 
 
-@resolve_router.get("/{video_id}", response_model=ResolveResultOut)
+@resolve_router.get("/videos/{video_id}", response_model=ResolveResultOut)
 def get_resolve_result(video_id: int, db: Session = Depends(_get_db)):
     """Return the last resolve result and all candidates for a video."""
     mr = db.query(MatchResult).filter(MatchResult.video_id == video_id).first()
@@ -214,7 +211,7 @@ def get_resolve_result(video_id: int, db: Session = Depends(_get_db)):
     return _mr_to_response(mr, db)
 
 
-@resolve_router.get("/{video_id}/normalization", response_model=NormalizationResultOut)
+@resolve_router.get("/videos/{video_id}/normalization", response_model=NormalizationResultOut)
 def get_normalization(video_id: int, db: Session = Depends(_get_db)):
     """Return the normalization breakdown for a video."""
     nr = db.query(NormalizationResultModel).filter(
@@ -240,7 +237,7 @@ def get_normalization(video_id: int, db: Session = Depends(_get_db)):
     )
 
 
-@resolve_router.post("/{video_id}/pin")
+@resolve_router.post("/videos/{video_id}/pin")
 def pin_match(video_id: int, body: PinRequest, db: Session = Depends(_get_db)):
     """Pin a specific candidate as the selected match (Fix Match)."""
     # Validate candidate exists
@@ -290,7 +287,7 @@ def pin_match(video_id: int, body: PinRequest, db: Session = Depends(_get_db)):
     return {"status": "pinned", "video_id": video_id, "candidate_id": candidate.id}
 
 
-@resolve_router.post("/{video_id}/unpin")
+@resolve_router.post("/videos/{video_id}/unpin")
 def unpin_match(video_id: int, db: Session = Depends(_get_db)):
     """Remove user pin (reverts to automatic scoring)."""
     pin = db.query(UserPinnedMatch).filter(
@@ -378,7 +375,7 @@ def batch_resolve(body: BatchResolveRequest, db: Session = Depends(_get_db)):
     )
 
 
-@resolve_router.post("/{video_id}/undo", response_model=UndoResultOut)
+@resolve_router.post("/videos/{video_id}/undo", response_model=UndoResultOut)
 def undo_resolve(video_id: int, db: Session = Depends(_get_db)):
     """Revert the last resolve to its previous snapshot (one-level undo)."""
     mr = db.query(MatchResult).filter(MatchResult.video_id == video_id).first()
@@ -414,7 +411,7 @@ def undo_resolve(video_id: int, db: Session = Depends(_get_db)):
 
 # ── Apply without pin ────────────────────────────────────────────────────
 
-@resolve_router.post("/{video_id}/apply")
+@resolve_router.post("/videos/{video_id}/apply")
 def apply_match(video_id: int, body: ApplyRequest, db: Session = Depends(_get_db)):
     """Apply a candidate selection WITHOUT pinning (future auto-resolve may override)."""
     candidate = db.query(MatchCandidate).get(body.candidate_id)
@@ -1729,77 +1726,3 @@ def search_release(
     except Exception as e:
         logger.error(f"MusicBrainz release search failed: {e}")
         raise HTTPException(502, f"MusicBrainz search failed: {e}")
-
-
-# ── Kodi export ───────────────────────────────────────────────────────────
-
-@export_router.post("/kodi", response_model=ExportKodiResponse)
-def export_kodi(body: ExportKodiRequest, db: Session = Depends(_get_db)):
-    """Export matched metadata to Kodi-compatible NFO files."""
-    import xml.etree.ElementTree as ET
-    from pathlib import Path
-
-    settings = get_settings()
-
-    # Determine which videos to export
-    if body.video_ids:
-        videos = db.query(VideoItem).filter(VideoItem.id.in_(body.video_ids)).all()
-    else:
-        # All videos with high/medium matches
-        matched_ids = db.query(MatchResult.video_id).filter(
-            MatchResult.status.in_([MatchStatusEnum.matched_high, MatchStatusEnum.matched_medium])
-        ).subquery()
-        videos = db.query(VideoItem).filter(VideoItem.id.in_(matched_ids)).all()
-
-    exported = 0
-    skipped = 0
-    errors = 0
-
-    for video in videos:
-        try:
-            mr = db.query(MatchResult).filter(MatchResult.video_id == video.id).first()
-            if not mr:
-                skipped += 1
-                continue
-
-            # Build NFO path
-            video_dir = Path(video.file_path).parent if video.file_path else None
-            if not video_dir or not video_dir.exists():
-                skipped += 1
-                continue
-
-            nfo_path = video_dir / f"{Path(video.file_path).stem}.nfo"
-
-            if nfo_path.exists() and not body.overwrite_existing:
-                skipped += 1
-                continue
-
-            # Build Kodi-compatible musicvideo NFO
-            root = ET.Element("musicvideo")
-            ET.SubElement(root, "title").text = mr.resolved_recording or video.title or ""
-            ET.SubElement(root, "artist").text = mr.resolved_artist or ""
-            if mr.resolved_release:
-                ET.SubElement(root, "album").text = mr.resolved_release
-            if mr.artist_mbid:
-                ET.SubElement(root, "musicbrainzartistid").text = mr.artist_mbid
-            if mr.recording_mbid:
-                ET.SubElement(root, "musicbrainztrackid").text = mr.recording_mbid
-            if mr.release_mbid:
-                ET.SubElement(root, "musicbrainzreleaseid").text = mr.release_mbid
-
-            # Write NFO
-            tree = ET.ElementTree(root)
-            ET.indent(tree, space="  ")
-            tree.write(str(nfo_path), encoding="unicode", xml_declaration=True)
-            exported += 1
-
-        except Exception as e:
-            logger.error(f"NFO export failed for video {video.id}: {e}")
-            errors += 1
-
-    return ExportKodiResponse(
-        exported=exported,
-        skipped=skipped,
-        errors=errors,
-        message=f"Exported {exported} NFO files ({skipped} skipped, {errors} errors)",
-    )

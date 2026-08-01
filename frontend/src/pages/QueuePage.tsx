@@ -357,7 +357,7 @@ export function QueuePage() {
             <div><span className="block text-text-muted">Pending mutations</span><b>{health.mutations.pending} / {health.mutation_queue_limit}</b></div>
             <div><span className="block text-text-muted">Oldest mutation</span><b>{compactAge(health.mutations.oldest_age_seconds)}</b></div>
             <div><span className="block text-text-muted">Database retries</span><b>{health.database_retry_count}</b></div>
-            <div><span className="block text-text-muted">Outbox backlog</span><b>{sumBacklog(health.sidecars) + sumBacklog(health.files)}</b></div>
+            <div><span className="block text-text-muted">Outbox / cosmetic writes</span><b>{sumBacklog(health.sidecars) + sumBacklog(health.files)} / {health.cosmetic_writes.pending} of {health.cosmetic_writes.max_pending}</b></div>
           </div>
         )}
       </details>

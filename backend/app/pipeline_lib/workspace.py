@@ -227,7 +227,7 @@ class ImportWorkspace:
                 finally:
                     db.close()
 
-            db_write_soon(_write)
+            db_write_soon(_write, coalesce_key=("job-log-sync", self.job_id))
         except Exception:
             pass  # logging sync must never crash the pipeline
 

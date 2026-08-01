@@ -99,7 +99,7 @@ const CATEGORY_CONFIG: Record<ReviewCategory, {
     label: "Rename",
     icon: <FileEdit size={16} />,
     color: "bg-teal-500/10 text-teal-400",
-    tooltip: "Videos whose file or folder name doesn\u2019t match the current naming convention. Apply rename to fix, or dismiss to ignore.",
+    tooltip: "Videos whose file or folder name doesn\u2019t match the current naming convention. Rename to fix, or dismiss to ignore.",
   },
   scanned: {
     label: "Scanned",
@@ -187,7 +187,7 @@ const HELP_ROWS: { category: ReviewCategory; cause: string; meaning: string; res
     category: "rename",
     cause: "The file or folder name doesn't match the current naming convention (Artist - Title [Resolution]).",
     meaning: "The item will still play correctly but its file path is inconsistent with the rest of the library.",
-    resolution: "Apply the suggested rename to fix the path, or dismiss to keep the current name.",
+    resolution: "Save the suggested rename to fix the path, or dismiss to keep the current name.",
   },
   {
     category: "scanned",
@@ -1016,7 +1016,7 @@ export default function ReviewQueuePage() {
                 </button>
               </Tooltip>
               {categoryFilter === "rename" && (
-                <Tooltip content="Apply naming convention rename to all selected items">
+                <Tooltip content="Rename all selected items to the naming convention">
                   <button onClick={handleBatchApplyRename} disabled={batchApplyRenameMutation.isPending}
                     className="btn-ghost btn-sm gap-1 text-teal-400 hover:text-teal-300 text-xs">
                     <FileEdit size={13} /> Rename

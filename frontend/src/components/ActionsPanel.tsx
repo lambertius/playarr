@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from "react";
-import ReactDOM from "react-dom";
+import { createPortal } from "react-dom";
 import {
   RefreshCw, Volume2, Download, Undo2, Trash2,
   Wrench, Wand2, FileText, Sparkles, Fingerprint,
@@ -28,6 +28,11 @@ import { libraryApi, jobsApi } from "@/lib/api";
 import { addToVideoEditorQueue } from "@/pages/VideoEditorPage";
 import { SourceBadge } from "@/components/Badges";
 import { Tooltip } from "@/components/Tooltip";
+import { PopupOverlay } from "@/components/PopupOverlay";
+import {
+  RenamePreviewDialog,
+  type RenamePreviewPlan,
+} from "@/components/RenamePreviewDialog";
 
 /* ═══════════════════════════════════════════════════════════
    Types
@@ -65,23 +70,6 @@ interface ActionItem {
 /* ═══════════════════════════════════════════════════════════
    Popup Components
    ═══════════════════════════════════════════════════════════ */
-
-function PopupOverlay({ children, onClose, wide }: { children: React.ReactNode; onClose: () => void; wide?: boolean }) {
-  return ReactDOM.createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div
-        className={`relative z-10 w-full ${wide ? "max-w-3xl max-h-[85vh] overflow-y-auto" : "max-w-lg max-h-[85vh] overflow-y-auto"} rounded-xl border border-surface-border bg-surface-light p-6 shadow-[0_0_40px_rgba(225,29,46,0.08)] animate-slide-up`}
-        style={{ background: "linear-gradient(135deg, rgba(21,25,35,0.97) 0%, rgba(28,34,48,0.92) 100%)" }}
-        role="dialog"
-        aria-modal="true"
-      >
-        {children}
-      </div>
-    </div>,
-    document.body,
-  );
-}
 
 /* ─── Normalize Audio Popup ─── */
 function NormalizePopup({
@@ -249,66 +237,6 @@ function RedownloadPopup({
 }
 
 /* ─── Check Filename Popup ─── */
-function CheckFilenamePopup({
-  currentFilename,
-  expectedFilename,
-  isMatch,
-  onRename,
-  onClose,
-  isPending,
-}: {
-  currentFilename: string;
-  expectedFilename: string;
-  isMatch: boolean;
-  onRename: () => void;
-  onClose: () => void;
-  isPending: boolean;
-}) {
-  return (
-    <PopupOverlay onClose={onClose}>
-      <h2 className="text-lg font-semibold text-text-primary mb-1">Check Filename</h2>
-      <p className="text-sm text-text-secondary mb-4">
-        Compare the current filename against the expected naming pattern based on metadata. This is a local operation.
-      </p>
-
-      <div className="space-y-3 mb-5">
-        <div>
-          <span className="text-xs text-text-muted uppercase tracking-wider">Current</span>
-          <div className="mt-1 text-sm text-text-primary font-mono bg-surface-light/50 rounded-lg px-3 py-2 break-all">
-            {currentFilename}
-          </div>
-        </div>
-        <div>
-          <span className="text-xs text-text-muted uppercase tracking-wider">Expected</span>
-          <div className={`mt-1 text-sm font-mono rounded-lg px-3 py-2 break-all ${isMatch ? "text-green-400 bg-green-500/10" : "text-accent bg-accent/10"}`}>
-            {expectedFilename}
-          </div>
-        </div>
-
-        {isMatch ? (
-          <div className="flex items-center gap-2 text-sm text-green-400">
-            <Check size={14} /> Filename matches expected pattern
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 text-sm text-orange-400">
-            <AlertTriangle size={14} /> Filename does not match expected pattern
-          </div>
-        )}
-      </div>
-
-      <div className="flex justify-end gap-3">
-        <button onClick={onClose} className="btn-secondary btn-sm">Close</button>
-        {!isMatch && (
-          <button onClick={onRename} disabled={isPending} className="btn-primary btn-sm">
-            {isPending ? <Loader2 size={14} className="animate-spin" /> : <FolderSync size={14} />}
-            Rename to Expected
-          </button>
-        )}
-      </div>
-    </PopupOverlay>
-  );
-}
-
 /* ─── Scrape Metadata Popup ─── */
 function ScrapeMetadataPopup({
   onConfirm,
@@ -833,7 +761,7 @@ function EditTrackIDsPopup({
    Main Actions Panel
    ═══════════════════════════════════════════════════════════ */
 
-export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, filePath, artist, title, resolutionLabel, processingState, versionType, alternateVersionLabel, isLocked, hasArchive: _hasArchive, excludeFromEditorScan, className }: ActionsPanelProps) {
+export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, filePath, artist, title, resolutionLabel, processingState, versionType, alternateVersionLabel, isLocked, excludeFromEditorScan, className }: ActionsPanelProps) {
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
   const qc = useQueryClient();
@@ -878,7 +806,7 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
 
   /* ── Check filename local state ── */
   const [filenameResult, setFilenameResult] = useState<{
-    current: string; expected: string; match: boolean;
+    operationId: string; plan: RenamePreviewPlan;
   } | null>(null);
 
   /* ── Mutations ── */
@@ -1024,21 +952,16 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
         : "Compare current filename against expected naming pattern (Artist - Title [Resolution]). Local operation — no AI tokens used.",
       variant: filenameMatches ? "success" as const : undefined,
       onClick: () => {
-        libraryApi.get(videoId).then((video) => {
-          const expected = buildExpectedName(
-            video.artist, video.title, video.resolution_label || "1080p",
-            video.version_type, video.alternate_version_label,
-          );
-          const currentFolder = video.file_path
-            ? video.file_path.split(/[/\\]/).slice(-2, -1)[0] || ""
-            : "";
+        libraryApi.renamePreview(videoId).then((preview) => {
           setFilenameResult({
-            current: currentFolder,
-            expected,
-            match: currentFolder.toLowerCase() === expected.toLowerCase(),
+            operationId: preview.file_operation_id,
+            plan: preview.plan,
           });
           setShowCheckFilename(true);
-        });
+        }).catch((error) => toast({
+          type: "error",
+          title: error?.response?.data?.detail || "Could not build rename preview",
+        }));
       },
     },
     {
@@ -1247,17 +1170,18 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
 
 
       {showCheckFilename && filenameResult && (
-        <CheckFilenamePopup
-          currentFilename={filenameResult.current}
-          expectedFilename={filenameResult.expected}
-          isMatch={filenameResult.match}
+        <RenamePreviewDialog
+          plan={filenameResult.plan}
           isPending={renameMutation.isPending}
           onClose={() => {
             setShowCheckFilename(false);
             setFilenameResult(null);
           }}
           onRename={() => {
-            renameMutation.mutate(videoId, {
+            renameMutation.mutate({
+              videoId,
+              fileOperationId: filenameResult.operationId,
+            }, {
               onSuccess: () => {
                 toast({ type: "success", title: "Files renamed to expected pattern" });
                 setShowCheckFilename(false);
@@ -1320,7 +1244,7 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
         <PopupOverlay onClose={() => { setShowAIResults(false); qc.invalidateQueries({ queryKey: qk.video(videoId) }); }} wide>
           <h2 className="text-lg font-semibold text-text-primary mb-1">Metadata Results</h2>
           <p className="text-sm text-text-secondary mb-4">
-            Review the proposed changes below. Apply or dismiss corrections, then close this dialog to finalise.
+            Review the proposed changes below. Save or dismiss corrections, then close this dialog to finalise.
           </p>
 
           <div className="space-y-5">
@@ -1378,7 +1302,7 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
                     { videoId, data: { ai_result_id: aiResultId, fields: fieldNames, rename_files: renameFiles } },
                     {
                       onSuccess: () => toast({ type: "success", title: "Changes applied" }),
-                      onError: () => toast({ type: "error", title: "Apply failed" }),
+                      onError: () => toast({ type: "error", title: "Save failed" }),
                     },
                   )
                 }
@@ -1807,7 +1731,7 @@ function CorrectionTable({
               <th className="px-3 py-2">Current Value</th>
               <th className="px-3 py-2">{suggestionLabel}</th>
               <th className="px-3 py-2 w-16 text-center">Conf</th>
-              <th className="px-3 py-2 w-14 text-center">Apply</th>
+              <th className="px-3 py-2 w-14 text-center">Save</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-white/5">
@@ -1829,26 +1753,26 @@ function CorrectionTable({
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {anyAccepted && (
-          <Tooltip content="Apply only the corrections you've selected above">
+          <Tooltip content="Save only the corrections you've selected above">
           <button onClick={applyAccepted} disabled={isPending} className="btn-primary btn-sm">
             {isPending ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-            Apply Selected ({acceptedCount})
+            Save selected ({acceptedCount})
           </button>
           </Tooltip>
         )}
         {totalChanges > 0 && !anyAccepted && (
-          <Tooltip content="Apply all suggested corrections at once">
+          <Tooltip content="Save all suggested corrections at once">
           <button onClick={applyAll} disabled={isPending} className="btn-secondary btn-sm">
             <CheckCheck size={14} />
-            Apply All Changes ({totalChanges})
+            Save all changes ({totalChanges})
           </button>
           </Tooltip>
         )}
         {highConfFields.length > 0 && highConfFields.length < changedFields.length && !anyAccepted && (
-          <Tooltip content="Apply only corrections with 85%+ confidence">
+          <Tooltip content="Save only corrections with 85%+ confidence">
           <button onClick={applyHighConfidence} disabled={isPending} className="btn-secondary btn-sm">
             <Zap size={14} />
-            Apply High Confidence ({highConfFields.length})
+            Save high-confidence ({highConfFields.length})
           </button>
           </Tooltip>
         )}
@@ -2047,7 +1971,7 @@ function ArtworkDiffRow({
         </td>
       </tr>
       {enlarged &&
-        ReactDOM.createPortal(
+        createPortal(
           <div
             className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm cursor-pointer"
             onClick={() => setEnlarged(null)}

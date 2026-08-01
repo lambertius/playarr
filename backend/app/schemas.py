@@ -39,6 +39,7 @@ class VideoItemCreate(BaseModel):
 
 class VideoItemUpdate(BaseModel):
     """Manual metadata edit."""
+    expected_revision: int = Field(ge=1)
     artist: Optional[str] = None
     title: Optional[str] = None
     album: Optional[str] = None
@@ -149,6 +150,7 @@ class GenreOut(BaseModel):
 class VideoItemOut(BaseModel):
     id: int
     stable_id: str
+    revision: int
     artist: str
     title: str
     album: Optional[str] = None

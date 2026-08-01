@@ -134,7 +134,8 @@ def _export_xml(
     log: Callable[[str], None],
 ) -> dict:
     """Write (or skip) the Playarr ``.playarr.xml`` sidecar."""
-    from app.services.playarr_xml import build_playarr_xml, write_playarr_xml
+    from app.services.playarr_xml import build_playarr_xml
+    from app.services.sidecar_store import atomic_write_sidecar
     from xml.etree.ElementTree import tostring, indent
 
     stats = {"written": 0, "skipped": 0, "unchanged": 0}
@@ -163,15 +164,14 @@ def _export_xml(
 
     root = build_playarr_xml(video, db, archive_filename=archive_filename)
     indent(root, space="    ")
-    xml_bytes = tostring(root, encoding="unicode", xml_declaration=True)
+    xml_bytes = tostring(root, encoding="utf-8", xml_declaration=True)
 
     if mode == "overwrite_new" and os.path.isfile(xml_path):
-        if _content_matches(xml_path, xml_bytes):
+        if _content_matches(xml_path, xml_bytes.decode("utf-8")):
             stats["unchanged"] += 1
             return stats
 
-    with open(xml_path, "w", encoding="utf-8") as f:
-        f.write(xml_bytes)
+    atomic_write_sidecar(xml_path, xml_bytes)
     stats["written"] += 1
     return stats
 

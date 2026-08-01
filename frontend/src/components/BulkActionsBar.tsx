@@ -33,7 +33,7 @@ export default function BulkActionsBar({
 
       <div className="h-4 w-px bg-surface-hover" />
 
-      <Tooltip content="Apply the highest-confidence match to all selected items and mark them as resolved.">
+      <Tooltip content="Save the highest-confidence match for all selected items and mark them as resolved.">
         <button onClick={onAcceptAll} className="btn-primary btn-sm text-xs">
           Accept Top Match
         </button>

@@ -1,10 +1,11 @@
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, exportApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi, metadataManagerApi, toolsApi, operationsApi } from "@/lib/api";
+import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi, metadataManagerApi, toolsApi, operationsApi } from "@/lib/api";
+import { updateVideoWithRevision } from "@/lib/optimisticVideoUpdate";
 import type {
   LibraryParams, JobsParams, VideoItemUpdate, FacetFilterParams,
   ImportRequest, NormalizeRequest, BatchRescanRequest, SettingUpdate,
   ReviewParams, PinRequest, ApplyRequest, BatchResolveRequest,
-  ExportKodiRequest, SearchEntityType,
+  SearchEntityType,
   OrphanCleanRequest,
   AIEnrichRequest, AIApplyFieldsRequest, AIUndoRequest,
   AITestConnectionRequest, SceneAnalysisRequest, AISettingsUpdate,
@@ -15,7 +16,6 @@ import type {
   ScraperTestRequest, JobPageParams,
   PlaylistSortField, SortDirection,
 } from "@/types";
-
 // ─── Query Keys ───────────────────────────────────────────
 export const qk = {
   library: (params: LibraryParams) => ["library", params] as const,
@@ -138,7 +138,7 @@ export function useUpdateCheck() {
 export function useUpdateVideo(id: number) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: VideoItemUpdate) => libraryApi.update(id, data),
+    mutationFn: (data: VideoItemUpdate) => updateVideoWithRevision(qc, id, data),
     onSuccess: (updated) => {
       qc.setQueryData(qk.video(id), updated);
       // Only invalidate the library list (not facets like artists/albums/genres)
@@ -287,8 +287,8 @@ export function useUndoRescan(videoId: number) {
 export function useRenameToExpected() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (videoId: number) => libraryApi.rename(videoId),
-    onSuccess: (updated, videoId) => {
+    mutationFn: ({ videoId, fileOperationId }: { videoId: number; fileOperationId: string }) => libraryApi.rename(videoId, fileOperationId),
+    onSuccess: (updated, { videoId }) => {
       qc.setQueryData(qk.video(videoId), updated);
       qc.invalidateQueries({ queryKey: ["library"], exact: false, refetchType: "none" });
     },
@@ -812,12 +812,6 @@ export function useBatchResolve() {
 }
 
 // ─── Export ──────────────────────────────────────────────
-export function useExportKodi() {
-  return useMutation({
-    mutationFn: (data?: ExportKodiRequest) => exportApi.kodi(data),
-  });
-}
-
 // ─── AI Metadata Queries ─────────────────────────────────
 export function useAIComparison(videoId: number) {
   return useQuery({

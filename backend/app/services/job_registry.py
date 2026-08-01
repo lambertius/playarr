@@ -24,7 +24,7 @@ JOB_CATEGORY_RULES: dict[str, dict[str, tuple[str, ...]]] = {
     "scraper": {
         "types": (
             "metadata_refresh", "batch_metadata_refresh", "metadata_scrape",
-            "kodi_export", "rescan", "batch_rescan", "normalize",
+            "rescan", "batch_rescan", "normalize",
             "batch_normalize", "scan_sources", "batch_scan_sources",
         ),
         "prefixes": (),

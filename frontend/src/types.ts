@@ -21,7 +21,6 @@ export type JobStatus =
   | "skipped";
 
 export type ViewMode = "grid" | "list";
-
 // ─── Library ──────────────────────────────────────────────
 export interface VideoItemSummary {
   id: number;
@@ -88,6 +87,7 @@ export interface MediaAsset {
 export interface VideoItemDetail {
   id: number;
   stable_id: string;
+  revision: number;
   artist: string;
   title: string;
   album?: string | null;
@@ -219,6 +219,7 @@ export interface ContributionLogEntry {
 }
 
 export interface VideoItemUpdate {
+  expected_revision?: number;
   artist?: string;
   title?: string;
   album?: string | null;
@@ -244,7 +245,6 @@ export interface VideoItemUpdate {
   playarr_video_id?: string | null;
   playarr_track_id?: string | null;
 }
-
 // ─── Jobs ─────────────────────────────────────────────────
 export interface JobSummary {
   id: number;
@@ -320,7 +320,7 @@ export interface ClearHistoryPreview extends ClearHistoryParams {
 export interface OperationHealth {
   deployment_profile: "single_process" | "redis";
   mutation_queue_limit: number;
-  mutations: { pending: number; oldest_age_seconds: number };
+  mutations: { pending: number; oldest_age_seconds: number }; cosmetic_writes: { pending: number; max_pending: number; oldest_age_seconds: number; rejected: number; coalesced: number };
   sidecars: Record<string, number>;
   files: Record<string, number>;
   database_retry_count: number;
@@ -530,7 +530,7 @@ export interface ArchiveItem {
   archived_at: string;
   file_size_bytes: number;
   original_path?: string | null;
-  checksum_md5?: string | null;
+  checksum_md5?: string | null; checksum_sha256?: string | null; playarr_video_id?: string | null; operation_id?: string | null;
   manifest_schema_version?: number | null;
   restore_eligible?: boolean;
   integrity_status?: string;
@@ -543,11 +543,11 @@ export interface ArchiveRestorePlan {
   original_path: string | null;
   current_path: string | null;
   current_exists: boolean;
-  archive_checksum_md5: string | null;
+  archive_checksum_md5: string | null; archive_checksum_sha256?: string | null; archive_checksum?: string | null; archive_checksum_algorithm?: "md5" | "sha256" | null;
   checksum_matches_manifest: boolean | null;
   manifest_schema_version: number | null;
   video_id: number | null;
-  video_stable_id: string | null;
+  video_stable_id: string | null; playarr_video_id?: string | null; archive_operation_id?: string | null;
   expected_video_revision: number | null;
   metadata_revision_consequence: string;
   companion_files: string[];
@@ -1038,18 +1038,6 @@ export interface ManualSearchResponse {
 }
 
 // ─── Export ──────────────────────────────────────────────
-export interface ExportKodiRequest {
-  video_ids?: number[] | null;
-  overwrite_existing?: boolean;
-}
-
-export interface ExportKodiResponse {
-  exported: number;
-  skipped: number;
-  errors: number;
-  message: string;
-}
-
 // ─── Resolve Requests ────────────────────────────────────
 export interface PinRequest {
   candidate_id: number;

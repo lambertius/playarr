@@ -11,6 +11,9 @@ so parallel Stage B workers never block each other.
 import logging
 import os
 import re
+import hashlib
+import json
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -34,42 +37,50 @@ class TocTouDuplicateError(Exception):
 
 
 def apply_mutation_plan(plan: dict) -> int:
-    """Apply a mutation plan to the database.
-
-    Acquires _apply_lock, opens a session, runs all writes, commits, closes.
-    Retries up to 3 times on transient SQLite "database is locked" errors
-    with exponential backoff.
-
-    Returns:
-        video_item.id of the created/updated VideoItem.
-
-    Raises:
-        Exception on permanent DB errors (caller should handle).
-    """
-    import time
-    last_exc = None
-    for attempt in range(_MAX_APPLY_RETRIES):
-        with _apply_lock:
-            try:
-                return _execute_plan(plan)
-            except TocTouDuplicateError:
-                raise  # Propagate immediately — caller must clean up files
-            except Exception as e:
-                if "database is locked" in str(e) and attempt < _MAX_APPLY_RETRIES - 1:
-                    last_exc = e
-                    delay = min(1 + attempt * 2, 15)  # 1,3,5,7,9,11,13,15,15,15
-                    logger.warning(
-                        f"[Job {plan.get('job_id')}] apply_mutation_plan: DB locked, "
-                        f"retry {attempt + 1}/{_MAX_APPLY_RETRIES} in {delay}s"
+    """Submit Stage C to the durable, priority-aware mutation actor."""
+    from app.config import get_settings
+    from app.models import MutationCommand
+    from app.services.mutation_coordinator import CommandRequest, MutationPriority, enqueue_command
+    from app.services.mutation_runtime import notify_mutation_worker, process_next_mutation
+    encoded = json.dumps(plan, sort_keys=True, default=str).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    db = SessionLocal()
+    try:
+        command, _created = enqueue_command(db, CommandRequest(
+            command_type="import.plan.apply", entity_type="import_job",
+            entity_stable_id=f"job:{plan['job_id']}", payload={"plan": plan},
+            idempotency_key=f"import:{plan['job_id']}:{digest}",
+            priority=MutationPriority.IMPORT,
+        ), max_pending=getattr(get_settings(), "mutation_queue_max", 1000))
+        command_id = command.id
+        db.commit()
+    finally:
+        db.close()
+    notify_mutation_worker()
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        if get_settings().deployment_profile == "single_process":
+            process_next_mutation(SessionLocal)
+        check = SessionLocal()
+        try:
+            current = check.get(MutationCommand, command_id)
+            if current and current.status == "succeeded":
+                result = current.result_json or {}
+                if result.get("duplicate"):
+                    raise TocTouDuplicateError(
+                        int(result["existing_video_id"]), int(plan["job_id"]), result["reason"],
                     )
-                    time.sleep(delay)
-                    continue
-                raise
-    raise last_exc  # should not be reached
+                return int(result["video_id"])
+            if current and current.status == "failed":
+                raise RuntimeError((current.error_json or {}).get("message", "import apply failed"))
+        finally:
+            check.close()
+        time.sleep(0.025)
+    raise TimeoutError(f"import mutation {command_id} did not finish within 300 seconds")
 
 
-def _execute_plan(plan: dict) -> int:
-    """Execute the plan inside a single DB session.  Caller holds _apply_lock."""
+def _execute_plan(plan: dict, db=None) -> int:
+    """Execute a plan in the caller's transaction, or own one for compatibility."""
     from app.models import (
         VideoItem, QualitySignature, Source, MediaAsset, MetadataSnapshot,
         Genre, ProcessingJob, SourceProvider, JobStatus,
@@ -87,7 +98,8 @@ def _execute_plan(plan: dict) -> int:
     job_id = plan["job_id"]
     v = plan.get("video", {})
 
-    db = SessionLocal()
+    owns_session = db is None
+    db = db or SessionLocal()
     try:
         # ── 1. Authoritative duplicate check (TOCTOU defense) ────────
         overwrite_existing = plan.get("overwrite_existing", False)
@@ -140,7 +152,6 @@ def _execute_plan(plan: dict) -> int:
                                     f"(id={existing.id}), skipping insert")
                         _mark_job_skipped(db, job_id, video_id=existing.id,
                                          reason=dup_reason)
-                        db.commit()
                         # Raise so the caller can clean up files placed in Stage B
                         raise TocTouDuplicateError(
                             existing_video_id=existing.id,
@@ -178,7 +189,7 @@ def _execute_plan(plan: dict) -> int:
                 mb_release_id=v.get("mb_release_id"),
                 mb_release_group_id=v.get("mb_release_group_id"),
                 processing_state=v.get("processing_state") or {},
-                import_method="import",
+                import_method=("url" if plan.get("import_type") == "url" else "import"),
                 locked_fields=plan.get("locked_fields") or [],
             )
             db.add(video_item)
@@ -355,17 +366,22 @@ def _execute_plan(plan: dict) -> int:
             job.pipeline_steps = steps
             flag_modified(job, "pipeline_steps")
 
-        # ── COMMIT ───────────────────────────────────────────────────
-        db.commit()
+        # Commit only when this compatibility entry point owns the session.
+        if owns_session:
+            db.commit()
+        else:
+            db.flush()
         logger.info(f"[Job {job_id}] Apply complete — video_id={video_item.id}")
 
         return video_item.id
 
     except Exception:
-        db.rollback()
+        if owns_session:
+            db.rollback()
         raise
     finally:
-        db.close()
+        if owns_session:
+            db.close()
 
 
 # ── Helpers (DB-only, no network) ─────────────────────────────────────

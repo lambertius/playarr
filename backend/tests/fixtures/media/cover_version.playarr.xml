@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<playarr version="2" schemaVersion="2" playarrVersion="fixture"
+ sidecarRevision="1" entityRevision="1" generatedAt="2026-08-01T00:00:00Z"
+ contentHash="sha256:fixture-cover" entityId="fixture-cover" playarrVideoId="PVD-fixture-cover">
+  <portable_identity entityId="fixture-cover" videoId="PVD-fixture-cover" trackId="PTR-fixture-cover" />
+  <identity><artist>Fixture Artist</artist><title>Cover Fixture</title><version_type>cover</version_type></identity>
+</playarr>

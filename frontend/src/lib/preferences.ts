@@ -4,8 +4,7 @@
  * Replaces the scattered `localStorage` reads/writes for genuine UI
  * preferences (visualizer config, party-mode exclusions/animation, library
  * sort/view, per-page filters, …).  Preferences now live on the Playarr server
- * (`/api/preferences`) so every browser stays consistent and the Kodi add-on
- * can read the shared ones.
+ * (`/api/preferences`) so every browser stays consistent.
  *
  * Design:
  *  - An in-memory cache is the source of truth during a session.

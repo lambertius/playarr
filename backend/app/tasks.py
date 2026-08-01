@@ -65,10 +65,6 @@ from app.metadata.resolver import (
 )
 from app.metadata.assets import download_entity_assets, get_cached_asset_path
 from app.metadata.revisions import save_revision
-from app.metadata.exporters.kodi import (
-    export_artist, export_album, export_video as export_video_kodi, export_all as export_all_kodi,
-    clean_stale_exports,
-)
 from app.matching.resolver import resolve_video as matching_resolve_video
 from app.matching.normalization import make_comparison_key
 from app.services.canonical_track import (
@@ -144,7 +140,7 @@ def _update_job(job_id: int, _retries: int = 10, **kwargs):
             logger.error(f"_update_job(job={job_id}) failed: {exc}")
             _update_job_raw_fallback(job_id, **kwargs)
     else:
-        db_write_soon(_write)
+        db_write_soon(_write, coalesce_key=("job-progress", job_id))
 
 
 def _update_job_raw_fallback(job_id: int, **kwargs):
@@ -896,18 +892,21 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
                         break
                 if _archive_video and _existing_file_path:
                     _rdl_settings = get_settings()
+                    from app.services.content_id import compute_ids_for_video
+                    _archive_portable_id = video_item.playarr_video_id or compute_ids_for_video(video_item)["playarr_video_id"]
                     write_archive_manifest(
                         _archive_video,
                         _existing_file_path,
                         _rdl_settings.library_dir,
                         video_id=video_item.id,
-                        video_stable_id=video_item.stable_id,
+                        playarr_video_id=_archive_portable_id, operation_id=f"redownload:{job_id}",
                         artist=video_item.artist or "",
                         title=video_item.title or "",
                         archive_reason="redownload",
                     )
             except Exception as _e:
                 _append_job_log(job_id, f"Archive manifest write warning: {_e}")
+                raise RuntimeError("redownload archive could not be journalled") from _e
 
         new_folder, new_file = organize_file(
             downloaded_file,
@@ -1189,7 +1188,7 @@ def _rescan_from_disk(job_id: int, video_id: int,
     genres, MusicBrainz IDs, artwork, and entity links.
     """
     from app.services.playarr_xml import find_playarr_xml, parse_playarr_xml
-    from app.pipeline_url.db_apply import _upsert_source
+    from app.pipeline_lib.db_apply import _upsert_source
     from app.pipeline_url.write_queue import db_write
 
     _update_job(job_id, current_step="Reading XML sidecar", progress_percent=10)
@@ -1623,8 +1622,7 @@ def _rescan_from_disk(job_id: int, video_id: int,
         from app.pipeline_url.workspace import ImportWorkspace
         from app.pipeline_url.deferred import dispatch_deferred
 
-        deferred_tasks = ["preview", "matching", "kodi_export",
-                          "entity_artwork", "orphan_cleanup"]
+        deferred_tasks = ["preview", "matching", "entity_artwork", "orphan_cleanup"]
         ws = ImportWorkspace(job_id)
         ws.log("Rescan-from-disk deferred tasks starting")
         dispatch_deferred(video_id, deferred_tasks, ws,
@@ -2231,7 +2229,7 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                 # Skip clearing when all fields are locked.
                 # Only clear if the scrape actually found replacement sources;
                 # otherwise we'd destroy existing data with nothing to replace it.
-                from app.pipeline_url.db_apply import _upsert_source
+                from app.pipeline_lib.db_apply import _upsert_source
                 if not all_locked and source_links:
                     _cleared = db.query(Source).filter(
                         Source.video_id == video_id,
@@ -2444,8 +2442,7 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
             from app.pipeline_url.workspace import ImportWorkspace
             from app.pipeline_url.deferred import dispatch_deferred
 
-            deferred_tasks = ["preview", "matching", "kodi_export",
-                              "entity_artwork", "orphan_cleanup"]
+            deferred_tasks = ["preview", "matching", "entity_artwork", "orphan_cleanup"]
             if scene_analysis:
                 deferred_tasks.append("scene_analysis")
             if ai_auto or ai_only:
@@ -5085,7 +5082,7 @@ def _verify_sidecar_processing_states(db, job_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _apply_sidecar_to_existing(db, video_item, xd: dict, job_id: int):
+def _legacy_apply_sidecar_to_existing(db, video_item, xd: dict, job_id: int):
     """Apply sidecar XML data to an existing VideoItem, updating changed fields.
 
     This is used by the "update existing" library scan mode to sync DB entries
@@ -5298,6 +5295,24 @@ def _apply_sidecar_to_existing(db, video_item, xd: dict, job_id: int):
         _append_job_log(job_id, f"Updated: {video_item.artist} - {video_item.title} ({len(changed)} fields)")
 
 
+def _apply_sidecar_to_existing(db, video_item, xd: dict, job_id: int, xml_path: str):
+    """Use the same canonical mapper as empty-database rebuilds."""
+    from app.config import get_settings
+    from app.services.sidecar_restore import apply_sidecar_data
+
+    payload = dict(xd)
+    payload["_source_path"] = xml_path
+    changed = apply_sidecar_data(
+        db, video_item, payload, library_root=get_settings().library_dir,
+    )
+    db.commit()
+    if changed:
+        _append_job_log(
+            job_id,
+            f"Updated: {video_item.artist} - {video_item.title} ({len(changed)} fields)",
+        )
+
+
 @celery_app.task(bind=True)
 def library_scan_task(self, job_id: int, import_new: bool = True,
                       update_existing: bool = False):
@@ -5363,7 +5378,7 @@ def library_scan_task(self, job_id: int, import_new: bool = True,
                     if xml_path:
                         xd = parse_playarr_xml(xml_path)
                         if xd:
-                            _apply_sidecar_to_existing(db, existing, xd, job_id)
+                            _apply_sidecar_to_existing(db, existing, xd, job_id, xml_path)
                             updated_count += 1
                 continue
 
@@ -6243,27 +6258,6 @@ def metadata_refresh_task(self, job_id: int, video_id: int, force: bool = False)
         if track_entity:
             video_item.track_id = track_entity.id
 
-        # --- Kodi re-export ---
-        _update_job(job_id, current_step="Kodi re-export", progress_percent=70)
-        try:
-            source_url = video_item.sources[0].canonical_url if video_item.sources else ""
-            genres = [g.name for g in video_item.genres]
-            if artist_entity:
-                export_artist(db, artist_entity)
-            if album_entity:
-                export_album(db, album_entity)
-            export_video_kodi(
-                db, video_item.id, artist=artist, title=title,
-                album=video_item.album or "", year=video_item.year,
-                genres=genres, plot=video_item.plot or "",
-                source_url=source_url, folder_path=video_item.folder_path or "",
-                resolution_label=video_item.resolution_label or "",
-            )
-            _set_pipeline_step(job_id, "kodi_export", "success")
-        except Exception as e:
-            _append_job_log(job_id, f"Kodi export error: {e}")
-            _set_pipeline_step(job_id, "kodi_export", "failed")
-
         db.commit()
 
         # Clean up orphaned entities if entity links changed during refresh
@@ -6297,43 +6291,6 @@ def metadata_refresh_task(self, job_id: int, video_id: int, force: bool = False)
 # ---------------------------------------------------------------------------
 # Full Kodi export task
 # ---------------------------------------------------------------------------
-
-@celery_app.task(bind=True)
-def kodi_export_task(self, job_id: int):
-    """Re-export all Kodi NFO + artwork from the canonical metadata store."""
-    _update_job(job_id, status=JobStatus.analyzing, started_at=datetime.now(timezone.utc),
-                celery_task_id=getattr(getattr(self, 'request', None), 'id', None))
-    _append_job_log(job_id, "Starting full Kodi export")
-
-    db = SessionLocal()
-    try:
-        _update_job(job_id, current_step="Exporting all entities", progress_percent=10)
-        counts = export_all_kodi()
-        _append_job_log(job_id, f"Exported: {counts.get('artists', 0)} artists, "
-                        f"{counts.get('albums', 0)} albums, {counts.get('videos', 0)} videos")
-
-        # Clean stale exports
-        _update_job(job_id, current_step="Cleaning stale exports", progress_percent=90)
-        try:
-            clean_stale_exports(db, "kodi")
-            _append_job_log(job_id, "Stale exports cleaned")
-        except Exception as e:
-            _append_job_log(job_id, f"Stale cleanup warning: {e}")
-
-        db.commit()
-        _update_job(job_id, status=JobStatus.complete, progress_percent=100,
-                    current_step="Complete", completed_at=datetime.now(timezone.utc))
-        _append_job_log(job_id, "Full Kodi export complete")
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Kodi export failed: {e}")
-        _update_job(job_id, status=JobStatus.failed, error_message=str(e),
-                    completed_at=datetime.now(timezone.utc))
-        _append_job_log(job_id, f"ERROR: {e}")
-    finally:
-        db.close()
-
 
 # ---------------------------------------------------------------------------
 # Batch matching / resolve task

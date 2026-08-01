@@ -275,7 +275,7 @@ def build_plan_from_workspace(ws) -> dict:
     # ── Deferred tasks ───────────────────────────────────────────────
     deferred = ["preview", "matching"]
     if mode == "advanced":
-        deferred.extend(["kodi_export", "entity_artwork", "orphan_cleanup"])
+        deferred.extend(["entity_artwork", "orphan_cleanup"])
         # Only run the AI enrichment task when the user actually selected AI for
         # this import. Previously this was appended whenever AI review hadn't
         # produced a plot — which is *always* true with AI off — so the deferred

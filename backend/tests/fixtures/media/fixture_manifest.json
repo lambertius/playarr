@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "fixtures": {
+    "sdr_16x9.mp4": {
+      "width": 320,
+      "height": 180,
+      "pixel_format": "yuv420p",
+      "audio": true,
+      "version_type": "normal"
+    },
+    "hdr10_bt2020.mkv": {
+      "width": 320,
+      "height": 180,
+      "pixel_format": "yuv420p10le",
+      "color_primaries": "bt2020",
+      "color_transfer": "smpte2084",
+      "version_type": "normal"
+    },
+    "four_three.mp4": {
+      "width": 320,
+      "height": 240,
+      "display_aspect_ratio": "4:3"
+    },
+    "letterboxed.mp4": {
+      "width": 320,
+      "height": 240,
+      "expected_crop": {"width": 320, "height": 180, "x": 0, "y": 30}
+    },
+    "pillarboxed.mp4": {
+      "width": 320,
+      "height": 180,
+      "expected_crop": {"width": 240, "height": 180, "x": 40, "y": 0}
+    },
+    "variable_frame_rate.mp4": {
+      "width": 320,
+      "height": 180,
+      "variable_frame_rate": true
+    },
+    "live_version.mp4": {"version_type": "live"},
+    "cover_version.mp4": {"version_type": "cover"},
+    "duplicate_exact_copy.mp4": {"exact_duplicate_of": "sdr_16x9.mp4"}
+  }
+}

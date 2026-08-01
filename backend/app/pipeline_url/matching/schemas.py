@@ -150,17 +150,3 @@ class ManualSearchResponse(BaseModel):
     query: str
     entity_type: str
     results: List[ManualSearchResultOut] = []
-
-
-# ── Export schemas ────────────────────────────────────────────────────────
-
-class ExportKodiRequest(BaseModel):
-    video_ids: Optional[List[int]] = Field(None, description="Specific video IDs; null = all matched")
-    overwrite_existing: bool = Field(False, description="Overwrite existing NFO files")
-
-
-class ExportKodiResponse(BaseModel):
-    exported: int = 0
-    skipped: int = 0
-    errors: int = 0
-    message: str = ""

@@ -1223,14 +1223,14 @@ export function VideoEditorPage() {
 
           <div className="flex-1 min-w-[8px]" />
 
-          <Tooltip content="Apply edits to checked videos (asks for confirmation)">
+          <Tooltip content="Save edits to checked videos (asks for confirmation)">
             <button
               className="btn-primary btn-sm whitespace-nowrap"
               onClick={handleApplyChecked}
               disabled={checkedIds.size === 0 || encodeBatch.isPending || encodeSingle.isPending}
             >
               {(encodeBatch.isPending || encodeSingle.isPending) ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-              Apply ({checkedIds.size})
+              Save edits ({checkedIds.size})
             </button>
           </Tooltip>
 
@@ -1262,7 +1262,7 @@ export function VideoEditorPage() {
                   onClick={applyGlobalsToAll}
                   disabled={queueIds.length === 0}
                 >
-                  Apply to all queued
+                  Save to all queued
                 </button>
               </Tooltip>
             </div>

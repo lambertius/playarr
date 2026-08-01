@@ -10,7 +10,7 @@ import type {
   LibraryParams, JobsParams, AppStats, FacetFilterParams,
   MatchResult, NormalizationResult, ReviewListResponse, ReviewParams,
   PinRequest, ApplyRequest, BatchResolveRequest, BatchResolveResponse,
-  ManualSearchResponse, ExportKodiRequest, ExportKodiResponse,
+  ManualSearchResponse,
   SearchEntityType, SourceInfo,
   OrphanDetectResponse, OrphanCleanRequest, OrphanCleanResponse,
   LibraryHealthResponse,
@@ -38,6 +38,57 @@ import type {
 } from "@/types";
 
 const api = axios.create({ baseURL: "/api" });
+
+export interface ApiErrorEnvelope {
+  code: string; message: string; operation_id: string | null; retryable: boolean;
+  field_errors: Record<string, string[]>; diagnostics_id: string | null;
+  request_id?: string | null;
+}
+
+export function getApiError(error: unknown): ApiErrorEnvelope | null {
+  const response = (error as { response?: { data?: unknown } })?.response;
+  const data = response?.data as Partial<ApiErrorEnvelope> | undefined;
+  return data?.code && data?.message ? data as ApiErrorEnvelope : null;
+}
+
+api.interceptors.response.use(undefined, (error: unknown) => {
+  const envelope = getApiError(error);
+  const response = (error as { response?: { data?: Record<string, unknown> } }).response;
+  if (envelope && response?.data && !("detail" in response.data)) {
+    // Compatibility for old components while toast call-sites migrate to message.
+    response.data.detail = envelope.message;
+  }
+  return Promise.reject(error);
+});
+
+export interface OperationAccepted {
+  operation_id: string;
+  status: "pending" | "running";
+  created: boolean;
+}
+
+export interface OperationStatus<Result = Record<string, unknown>> {
+  operation_id: string;
+  status: "pending" | "running" | "waiting_for_release" | "reconciliation_required" | "succeeded" | "failed" | "cancelled" | "rolled_back" | "manual_attention";
+  result?: Result | null;
+  error?: { code?: string; message?: string; retryable?: boolean } | null;
+}
+
+async function waitForOperation<Result>(operationId: string): Promise<Result> {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const current = await api.get<OperationStatus<Result>>(`/operations/${operationId}`)
+      .then(response => response.data);
+    if (current.status === "succeeded") return current.result as Result;
+    if (["failed", "cancelled", "rolled_back", "manual_attention", "reconciliation_required"].includes(current.status)) {
+      const failure = new Error(current.error?.message || `Operation ${operationId} failed`);
+      Object.assign(failure, { code: current.error?.code, operation_id: operationId });
+      throw failure;
+    }
+    await new Promise(resolve => globalThis.setTimeout(resolve, 75));
+  }
+  throw new Error(`Operation ${operationId} did not finish within 120 seconds`);
+}
 
 // ─── TMVDB (The Music Video DB) contribution ─────────────────
 export const tmvdbApi = {
@@ -96,6 +147,11 @@ export const libraryApi = {
 
   update: (id: number, data: VideoItemUpdate) =>
     api.put<VideoItemDetail>(`/library/${id}`, data).then(r => r.data),
+
+  queueRating: (id: number, data: { expected_revision: number; song_rating?: number | null; video_rating?: number | null }) =>
+    api.post<OperationAccepted>(`/library/${id}/rating`, {
+      ...data, idempotency_key: crypto.randomUUID(),
+    }).then(r => r.data),
 
   delete: (id: number) =>
     api.delete(`/library/${id}`).then(r => r.data),
@@ -171,8 +227,29 @@ export const libraryApi = {
   cleanStaleArchives: (folders: string[]) =>
     api.post<{ deleted: number; errors: string[] }>("/settings/archive-clean-stale", { folders }).then(r => r.data),
 
-  rename: (videoId: number) =>
-    api.post<VideoItemDetail>(`/library/${videoId}/rename`).then(r => r.data),
+  renamePreview: (videoId: number) =>
+    api.post<{
+      file_operation_id: string;
+      status: string;
+      plan: {
+        old_folder: string; new_folder: string;
+        collisions: { source: string; destination: string; reason: string }[];
+        active_stream_usage: boolean; cross_volume: boolean; case_only: boolean;
+        steps: { role: string; source: string; destination: string; size_bytes: number }[];
+      };
+    }>(`/library/${videoId}/rename-preview`).then(r => r.data),
+
+  rename: async (videoId: number, fileOperationId?: string) => {
+    const preview = fileOperationId
+      ? { file_operation_id: fileOperationId }
+      : await libraryApi.renamePreview(videoId);
+    const accepted = await api.post<OperationAccepted>(`/library/${videoId}/rename-commit`, {
+      file_operation_id: preview.file_operation_id,
+      idempotency_key: crypto.randomUUID(),
+    }).then(r => r.data);
+    await waitForOperation(accepted.operation_id);
+    return api.get<VideoItemDetail>(`/library/${videoId}`).then(r => r.data);
+  },
 
   openFolder: (videoId: number) =>
     api.post<{ ok: boolean; folder: string }>(`/library/${videoId}/open-folder`).then(r => r.data),
@@ -305,6 +382,9 @@ export const jobsApi = {
 
 export const operationsApi = {
   health: () => api.get<OperationHealth>("/operations/health").then(r => r.data),
+  get: <Result = Record<string, unknown>>(operationId: string) =>
+    api.get<OperationStatus<Result>>(`/operations/${operationId}`).then(r => r.data),
+  wait: waitForOperation,
 };
 
 // ─── Playback URLs ────────────────────────────────────────
@@ -448,12 +528,6 @@ export const settingsApi = {
   archiveStreamUrl: (path: string) =>
     `/api/playback/stream-archive?path=${encodeURIComponent(path)}`,
 
-  kodiPluginInfo: () =>
-    api.get<{ available: boolean; version: string; addon_id: string; filename: string }>(
-      "/settings/kodi-plugin/info",
-    ).then(r => r.data),
-
-  kodiPluginDownloadUrl: () => "/api/settings/kodi-plugin",
 };
 
 // ─── Stats ────────────────────────────────────────────────
@@ -467,25 +541,25 @@ export const statsApi = {
 // ─── Resolve / Matching ──────────────────────────────────
 export const resolveApi = {
   trigger: (videoId: number, force = false) =>
-    api.post<MatchResult>(`/resolve/${videoId}`, null, { params: { force } }).then(r => r.data),
+    api.post<MatchResult>(`/resolve/videos/${videoId}`, null, { params: { force } }).then(r => r.data),
 
   get: (videoId: number) =>
-    api.get<MatchResult>(`/resolve/${videoId}`).then(r => r.data),
+    api.get<MatchResult>(`/resolve/videos/${videoId}`).then(r => r.data),
 
   normalization: (videoId: number) =>
-    api.get<NormalizationResult>(`/resolve/${videoId}/normalization`).then(r => r.data),
+    api.get<NormalizationResult>(`/resolve/videos/${videoId}/normalization`).then(r => r.data),
 
   pin: (videoId: number, data: PinRequest) =>
-    api.post(`/resolve/${videoId}/pin`, data).then(r => r.data),
+    api.post(`/resolve/videos/${videoId}/pin`, data).then(r => r.data),
 
   unpin: (videoId: number) =>
-    api.post(`/resolve/${videoId}/unpin`).then(r => r.data),
+    api.post(`/resolve/videos/${videoId}/unpin`).then(r => r.data),
 
   apply: (videoId: number, data: ApplyRequest) =>
-    api.post(`/resolve/${videoId}/apply`, data).then(r => r.data),
+    api.post(`/resolve/videos/${videoId}/apply`, data).then(r => r.data),
 
   undo: (videoId: number) =>
-    api.post(`/resolve/${videoId}/undo`).then(r => r.data),
+    api.post(`/resolve/videos/${videoId}/undo`).then(r => r.data),
 
   batch: (data: BatchResolveRequest) =>
     api.post<BatchResolveResponse>("/resolve/batch", data).then(r => r.data),
@@ -534,11 +608,6 @@ export const searchApi = {
 };
 
 // ─── Export ──────────────────────────────────────────────
-export const exportApi = {
-  kodi: (data?: ExportKodiRequest) =>
-    api.post<ExportKodiResponse>("/export/kodi", data ?? {}).then(r => r.data),
-};
-
 // ─── AI Metadata Enrichment ─────────────────────────────
 export const aiApi = {
   enrich: (videoId: number, data?: AIEnrichRequest) =>
@@ -902,12 +971,20 @@ export const newVideosApi = {
     api.post<{ status: string; job_count: number; jobs: { job_id: number; url: string; title: string }[] }>("/new-videos/cart/import-all", options ?? {}).then(r => r.data),
 
   addVideo: (suggested_video_id: number) =>
-    api.post<{ status: string; job_id: number; category: string; replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean }>("/new-videos/add", { suggested_video_id }).then(r => r.data),
+    api.post<OperationAccepted>("/new-videos/add", {
+      suggested_video_id, idempotency_key: crypto.randomUUID(),
+    }).then(r => waitForOperation<{
+      status: string; job_id: number; category: string;
+      replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean;
+    }>(r.data.operation_id)),
 
   dismiss: (suggested_video_id: number, dismissal_type: "temporary" | "permanent" = "temporary", reason?: string) =>
-    api.post<{ status: string; type: string; replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean }>("/new-videos/dismiss", {
-      suggested_video_id, dismissal_type, reason,
-    }).then(r => r.data),
+    api.post<OperationAccepted>("/new-videos/dismiss", {
+      suggested_video_id, dismissal_type, reason, idempotency_key: crypto.randomUUID(),
+    }).then(r => waitForOperation<{
+      status: string; type: string;
+      replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean;
+    }>(r.data.operation_id)),
 
   undismiss: (suggested_video_id: number) =>
     api.post<{ status: string }>("/new-videos/undismiss", { suggested_video_id }).then(r => r.data),

@@ -34,7 +34,7 @@ function getBoolSetting(settings: { key: string; value: string }[] | undefined, 
 export function ScrapeOptionsModal({ open, onClose, onScrape, itemCount, isPending }: ScrapeOptionsModalProps) {
   const [scrapeWiki, setScrapeWiki] = useState(true);
   const [scrapeMusicbrainz, setScrapeMusicbrainz] = useState(true);
-  const [_scrapeTmvdb, setScrapeTmvdb] = useState(false);
+  const [, setScrapeTmvdb] = useState(false);
   const [aiAuto, setAiAuto] = useState(false);
   const [aiOnly, setAiOnly] = useState(false);
   const [sceneAnalysis, setSceneAnalysis] = useState(true);

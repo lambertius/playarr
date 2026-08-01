@@ -1,11 +1,11 @@
 # Playarr external review snapshot
 
 - Snapshot date: 2026-08-01
-- Application version: `1.10.0`
+- Application version: `1.11.0`
 - Database schema: `025_tmvdb_outbox`
 
 This package is a compact source-and-runtime snapshot prepared from the current
-working tree after implementing the requirements in:
+working tree after a preliminary remediation pass against:
 
 - `docs/Playarr Improvements and bugs.docx`
 - `docs/Playarr_Product_Completion_and_Remediation_Specification_v2.0.docx`
@@ -21,7 +21,12 @@ working tree after implementing the requirements in:
   demonstrating migration compatibility and two v2 exports generated from
   active records using the current writer.
 
-## Main remediation areas implemented
+It is **not** a completed implementation of the v2.0 specification. Earlier
+wording claimed completion without tracing the 115 requirement IDs or passing
+their acceptance gates. That claim was incorrect. See
+`docs/REMEDIATION_TRACEABILITY.md` for the current audit.
+
+## Preliminary remediation scaffolding present
 
 - Crash-safe sidecar v2 writes, stable portable identities, revisions, content
   hashes, reconciliation, and a durable outbox.
@@ -45,14 +50,15 @@ working tree after implementing the requirements in:
 
 ## Verification at packaging time
 
-- Backend: `469 passed`.
+- Backend: `471 passed`. These are primarily unit and focused API tests; they
+  do not cover the complete specification acceptance matrix.
 - Frontend production build: passed.
 - OpenAPI: generated successfully with 265 paths; no public Kodi routes.
 - Packaged database: SQLite integrity check `ok`; Alembic head
   `025_tmvdb_outbox`.
-- Full frontend lint still reports inherited cleanup debt (65 errors and 9
-  warnings, improved from the initial 67 errors and 11 warnings). It does not
-  block the production build.
+- Full frontend lint still reports inherited cleanup debt. This is a failed
+  BASE-002 release gate and must be corrected; a production bundle compiling
+  successfully is not sufficient verification.
 
 ## Deliberate exclusions
 
@@ -68,9 +74,17 @@ active library preflight also found 37 database media paths unavailable from the
 packaging environment and one unavailable/unwritable sidecar location; those
 environment-specific media files are intentionally not copied here.
 
-## Remaining architectural note
+## Known release-blocking gaps
 
-The URL and library pipelines now share import-policy semantics and canonical
-leaf services. Their legacy stage adapters remain during the parity and
-fault-injection phase; deleting those adapters is intentionally deferred until
-the final pipeline-convergence gate is complete.
+- Active URL and library imports still use separate stage graphs and copied
+  pipeline modules.
+- The mutation coordinator is not the enforced application write boundary;
+  direct commits remain widespread.
+- A file-operation plan/journal/executor service and its fault-injection tests
+  do not exist.
+- Sidecar v2 lacks the required empty-database reconstruction gate.
+- Frontend requirement tests and clean-environment CI verification do not
+  exist.
+- Several backend and frontend features are partial contracts or UI shells and
+  have not passed the document's workflow, recovery, concurrency, portability,
+  accessibility, or performance acceptance criteria.

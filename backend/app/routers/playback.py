@@ -18,9 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFil
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
 from sqlalchemy import func
-
 from app.database import get_db
 from app.models import VideoItem, PlaybackHistory, MediaAsset, AppSetting
 from app.services.preview_generator import generate_preview
@@ -108,14 +106,10 @@ def _cached_file_response_from_cache(file_path: str, file_hash: str | None, requ
 # Maps normalised file path → set of subprocess.Popen objects.
 _active_streams: dict[str, set[subprocess.Popen]] = {}
 _streams_lock = threading.Lock()
-
-
 def _register_stream(file_path: str, proc: subprocess.Popen):
     key = os.path.normpath(file_path)
     with _streams_lock:
         _active_streams.setdefault(key, set()).add(proc)
-
-
 def _unregister_stream(file_path: str, proc: subprocess.Popen):
     key = os.path.normpath(file_path)
     with _streams_lock:
@@ -130,6 +124,11 @@ def active_stream_count() -> int:
     """Total number of active streaming ffmpeg processes (diagnostics)."""
     with _streams_lock:
         return sum(len(procs) for procs in _active_streams.values())
+
+
+def is_streaming_file(file_path: str) -> bool:
+    with _streams_lock:
+        return bool(_active_streams.get(os.path.normpath(file_path)))
 
 
 def kill_streams_for_file(file_path: str) -> int:

@@ -919,6 +919,7 @@ class MutationCommand(Base):
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending", index=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    result_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     error_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

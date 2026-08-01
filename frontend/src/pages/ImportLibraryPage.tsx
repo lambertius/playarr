@@ -478,7 +478,7 @@ function OptionsStep({
           >
             <div className="font-medium text-text-primary text-sm">Advanced Import</div>
             <p className="text-xs text-text-muted mt-1">
-              Full pipeline: Wikipedia, MusicBrainz, entity resolution, Kodi export.
+              Full pipeline: Wikipedia, MusicBrainz, entity resolution, NFO and artwork export.
             </p>
           </button>
         </div>

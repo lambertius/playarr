@@ -1210,58 +1210,6 @@ function YtdlpUpdater() {
   );
 }
 
-/* ── Kodi add-on download (version-matched to this server) ── */
-
-/** Deprecated compatibility component; no navigation entry or API route exposes it. */
-export function KodiPluginSettings() {
-  const [info, setInfo] = useState<{ available: boolean; version: string; filename: string } | null>(null);
-
-  useEffect(() => {
-    settingsApi.kodiPluginInfo().then(setInfo).catch(() => setInfo(null));
-  }, []);
-
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Kodi Add-on</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Download the Playarr add-on for Kodi. The download is built from — and version-matched
-            to — this server ({info?.version ? `v${info.version}` : "…"}), so the add-on and server
-            never drift out of sync. Re-download it after every Playarr update.
-          </p>
-        </div>
-        <div className="shrink-0 sm:pt-0.5">
-          {info && !info.available ? (
-            <span className="text-xs text-text-muted">Not bundled with this build</span>
-          ) : (
-            <a
-              href={settingsApi.kodiPluginDownloadUrl()}
-              download
-              className="btn-primary btn-sm flex items-center gap-1.5 no-underline"
-            >
-              <Download size={14} />
-              Download
-            </a>
-          )}
-        </div>
-      </div>
-
-      <div className="rounded-lg bg-surface-dark/50 border border-white/5 p-3 space-y-1.5">
-        <p className="text-xs font-medium text-text-secondary">Install in Kodi</p>
-        <ol className="text-xs text-text-muted leading-relaxed list-decimal pl-4 space-y-0.5">
-          <li>Copy the downloaded zip to your Kodi device.</li>
-          <li>In Kodi: <span className="text-text-secondary">Settings → Add-ons → Install from zip file</span>.</li>
-          <li>Select the zip, then open the Playarr add-on and set your server address in its settings.</li>
-        </ol>
-        <p className="text-[11px] text-text-muted/80 pt-1">
-          Installing from zip requires "Unknown sources" enabled in Kodi's add-on settings.
-        </p>
-      </div>
-    </div>
-  );
-}
-
 /* ── Open native OS folder picker via backend ── */
 
 async function openDirectoryPicker(onSelect: (path: string) => void) {

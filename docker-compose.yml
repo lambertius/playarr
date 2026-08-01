@@ -36,11 +36,32 @@ services:
       context: .
       target: backend
     restart: unless-stopped
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2 -Q processing
     env_file: backend/.env
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DEPLOYMENT_PROFILE=redis
+    volumes:
+      - ${LIBRARY_DIR:-./data/library}:/data/library
+      - ${ARCHIVE_DIR:-./data/archive}:/data/archive
+      - ${DOWNLOAD_DIR:-./data/downloads}:/data/downloads
+      - db-data:/app/data
+    depends_on:
+      - redis
+
+  # Dedicated single-consumer domain mutation actor. Background processing
+  # workers never consume this queue.
+  mutation-worker:
+    build:
+      context: .
+      target: backend
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Q mutations
+    env_file: backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DEPLOYMENT_PROFILE=redis
+      - PLAYARR_PROCESS_ROLE=mutation_worker
     volumes:
       - ${LIBRARY_DIR:-./data/library}:/data/library
       - ${ARCHIVE_DIR:-./data/archive}:/data/archive

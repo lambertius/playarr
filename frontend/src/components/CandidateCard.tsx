@@ -97,12 +97,12 @@ export default function CandidateCard({ candidate, isSelected, onPin, onApply, c
       {/* Actions */}
       <div className="flex items-center gap-1 flex-shrink-0">
         {onApply && !isSelected && (
-          <Tooltip content="Apply this match without pinning — it may change on next resolve">
+          <Tooltip content="Use this match without pinning — it may change on next resolve">
             <button
               onClick={(e) => { e.stopPropagation(); onApply(); }}
               className="btn-ghost btn-sm text-xs"
             >
-              Apply
+              Use match
             </button>
           </Tooltip>
         )}

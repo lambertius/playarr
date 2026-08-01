@@ -1,17 +1,4 @@
-# AUTO-SEPARATED from pipeline/stages.py for pipeline_url pipeline
-# This file is independent â€” changes here do NOT affect the other pipeline.
-"""
-URL import pipeline orchestrator.
-
-Public entry point:
-  run_url_import_pipeline(job_id, url, **opts) â€” for import_video_task
-
-Pipeline stages:
-  Stage A â€” coarse DB status update (milliseconds)
-  Stage B â€” workspace build (parallel, no locks, no DB writes)
-  Stage C â€” serial DB apply (short transaction under _apply_lock)
-  Stage D â€” deferred enrichment tasks dispatched as background work
-"""
+"""URL source adapter feeding the shared plan/apply/deferred stages."""
 import logging
 import os
 import tempfile
@@ -19,8 +6,8 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from app.pipeline_url.workspace import ImportWorkspace
-from app.pipeline_url.mutation_plan import build_plan_from_workspace
-from app.pipeline_url.db_apply import apply_mutation_plan
+from app.pipeline_lib.mutation_plan import build_plan_from_workspace
+from app.pipeline_lib.db_apply import apply_mutation_plan, TocTouDuplicateError
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +23,18 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
 
     ws = ImportWorkspace(job_id)
     try:
-        ws.reset()  # clear stale artifacts from recycled job IDs
         from app.services.import_policy import policy_from_pipeline_options
         import_policy = policy_from_pipeline_options(opts)
         opts = {**opts, "import_policy": import_policy.model_dump(mode="json")}
         _coarse_update(job_id, JobStatus.downloading, step="Starting import", progress=5)
-        ws.write_artifact("input", {
+        input_data = {
             "import_type": "url",
             "url": url,
             "mode": "advanced",
+            "options": opts,
             **opts,
-        })
+        }
+        ws.prepare_run(input_data)
         ws.log(f"URL import started: {url}")
         ws.log(f"Import policy: {import_policy.model_dump_json()}")
 
@@ -55,12 +43,16 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
         ws.sync_logs_to_db()
 
         # Stage C
-        ws.update_stage("apply", "running")
-        _coarse_update(job_id, JobStatus.analyzing, step="Applying to database", progress=85)
         plan = ws.read_artifact("mutation_plan")
-        video_id = apply_mutation_plan(plan)
-        ws.update_stage("apply", "complete")
-        ws.write_artifact("apply_result", {"video_id": video_id})
+        prior_apply = ws.read_artifact("apply_result") if ws.is_stage_complete("apply") else None
+        if prior_apply:
+            video_id = int(prior_apply["video_id"])
+        else:
+            ws.update_stage("apply", "running")
+            _coarse_update(job_id, JobStatus.analyzing, step="Applying to database", progress=85)
+            video_id = apply_mutation_plan(plan)
+            ws.write_artifact("apply_result", {"video_id": video_id})
+            ws.update_stage("apply", "complete")
         ws.log(f"Applied to DB â€” video_id={video_id}")
         # Update display name to resolved artist - title with job type
         _artist_d = plan['video'].get('artist', '')
@@ -127,6 +119,13 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
                 _skip_db.close()
         ws.sync_logs_to_db()
         ws.cleanup_on_success()
+    except TocTouDuplicateError as toctou:
+        ws.log(f"TOCTOU duplicate — cleaning up: {toctou.reason}")
+        from app.services.import_cleanup import cleanup_import_artifacts
+        cleanup_import_artifacts(ws)
+        _coarse_update(job_id, JobStatus.skipped, step=f"Skipped: {toctou.reason[:200]}",
+                       progress=100, video_id=toctou.existing_video_id)
+        ws.sync_logs_to_db(); ws.cleanup_on_success()
     except Exception as e:
         logger.error(f"[Job {job_id}] URL import failed: {e}", exc_info=True)
         _coarse_update(job_id, JobStatus.failed, error=str(e)[:2000])
@@ -1439,7 +1438,7 @@ def _coarse_update(job_id: int, status_enum=None, step: str = None,
     if is_terminal:
         db_write(_write)       # blocking â€” must land before pipeline continues
     else:
-        db_write_soon(_write)  # fire-and-forget cosmetic update
+        db_write_soon(_write, coalesce_key=("job-progress", job_id))
 
 
 def _get_job_status(name: str):

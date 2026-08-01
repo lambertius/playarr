@@ -1,16 +1,13 @@
 """
 Settings API — Read/write global and per-user settings.
 """
-import io
 import json
 import logging
 import os
-import re
 import signal
 import subprocess
 import sys
 import threading
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Literal
@@ -22,7 +19,6 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import AppSetting, FileOperation, NormalizationHistory, ReviewCaseItem, VideoItem
 from app.schemas import SettingOut, SettingUpdate, NormalizationHistoryOut
-from app.version import APP_VERSION
 
 router = APIRouter(prefix="/api/settings", tags=["Settings"])
 
@@ -837,10 +833,11 @@ class ArchiveItemOut(BaseModel):
     file_size_bytes: int = 0
     original_path: Optional[str] = None
     checksum_md5: Optional[str] = None
+    checksum_sha256: Optional[str] = None; playarr_video_id: Optional[str] = None
+    operation_id: Optional[str] = None
     manifest_schema_version: Optional[int] = None
     restore_eligible: bool = True
     integrity_status: str = "unchecked"
-
 
 def _archive_roots() -> list[tuple[str, str]]:
     from app.config import get_settings as _get_settings
@@ -848,7 +845,6 @@ def _archive_roots() -> list[tuple[str, str]]:
         (os.path.normpath(root), os.path.normpath(os.path.join(root, "_archive")))
         for root in _get_settings().get_all_library_dirs()
     ]
-
 
 def _validate_archive_folder(folder: str) -> tuple[str, str]:
     candidate = os.path.normcase(os.path.normpath(folder))
@@ -858,13 +854,12 @@ def _validate_archive_folder(folder: str) -> tuple[str, str]:
             return library_root, archive_root
     raise HTTPException(403, "Path is not inside archive directory")
 
-
 def _archive_plan(folder: str, db: Session) -> dict:
     from app.routers.video_editor import (
         _MANIFEST_NAME, _VIDEO_EXTS, _file_checksum,
         _manifest_video_path, _read_folder_manifest,
     )
-
+    from app.services.archive_identity import manifest_checksum, manifest_video_stable_id, resolve_manifest_video
     library_root, _archive_root = _validate_archive_folder(folder)
     if not os.path.isdir(folder):
         raise HTTPException(404, "Archive folder not found")
@@ -880,12 +875,12 @@ def _archive_plan(folder: str, db: Session) -> dict:
     if archive_file is None:
         raise HTTPException(404, "No video file found in archive folder")
 
-    video = db.get(VideoItem, manifest.get("video_id")) if manifest.get("video_id") else None
+    video = resolve_manifest_video(db, manifest)
     relative = manifest.get("original_relative_path")
     original_path = os.path.join(library_root, relative) if relative else None
     current_path = video.file_path if video and video.file_path else original_path
-    expected_checksum = manifest.get("checksum_md5")
-    actual_checksum = _file_checksum(archive_file) if expected_checksum else None
+    checksum_algorithm, expected_checksum = manifest_checksum(manifest)
+    actual_checksum = _file_checksum(archive_file, checksum_algorithm) if expected_checksum else None
     checksum_matches = actual_checksum == expected_checksum if expected_checksum else None
     review_cases = []
     if video:
@@ -904,11 +899,16 @@ def _archive_plan(folder: str, db: Session) -> dict:
         "original_path": original_path,
         "current_path": current_path,
         "current_exists": bool(current_path and os.path.isfile(current_path)),
-        "archive_checksum_md5": actual_checksum or expected_checksum,
+        "archive_checksum": actual_checksum or expected_checksum,
+        "archive_checksum_algorithm": checksum_algorithm,
+        "archive_checksum_md5": (actual_checksum or expected_checksum) if checksum_algorithm == "md5" else None,
+        "archive_checksum_sha256": (actual_checksum or expected_checksum) if checksum_algorithm == "sha256" else None,
         "checksum_matches_manifest": checksum_matches,
         "manifest_schema_version": manifest.get("schema_version", 1 if manifest else None),
         "video_id": video.id if video else manifest.get("video_id"),
-        "video_stable_id": video.stable_id if video else manifest.get("video_stable_id"),
+        "playarr_video_id": video.playarr_video_id if video else manifest_video_stable_id(manifest),
+        "video_stable_id": video.stable_id if video else manifest_video_stable_id(manifest),
+        "archive_operation_id": manifest.get("operation_id"),
         "expected_video_revision": video.revision if video else None,
         "metadata_revision_consequence": "video revision increments after restored media is re-analysed",
         "companion_files": companions,
@@ -917,13 +917,13 @@ def _archive_plan(folder: str, db: Session) -> dict:
         "restore_eligible": checksum_matches is not False,
     }
 
-
 @router.get("/archive-items", response_model=List[ArchiveItemOut])
 def list_archive_items(db: Session = Depends(get_db)):
     """List all items in the archive directory with manifest metadata."""
     from app.config import get_settings as _get_settings
     from app.routers.video_editor import (
         _MANIFEST_NAME, _VIDEO_EXTS, _read_folder_manifest, _manifest_video_path)
+    from app.services.archive_identity import manifest_video_stable_id, resolve_manifest_video
     _settings = _get_settings()
 
     results: list[dict] = []
@@ -946,13 +946,13 @@ def list_archive_items(db: Session = Depends(get_db)):
                         break
             if not video_file:
                 continue
-            video = db.get(VideoItem, meta.get("video_id")) if meta.get("video_id") else None
+            video = resolve_manifest_video(db, meta)
             relative = meta.get("original_relative_path")
             original_path = video.file_path if video else (
                 os.path.join(lib_root, relative) if relative else None
             )
             schema_version = meta.get("schema_version", 1 if meta else None)
-            stable_identity = bool((video and video.stable_id) or meta.get("video_stable_id"))
+            stable_identity = bool((video and video.stable_id) or manifest_video_stable_id(meta))
             integrity_status = (
                 "orphaned_owner" if meta.get("video_id") and not video
                 else "ok" if meta and stable_identity
@@ -971,6 +971,9 @@ def list_archive_items(db: Session = Depends(get_db)):
                                    or (os.path.getsize(video_file) if os.path.isfile(video_file) else 0),
                 "original_path": original_path,
                 "checksum_md5": meta.get("checksum_md5"),
+                "checksum_sha256": meta.get("checksum_sha256"),
+                "playarr_video_id": manifest_video_stable_id(meta),
+                "operation_id": meta.get("operation_id"),
                 "manifest_schema_version": schema_version,
                 "restore_eligible": bool(os.path.isfile(video_file)),
                 "integrity_status": integrity_status,
@@ -978,10 +981,8 @@ def list_archive_items(db: Session = Depends(get_db)):
     results.sort(key=lambda r: r.get("archived_at", ""), reverse=True)
     return results
 
-
 class DeleteArchiveRequest(BaseModel):
     folders: List[str]
-
 
 @router.post("/archive-delete")
 def delete_archive_items(body: DeleteArchiveRequest):
@@ -1014,7 +1015,6 @@ def delete_archive_items(body: DeleteArchiveRequest):
         else:
             errors.append(f"Not found: {folder}")
     return {"deleted": deleted, "errors": errors}
-
 
 @router.post("/archive-clear")
 def clear_archive():
@@ -1080,23 +1080,19 @@ def clean_stale_archives(body: DeleteArchiveRequest):
             errors.append(f"{folder}: {e}")
     return {"deleted": deleted, "errors": errors}
 
-
 class RestoreArchiveRequest(BaseModel):
     folder: str
     operation_id: Optional[str] = None
     conflict_choice: Optional[Literal["archive_current", "replace_current"]] = None
 
-
 class ArchiveRestorePreviewRequest(BaseModel):
     folder: str
-
-
 @router.post("/archive-restore-preview")
 def preview_archive_restore(body: ArchiveRestorePreviewRequest, db: Session = Depends(get_db)):
     """Persist and return the exact restore plan before any file is changed."""
     plan = _archive_plan(body.folder, db)
     operation = FileOperation(
-        entity_stable_id=plan.get("video_stable_id") or f"archive:{os.path.basename(body.folder)}",
+        entity_stable_id=plan.get("playarr_video_id") or f"archive:{os.path.basename(body.folder)}",
         operation_type="archive_restore",
         expected_revision=plan.get("expected_video_revision"),
         plan_json=plan,
@@ -1107,9 +1103,7 @@ def preview_archive_restore(body: ArchiveRestorePreviewRequest, db: Session = De
     db.commit()
     db.refresh(operation)
     return {"operation_id": operation.id, **plan}
-
-
-def _archive_current_restore_conflict(video: VideoItem, current_path: str) -> str:
+def _archive_current_restore_conflict(video: VideoItem, current_path: str, operation_id: str) -> str:
     """Move the newer current file aside so restore remains reversible."""
     from datetime import datetime, timezone
     from app.routers.video_editor import write_archive_manifest
@@ -1126,23 +1120,28 @@ def _archive_current_restore_conflict(video: VideoItem, current_path: str) -> st
     destination = os.path.join(conflict_folder, os.path.basename(current_path))
     import shutil
     shutil.move(current_path, destination)
-    write_archive_manifest(
-        destination,
-        current_path,
-        library_root,
-        video_id=video.id,
-        video_stable_id=video.stable_id,
-        artist=video.artist or "",
-        title=video.title or "",
-        archive_reason="restore_conflict",
-    )
+    from app.services.content_id import compute_ids_for_video
+    portable_id = video.playarr_video_id or compute_ids_for_video(video)["playarr_video_id"]
+    try:
+        write_archive_manifest(
+            destination,
+            current_path,
+            library_root,
+            video_id=video.id,
+            playarr_video_id=portable_id,
+            operation_id=operation_id,
+            artist=video.artist or "",
+            title=video.title or "",
+            archive_reason="restore_conflict",
+        )
+    except Exception:
+        shutil.move(destination, current_path)
+        raise
     if not os.path.isfile(os.path.join(conflict_folder, ".playarr-archive.json")):
         import shutil
         shutil.move(destination, current_path)
         raise RuntimeError("Could not journal the current file before restore")
     return destination
-
-
 def _execute_restore_archive_item(body: RestoreArchiveRequest, db: Session):
     """Restore an archived video back to its library location."""
     from app.config import get_settings as _get_settings
@@ -1150,6 +1149,7 @@ def _execute_restore_archive_item(body: RestoreArchiveRequest, db: Session):
         _MANIFEST_NAME, _VIDEO_EXTS, _read_folder_manifest, _manifest_video_path)
     from app.services.media_analyzer import extract_quality_signature
     from app.models import QualitySignature as QualitySigModel, VideoItem
+    from app.services.archive_identity import resolve_manifest_video
 
     _settings = _get_settings()
 
@@ -1183,8 +1183,8 @@ def _execute_restore_archive_item(body: RestoreArchiveRequest, db: Session):
     if not archive_file:
         raise HTTPException(404, "No video file found in archive folder")
 
-    video_id = meta.get("video_id")
-    video = db.query(VideoItem).get(video_id) if video_id else None
+    video = resolve_manifest_video(db, meta)
+    video_id = video.id if video else meta.get("video_id")
 
     if video and video.file_path:
         # Kill any active streaming processes holding the file
@@ -1319,7 +1319,7 @@ def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_
         if current_path and os.path.isfile(current_path) and body.conflict_choice == "archive_current":
             if not video:
                 raise HTTPException(409, "Cannot safely archive the current file without a linked video")
-            conflict_archive = _archive_current_restore_conflict(video, current_path)
+            conflict_archive = _archive_current_restore_conflict(video, current_path, operation.id)
             operation.rollback_json = {
                 "current_path": current_path,
                 "conflict_archive_path": conflict_archive,
@@ -1357,7 +1357,7 @@ def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_
 def archive_integrity_report(db: Session = Depends(get_db)):
     """Verify manifests/checksums and report orphans without deleting anything."""
     from app.routers.video_editor import _MANIFEST_NAME, _file_checksum, _manifest_video_path, _read_folder_manifest
-
+    from app.services.archive_identity import manifest_checksum, manifest_video_stable_id, resolve_manifest_video
     records = []
     for _library_root, archive_root in _archive_roots():
         if not os.path.isdir(archive_root):
@@ -1374,12 +1374,12 @@ def archive_integrity_report(db: Session = Depends(get_db)):
             archive_file = _manifest_video_path(root, manifest)
             if not archive_file:
                 problems.append("missing_archive_file")
-            expected = manifest.get("checksum_md5")
-            if archive_file and expected and _file_checksum(archive_file) != expected:
+            checksum_algorithm, expected = manifest_checksum(manifest)
+            if archive_file and expected and _file_checksum(archive_file, checksum_algorithm) != expected:
                 problems.append("checksum_mismatch")
-            video = db.get(VideoItem, manifest.get("video_id")) if manifest.get("video_id") else None
-            stable_id = manifest.get("video_stable_id")
-            if video and stable_id and video.stable_id != stable_id:
+            video = resolve_manifest_video(db, manifest)
+            stable_id = manifest_video_stable_id(manifest)
+            if video and stable_id and video.playarr_video_id != stable_id:
                 problems.append("stable_identity_mismatch")
             if not video:
                 problems.append("orphaned_owner")
@@ -1388,7 +1388,8 @@ def archive_integrity_report(db: Session = Depends(get_db)):
             records.append({
                 "folder": root,
                 "video_id": manifest.get("video_id"),
-                "video_stable_id": stable_id,
+                "playarr_video_id": stable_id,
+                "operation_id": manifest.get("operation_id"),
                 "status": "ok" if not problems else "attention",
                 "problems": problems,
             })
@@ -1561,55 +1562,3 @@ def create_genre(body: GenreCreateRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(genre)
     return GenreBlacklistItem(id=genre.id, name=genre.name, blacklisted=False, video_count=0, master_genre_id=None, alias_count=0)
-
-
-# ── Kodi add-on download ──────────────────────────────────
-# The Kodi plugin source is bundled with the server, so the plugin a user
-# installs always matches the server version it talks to.  The zip is built on
-# demand and its addon.xml version is stamped to APP_VERSION so the two can
-# never drift.
-
-KODI_ADDON_ID = "plugin.video.playarr"
-
-
-def _kodi_plugin_src_dir() -> Optional[Path]:
-    """Locate the bundled Kodi add-on source folder (frozen bundle or repo)."""
-    candidates: List[Path] = []
-    if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", "")
-        if meipass:
-            candidates.append(Path(meipass) / "kodi" / KODI_ADDON_ID)
-    here = Path(__file__).resolve()
-    # backend/app/routers/settings.py → repo root is parents[3]; in a frozen
-    # bundle backend is _MEIPASS so parents[2] also resolves correctly.
-    candidates.append(here.parents[3] / "kodi" / KODI_ADDON_ID)
-    candidates.append(here.parents[2] / "kodi" / KODI_ADDON_ID)
-    for cand in candidates:
-        if cand.is_dir() and (cand / "addon.xml").is_file():
-            return cand
-    return None
-
-
-def _build_kodi_zip(src: Path) -> bytes:
-    """Zip the add-on folder (Kodi expects the addon id folder at the zip root)
-    and stamp addon.xml's version to APP_VERSION."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in sorted(src.rglob("*")):
-            if path.is_dir():
-                continue
-            if "__pycache__" in path.parts or path.suffix == ".pyc":
-                continue
-            arcname = path.relative_to(src.parent).as_posix()
-            data = path.read_bytes()
-            if path.name == "addon.xml":
-                text = data.decode("utf-8")
-                text = re.sub(
-                    r'(<addon\b[^>]*?\bversion=")[^"]*(")',
-                    lambda m: m.group(1) + APP_VERSION + m.group(2),
-                    text,
-                    count=1,
-                )
-                data = text.encode("utf-8")
-            zf.writestr(arcname, data)
-    return buf.getvalue()

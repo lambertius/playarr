@@ -575,7 +575,7 @@ export function ArtistConsolidationLegacy() {
                       {entry.video_count} video{entry.video_count !== 1 ? "s" : ""}
                     </span>
                   </div>
-                  <Tooltip content={`Apply "${entry.name}" to all ${conflict.total_videos} videos`}>
+                  <Tooltip content={`Save "${entry.name}" for all ${conflict.total_videos} videos`}>
                     <button
                       onClick={() => handleConsolidate(conflict.mb_artist_id, entry.name)}
                       disabled={consolidateMutation.isPending}
@@ -613,7 +613,7 @@ export function ArtistConsolidationLegacy() {
                     disabled={!manualInputs[conflict.mb_artist_id]?.trim() || consolidateMutation.isPending}
                     className="btn-sm text-[11px] px-2.5 py-1 rounded bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 disabled:opacity-40 flex items-center gap-1"
                   >
-                    <Check size={12} /> Apply
+                    <Check size={12} /> Save changes
                   </button>
                   <button
                     onClick={() => setEditingMbId(null)}
@@ -985,7 +985,7 @@ function GenreConsolidation() {
           </div>
         ) : (
           <div className="card px-6 py-6 text-center">
-            <p className="text-xs text-text-muted">No active consolidations. Apply a suggestion below or create a new tile.</p>
+            <p className="text-xs text-text-muted">No active consolidations. Save a suggestion below or create a new tile.</p>
           </div>
         )}
       </section>
@@ -1089,7 +1089,7 @@ function GenreConsolidation() {
                           disabled={!manualInputs[idx]?.trim() || consolidateManualMutation.isPending}
                           className="btn-sm text-[11px] px-2.5 py-1 rounded bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 disabled:opacity-40 flex items-center gap-1"
                         >
-                          <Check size={12} /> Apply
+                          <Check size={12} /> Save changes
                         </button>
                         <button
                           onClick={() => setEditingSuggIdx(null)}
