@@ -28,11 +28,13 @@ import type {
   PlaylistSortField, SortDirection, YtdlpStatus, YtdlpUpdateResult,
   PartyModeParams, PartyModeResponse,
   LogFileEntry, LogReadResponse,
-  ArchiveItem, QualityBucket,
+  ArchiveItem, ArchiveRestorePlan, QualityBucket,
   ArtistConflict, MbidStats,
   ArtworkStats, ArtworkEntitiesResponse, ArtworkRepairResult,
   EntitySourcesResponse,
-  ContributionEnvelope, ContributionLogEntry,
+  ContributionPreview, ContributionLogEntry,
+  JobPageParams, JobPageResponse, ClearHistoryParams, ClearHistoryPreview,
+  OperationHealth,
 } from "@/types";
 
 const api = axios.create({ baseURL: "/api" });
@@ -43,15 +45,22 @@ export const tmvdbApi = {
     api.get<{ connected: boolean; message: string; version?: string }>("/tmvdb/test").then(r => r.data),
 
   preview: (videoId: number) =>
-    api.get<ContributionEnvelope>(`/tmvdb/preview/${videoId}`).then(r => r.data),
+    api.get<ContributionPreview>(`/tmvdb/preview/${videoId}`).then(r => r.data),
 
   push: (videoId: number, force = false) =>
-    api.post<{ status: string; tmvdb_id?: string; message: string }>(
+    api.post<{
+      status: string;
+      outbox_id?: string;
+      operation_id?: string;
+      message: string;
+      eligible_fields?: string[];
+      excluded_fields?: string[];
+    }>(
       "/tmvdb/push", { video_id: videoId }, { params: { force } },
     ).then(r => r.data),
 
   pushBulk: (videoIds: number[], force = false) =>
-    api.post<{ submitted: number; failed: number; skipped: number; not_found: number }>(
+    api.post<{ queued: number; existing: number; ineligible: number; not_found: number; operations: string[] }>(
       "/tmvdb/push/bulk", { video_ids: videoIds }, { params: { force } },
     ).then(r => r.data),
 
@@ -59,6 +68,12 @@ export const tmvdbApi = {
     api.get<ContributionLogEntry[]>("/tmvdb/contributions", {
       params: { ...(videoId != null ? { video_id: videoId } : {}), limit },
     }).then(r => r.data),
+
+  cancel: (outboxId: string) =>
+    api.post<{ status: string; operation_id: string }>(`/tmvdb/contributions/${outboxId}/cancel`).then(r => r.data),
+
+  retry: (outboxId: string) =>
+    api.post<{ status: string; operation_id: string }>(`/tmvdb/contributions/${outboxId}/retry`).then(r => r.data),
 };
 
 export interface FormatResolution {
@@ -247,6 +262,9 @@ export const jobsApi = {
   list: (params?: JobsParams) =>
     api.get<JobSummary[]>("/jobs/", { params }).then(r => r.data),
 
+  page: (params: JobPageParams) =>
+    api.get<JobPageResponse>("/jobs/page", { params }).then(r => r.data),
+
   get: (id: number) =>
     api.get<JobSummary>(`/jobs/${id}`).then(r => r.data),
 
@@ -259,7 +277,10 @@ export const jobsApi = {
   cancel: (id: number) =>
     api.post<JobSummary>(`/jobs/${id}/cancel`).then(r => r.data),
 
-  clearHistory: (params?: { status?: string; job_type?: string }) =>
+  previewClearHistory: (params?: ClearHistoryParams) =>
+    api.get<ClearHistoryPreview>("/jobs/history/preview", { params }).then(r => r.data),
+
+  clearHistory: (params?: ClearHistoryParams | { status?: string; job_type?: string }) =>
     api.delete<{ deleted: number }>("/jobs/history", { params }).then(r => r.data),
 
   batchDelete: (ids: number[]) =>
@@ -280,6 +301,10 @@ export const jobsApi = {
 
   readLog: (params: { file: string; tail?: number; offset?: number; limit?: number }) =>
     api.get<LogReadResponse>("/jobs/logs/read", { params }).then(r => r.data),
+};
+
+export const operationsApi = {
+  health: () => api.get<OperationHealth>("/operations/health").then(r => r.data),
 };
 
 // ─── Playback URLs ────────────────────────────────────────
@@ -327,6 +352,14 @@ export const prefApi = {
   /** Fetch all preference groups as { name: value }. */
   getAll: () =>
     api.get<Record<string, unknown>>("/preferences").then(r => r.data),
+
+  getState: () =>
+    api.get<{ values: Record<string, unknown>; revisions: Record<string, number> }>("/preferences/state").then(r => r.data),
+
+  patch: (name: string, patch: Record<string, unknown>, revision: number) =>
+    api.patch<{ name: string; value: Record<string, unknown>; revision: number; schema_version: number }>(
+      `/preferences/${name}`, { patch, revision },
+    ).then(r => r.data),
 
   /** Create/replace a single preference group with an arbitrary JSON value. */
   set: (name: string, value: unknown) =>
@@ -390,8 +423,27 @@ export const settingsApi = {
   archiveClear: () =>
     api.post<{ deleted: number; errors: string[] }>("/settings/archive-clear").then(r => r.data),
 
-  archiveRestore: (folder: string) =>
-    api.post<{ message: string; video_id: number | null }>("/settings/archive-restore", { folder }).then(r => r.data),
+  archiveRestorePreview: (folder: string) =>
+    api.post<ArchiveRestorePlan>("/settings/archive-restore-preview", { folder }).then(r => r.data),
+
+  archiveRestoreCommit: (folder: string, operationId: string, conflictChoice?: "archive_current" | "replace_current") =>
+    api.post<{ message: string; video_id: number | null; operation_id: string }>("/settings/archive-restore", {
+      folder,
+      operation_id: operationId,
+      conflict_choice: conflictChoice,
+    }).then(r => r.data),
+
+  archiveRestore: async (folder: string) => {
+    const plan = await settingsApi.archiveRestorePreview(folder);
+    return settingsApi.archiveRestoreCommit(
+      folder,
+      plan.operation_id,
+      plan.current_exists ? "archive_current" : undefined,
+    );
+  },
+
+  archiveIntegrity: () =>
+    api.post<{ checked: number; ok: number; attention: number; items: unknown[]; deleted: number }>("/settings/archive-integrity").then(r => r.data),
 
   archiveStreamUrl: (path: string) =>
     `/api/playback/stream-archive?path=${encodeURIComponent(path)}`,
@@ -600,6 +652,17 @@ export const playlistApi = {
   reorder: (playlistId: number, entryIds: number[]) =>
     api.put<PlaylistOut>(`/playlists/${playlistId}/reorder`, { entry_ids: entryIds }).then(r => r.data),
 
+  batchEdit: (
+    playlistId: number,
+    expectedRevision: number,
+    orderedOccurrenceIds: string[],
+    removedOccurrenceIds: string[],
+  ) => api.put<PlaylistOut>(`/playlists/${playlistId}/entries:batch-edit`, {
+    expected_revision: expectedRevision,
+    ordered_occurrence_ids: orderedOccurrenceIds,
+    removed_occurrence_ids: removedOccurrenceIds,
+  }).then(r => r.data),
+
   sort: (playlistId: number, field: PlaylistSortField, direction: SortDirection) =>
     api.put<PlaylistOut>(`/playlists/${playlistId}/sort`, { field, direction }).then(r => r.data),
 
@@ -619,11 +682,26 @@ export const toolsApi = {
 // ─── Video Editor ─────────────────────────────────────────
 import type {
   EditorQueueItem, CropPreviewRequest, CropPreviewResponse,
-  EncodeRequest, LetterboxDetectResult, LetterboxScanItem,
+  EncodeRequest, EncodePlan, EditorQueueState, LetterboxDetectResult, LetterboxScanItem,
 } from "@/types";
 import type { ScraperTestRequest, ScraperTestResult, ScraperTestProgress, ImportTestRequest, DirectoryScanResult } from "@/types";
 
 export const videoEditorApi = {
+  getQueueState: () =>
+    api.get<EditorQueueState>("/video-editor/queue-state").then(r => r.data),
+
+  addQueueEntries: (videoIds: number[], source: "manual" | "scan" | "legacy" = "manual") =>
+    api.post<EditorQueueState>("/video-editor/queue-state", { video_ids: videoIds, source }).then(r => r.data),
+
+  removeQueueEntries: (videoIds: number[]) =>
+    api.post<EditorQueueState>("/video-editor/queue-state/remove", { video_ids: videoIds }).then(r => r.data),
+
+  clearQueueState: () =>
+    api.delete<EditorQueueState>("/video-editor/queue-state").then(r => r.data),
+
+  patchQueueSettings: (videoId: number, patch: Record<string, unknown>) =>
+    api.patch<EditorQueueState>(`/video-editor/queue-state/${videoId}`, { patch }).then(r => r.data),
+
   getQueueItems: (videoIds: number[]) =>
     api.get<EditorQueueItem[]>("/video-editor/queue", {
       params: { video_ids: videoIds.join(",") },
@@ -651,6 +729,9 @@ export const videoEditorApi = {
 
   cropPreview: (req: CropPreviewRequest) =>
     api.post<CropPreviewResponse>("/video-editor/crop-preview", req).then(r => r.data),
+
+  getEncodePlan: (req: EncodeRequest) =>
+    api.post<EncodePlan>("/video-editor/encode-plan", req).then(r => r.data),
 
   encode: (req: EncodeRequest) =>
     api.post<{ job_id: number; message: string }>("/video-editor/encode", req).then(r => r.data),
@@ -821,10 +902,10 @@ export const newVideosApi = {
     api.post<{ status: string; job_count: number; jobs: { job_id: number; url: string; title: string }[] }>("/new-videos/cart/import-all", options ?? {}).then(r => r.data),
 
   addVideo: (suggested_video_id: number) =>
-    api.post<{ status: string; job_id: number }>("/new-videos/add", { suggested_video_id }).then(r => r.data),
+    api.post<{ status: string; job_id: number; category: string; replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean }>("/new-videos/add", { suggested_video_id }).then(r => r.data),
 
   dismiss: (suggested_video_id: number, dismissal_type: "temporary" | "permanent" = "temporary", reason?: string) =>
-    api.post<{ status: string; type: string }>("/new-videos/dismiss", {
+    api.post<{ status: string; type: string; replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean }>("/new-videos/dismiss", {
       suggested_video_id, dismissal_type, reason,
     }).then(r => r.data),
 
@@ -853,6 +934,18 @@ export const metadataManagerApi = {
     api.post<{ updated: number; mb_artist_id: string; canonical_name: string }>(
       "/metadata/artist-consolidate", { mb_artist_id, canonical_name },
     ).then(r => r.data),
+
+  artistConsolidationsV2: () =>
+    api.get<import("@/types").ArtistConsolidationAggregate[]>("/metadata/artist-consolidations-v2").then(r => r.data),
+
+  createArtistConsolidationV2: (data: { mask_name: string; targets: Array<{ raw_name: string; provenance?: string; mb_artist_id?: string }>; mbids: string[] }) =>
+    api.post<import("@/types").ArtistConsolidationAggregate>("/metadata/artist-consolidations-v2", data).then(r => r.data),
+
+  updateArtistConsolidationV2: (stableId: string, data: { expected_revision: number; mask_name: string; targets: Array<{ raw_name: string; provenance?: string; mb_artist_id?: string }>; mbids: string[] }) =>
+    api.put<import("@/types").ArtistConsolidationAggregate>(`/metadata/artist-consolidations-v2/${stableId}`, data).then(r => r.data),
+
+  deleteArtistConsolidationV2: (stableId: string, expectedRevision: number) =>
+    api.delete<{ deleted: boolean }>(`/metadata/artist-consolidations-v2/${stableId}`, { params: { expected_revision: expectedRevision } }).then(r => r.data),
 
   genreConsolidations: () =>
     api.get<GenreConflict[]>("/metadata/genre-consolidations").then(r => r.data),

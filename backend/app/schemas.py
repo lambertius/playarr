@@ -148,6 +148,7 @@ class GenreOut(BaseModel):
 
 class VideoItemOut(BaseModel):
     id: int
+    stable_id: str
     artist: str
     title: str
     album: Optional[str] = None
@@ -211,9 +212,26 @@ class VideoItemOut(BaseModel):
         from_attributes = True
 
 
+class EnrichmentFailure(BaseModel):
+    step: str
+    code: str
+    message: str
+
+
+class EnrichmentStatusOut(BaseModel):
+    state: str
+    completed_steps: List[str] = Field(default_factory=list)
+    failed_steps: List[EnrichmentFailure] = Field(default_factory=list)
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    last_run_at: Optional[str] = None
+    stale_reason: Optional[str] = None
+
+
 class VideoItemSummary(BaseModel):
     """Lightweight version for list views."""
     id: int
+    stable_id: str
     artist: str
     title: str
     album: Optional[str] = None
@@ -224,6 +242,7 @@ class VideoItemSummary(BaseModel):
     version_type: str = "normal"
     review_status: str = "none"
     enrichment_status: str = "pending"
+    enrichment_detail: EnrichmentStatusOut
     import_method: Optional[str] = None
     duration_seconds: Optional[float] = None
     created_at: datetime
@@ -254,6 +273,10 @@ class JobOut(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    status_group: str = "active"
+    job_category: str = "system"
+    operation_id: Optional[str] = None
+    request_id: Optional[str] = None
 
     class Config:
         from_attributes = True

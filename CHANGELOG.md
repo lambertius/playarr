@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.10.0] - 2026-08-01
+
+### Added
+- **Durable operations and portable recovery** — sidecar schema v2 adds stable identities, revisions, content hashes, crash-safe atomic writes, reconciliation, and an outbox; mutations now expose correlation-aware operation state and deployment diagnostics.
+- **Review and remediation workflows** — persistent review cases, dependency edges, remediation plans, crop evidence, source-fidelity checks, playlist revisions, and occurrence-aware batch editing.
+- **Structured integrations and diagnostics** — TMVDB contribution eligibility and durable submission outbox, one typed import policy across entry points, structured/redacted scraper traces, and downloadable diagnostic bundles.
+- **Expanded library and playback controls** — artist consolidation, genre management, archive restore planning, preference registry, shared data views, persistent playback surfaces, and party-start gating.
+
+### Changed
+- **Pipeline convergence** — URL, library, and rescan imports now share policy semantics and canonical leaf services while compatibility adapters preserve the existing stage entry points.
+- **API and settings contracts** — corrected OpenAPI routes, constrained and grouped settings, masked secrets, explicit AI lifecycle state, canonical queue paging, and durable editor/download jobs.
+- **Frontend structure** — route-level lazy loading and error boundaries, common filtering/data-view components, and consistent navigation across library management pages.
+
+### Removed
+- **Retired public Kodi surfaces** — the Kodi add-on/export endpoints and settings navigation are no longer exposed; generic internal NFO interoperability remains available.
+
+### Fixed
+- **Artwork safety and reuse** — valid existing artwork is preserved, fallback artwork copies use the validated copy gateway, and image-persistence enforcement distinguishes metadata/API calls from binary image downloads.
+- **New Videos acceptance and replacement rules** — completeness, diversity, replacement, and recommendation acceptance now use explicit server-side contracts.
+
 ## [1.9.40] - 2026-07-04
 
 ### Fixed

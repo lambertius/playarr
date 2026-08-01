@@ -21,6 +21,7 @@ services:
     env_file: backend/.env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - DEPLOYMENT_PROFILE=redis
     volumes:
       - ${LIBRARY_DIR:-./data/library}:/data/library
       - ${ARCHIVE_DIR:-./data/archive}:/data/archive
@@ -39,6 +40,7 @@ services:
     env_file: backend/.env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - DEPLOYMENT_PROFILE=redis
     volumes:
       - ${LIBRARY_DIR:-./data/library}:/data/library
       - ${ARCHIVE_DIR:-./data/archive}:/data/archive

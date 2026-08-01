@@ -4,7 +4,7 @@ import { CalendarDays, PartyPopper, ListPlus, Trash2, RefreshCw } from "lucide-r
 import { useYears, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks/queries";
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
 import { RecordStack } from "@/components/RecordStack";
-import { GroupedSection } from "@/components/GroupedSection";
+import { DataView } from "@/components/DataView";
 import { FilterBar } from "@/components/FilterBar";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { RescanOptionsDialog } from "@/components/RescanOptionsDialog";
@@ -14,48 +14,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import type { FacetFilterParams } from "@/types";
 import { usePartyMode } from "@/hooks/usePartyMode";
 
-type SortDir = "asc" | "desc";
 type YearEntry = { year: number | null; count: number; video_ids: number[] };
-
-interface DecadeGroup {
-  decade: string;
-  decadeStart: number;
-  items: YearEntry[];
-  /** All video IDs across every year in the decade. */
-  allVideoIds: number[];
-  totalCount: number;
-}
-
-/** Group years by decade, direction controls sort order. */
-function groupByDecade(years: YearEntry[], dir: SortDir): DecadeGroup[] {
-  const sorted = [...years]
-    .filter((y) => y.year != null)
-    .sort((a, b) =>
-      dir === "desc"
-        ? (b.year ?? 0) - (a.year ?? 0)
-        : (a.year ?? 0) - (b.year ?? 0),
-    );
-
-  const groups: Record<string, YearEntry[]> = {};
-  for (const y of sorted) {
-    const decade = Math.floor((y.year ?? 0) / 10) * 10;
-    const key = `${decade}s`;
-    (groups[key] ??= []).push(y);
-  }
-
-  const sortedKeys = Object.keys(groups).sort((a, b) => {
-    const da = parseInt(a);
-    const db = parseInt(b);
-    return dir === "desc" ? db - da : da - db;
-  });
-  return sortedKeys.map((key) => {
-    const items = groups[key];
-    const decadeStart = parseInt(key);
-    const allVideoIds = items.flatMap((y) => y.video_ids);
-    const totalCount = items.reduce((sum, y) => sum + y.count, 0);
-    return { decade: key, decadeStart, items, allVideoIds, totalCount };
-  });
-}
 
 export function YearsPage() {
   const [filters, setFilters] = useState<FacetFilterParams>({});
@@ -64,7 +23,6 @@ export function YearsPage() {
   const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
   const { data, isLoading, isError, refetch } = useYears(mergedFilters);
   const navigate = useNavigate();
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
@@ -150,7 +108,7 @@ export function YearsPage() {
     return data.filter((y) => y.year != null && String(y.year).includes(term));
   }, [data, searchTerm]);
 
-  const grouped = useMemo(() => (filtered.length ? groupByDecade(filtered, sortDir) : []), [filtered, sortDir]);
+  const years = useMemo(() => filtered.filter((entry): entry is YearEntry & { year: number } => entry.year != null), [filtered]);
 
   return (
     <div className="p-4 md:p-6">
@@ -158,13 +116,6 @@ export function YearsPage() {
         <h1 className="text-xl font-bold text-text-primary flex items-center gap-2">
           <CalendarDays size={22} /> Years
         </h1>
-        <button
-          onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}
-          className="btn-ghost btn-sm text-xs"
-          aria-label={`Sort ${sortDir === "desc" ? "oldest first" : "newest first"}`}
-        >
-          {sortDir === "desc" ? "New→Old" : "Old→New"}
-        </button>
         <button
           onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
@@ -216,42 +167,30 @@ export function YearsPage() {
       ) : !filtered || filtered.length === 0 ? (
         <EmptyState icon={<CalendarDays size={48} />} title={searchTerm ? "No matching years" : "No years yet"} />
       ) : (
-        grouped.map(({ decade, decadeStart, items, allVideoIds, totalCount }) => (
-          <GroupedSection key={decade} heading={decade}>
-            {/* Decade tile — spans 2 columns × 2 rows, self-centers vertically */}
-            <div className="col-span-2 row-span-2 flex items-center justify-center">
+        <DataView
+          rows={years}
+          rowKey={(year) => year.year}
+          preferenceKey="years"
+          defaultSort="year"
+          defaultDirection="desc"
+          empty={<EmptyState icon={<CalendarDays size={48} />} title="No years yet" />}
+          columns={[
+            { id: "year", label: "Year", width: "minmax(10rem,1fr)", sortValue: (year) => year.year, render: (year) => <button className="hover:text-accent" onClick={() => navigate(`/library?year=${year.year}`)}>{year.year}</button> },
+            { id: "decade", label: "Decade", width: "8rem", sortValue: (year) => Math.floor(year.year / 10) * 10, render: (year) => `${Math.floor(year.year / 10) * 10}s` },
+            { id: "count", label: "Videos", width: "6rem", align: "right", sortValue: (year) => year.count, render: (year) => year.count },
+          ]}
+          renderCard={(y) => (
               <RecordStack
-                videoIds={allVideoIds}
-                label={decade}
-                subLabel={`${totalCount} video${totalCount !== 1 ? "s" : ""}`}
-                onClick={() =>
-                  navigate(
-                    `/library?year_from=${decadeStart}&year_to=${decadeStart + 9}`,
-                  )
-                }
-                selected={selectedYears.has(decade)}
-                onSelect={(sel) => toggleSelect(decade, sel)}
-                onContextAction={handleContextAction}
-              />
-            </div>
-            {items.map((y) => (
-              <RecordStack
-                key={y.year ?? "null"}
                 videoIds={y.video_ids}
-                label={String(y.year ?? "—")}
+                label={String(y.year)}
                 subLabel={`${y.count} video${y.count !== 1 ? "s" : ""}`}
-                onClick={() =>
-                  y.year != null
-                    ? navigate(`/library?year=${y.year}`)
-                    : navigate("/library")
-                }
-                selected={y.year != null && selectedYears.has(String(y.year))}
-                onSelect={(sel) => y.year != null && toggleSelect(String(y.year), sel)}
+                onClick={() => navigate(`/library?year=${y.year}`)}
+                selected={selectedYears.has(String(y.year))}
+                onSelect={(sel) => toggleSelect(String(y.year), sel)}
                 onContextAction={handleContextAction}
               />
-            ))}
-          </GroupedSection>
-        ))
+          )}
+        />
       )}
 
       {dialog}

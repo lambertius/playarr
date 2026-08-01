@@ -13,7 +13,7 @@ import time
 from typing import Any, Dict, Generator, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -145,6 +145,11 @@ class ScraperTestResult(BaseModel):
     # Output file path (relative to project root)
     output_file: Optional[str] = None
 
+    # Typed policy and structured, redacted production-path trace.
+    run_id: Optional[str] = None
+    import_policy: Dict[str, Any] = Field(default_factory=dict)
+    trace_events: List[Dict[str, Any]] = Field(default_factory=list)
+
     # Import-mode fields (only populated in import mode)
     import_directory: Optional[str] = None
     import_file: Optional[str] = None
@@ -160,6 +165,41 @@ def _get_scraper_test_dir() -> str:
     """Return the scraper test log directory, based on settings.log_dir."""
     from app.config import get_settings
     return os.path.join(get_settings().log_dir, "scraper_tests")
+
+
+def _typed_policy(req):
+    from app.services.import_policy import policy_from_request
+    return policy_from_request(req)
+
+
+def _attach_structured_trace(
+    result: ScraperTestResult,
+    db: Session,
+    req,
+    metadata: Dict[str, Any],
+    started_at: float,
+    source_kind: str,
+) -> ScraperTestResult:
+    from app.services.scraper_trace import build_trace, persist_trace
+
+    policy = _typed_policy(req)
+    run_id, events = build_trace(
+        policy=policy.model_dump(mode="json"),
+        input_summary={
+            "source": getattr(req, "url", None) or getattr(req, "directory", None),
+            "file_name": getattr(req, "file_name", None),
+            "artist_override": getattr(req, "artist_override", None),
+            "title_override": getattr(req, "title_override", None),
+        },
+        metadata=metadata,
+        duration_ms=round((time.monotonic() - started_at) * 1000),
+        source_kind=source_kind,
+    )
+    persist_trace(db, run_id, events)
+    result.run_id = run_id
+    result.import_policy = policy.model_dump(mode="json")
+    result.trace_events = events
+    return result
 
 
 def _safe_filename(text: str) -> str:
@@ -416,6 +456,7 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
     Extracts yt-dlp metadata (no download), then runs the selected scraping
     mode and returns the full result with provenance for each field.
     """
+    trace_started = time.monotonic()
     # â”€â”€ Validate: reject AI modes without a provider â”€â”€
     if req.ai_auto or req.ai_only:
         from app.models import AppSetting
@@ -570,18 +611,10 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
     title = title or "Unknown Title"
 
     # â”€â”€ Compute skip flags â”€â”€
-    if req.ai_only:
-        skip_wiki = True
-        skip_mb = True
-        skip_ai = False
-    elif req.ai_auto:
-        skip_wiki = False
-        skip_mb = False
-        skip_ai = False
-    else:
-        skip_wiki = not req.scrape_wikipedia
-        skip_mb = not req.scrape_musicbrainz
-        skip_ai = True
+    policy = _typed_policy(req)
+    skip_wiki = policy.skip_wikipedia
+    skip_mb = policy.skip_musicbrainz
+    skip_ai = policy.skip_ai
     pre_logs.append(f"[scraper-test] Skip flags: wiki={skip_wiki}, mb={skip_mb}, ai={skip_ai}")
     pre_logs.append(f"[scraper-test] Entering unified metadata pipeline with: artist='{artist}', title='{title}'")
 
@@ -941,7 +974,7 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
         output_file=output_file_path,
     )
 
-    return result
+    return _attach_structured_trace(result, db, req, metadata, trace_started, "url")
 
 
 # ── Streaming endpoint with progress ──────────────────────────────
@@ -1122,18 +1155,10 @@ def run_scraper_test_stream(req: ScraperTestRequest):
             title = title or "Unknown Title"
 
             # Compute skip flags
-            if req.ai_only:
-                skip_wiki = True
-                skip_mb = True
-                skip_ai = False
-            elif req.ai_auto:
-                skip_wiki = False
-                skip_mb = False
-                skip_ai = False
-            else:
-                skip_wiki = not req.scrape_wikipedia
-                skip_mb = not req.scrape_musicbrainz
-                skip_ai = True
+            policy = _typed_policy(req)
+            skip_wiki = policy.skip_wikipedia
+            skip_mb = policy.skip_musicbrainz
+            skip_ai = policy.skip_ai
 
             yield emit_done(step_idx, s)
 
@@ -1425,6 +1450,7 @@ def run_scraper_test_stream(req: ScraperTestRequest):
                 output_file=output_file_path,
             )
 
+            result = _attach_structured_trace(result, db, req, metadata, t0, "url")
             yield _sse("result", result.model_dump())
             yield _sse("done", {"total_ms": round((time.monotonic() - t0) * 1000)})
 
@@ -1762,36 +1788,18 @@ def run_import_test_stream(req: ImportTestRequest):
             yield emit_start(step_idx)
 
             # Compute skip flags
-            if req.ai_only:
-                skip_wiki = True
-                skip_mb = True
-                skip_ai = False
-                mode = "AI Only"
-            elif req.ai_auto:
-                skip_wiki = False
-                skip_mb = False
-                skip_ai = False
-                mode = "AI Auto"
-            elif req.scrape_wikipedia and req.scrape_musicbrainz:
-                skip_wiki = False
-                skip_mb = False
-                skip_ai = True
-                mode = "Wiki + MB"
-            elif req.scrape_wikipedia:
-                skip_wiki = False
-                skip_mb = True
-                skip_ai = True
-                mode = "Wiki Only"
-            elif req.scrape_musicbrainz:
-                skip_wiki = True
-                skip_mb = False
-                skip_ai = True
-                mode = "MB Only"
-            else:
-                skip_wiki = True
-                skip_mb = True
-                skip_ai = True
-                mode = "No Scraping"
+            policy = _typed_policy(req)
+            skip_wiki = policy.skip_wikipedia
+            skip_mb = policy.skip_musicbrainz
+            skip_ai = policy.skip_ai
+            mode = {
+                "ai_only": "AI Only",
+                "ai_proofread": "AI Auto",
+                "scrapers": "Wiki + MB",
+                "wiki_only": "Wiki Only",
+                "musicbrainz_only": "MB Only",
+                "existing_only": "No Scraping",
+            }[policy.metadata_mode]
             pre_logs.append(f"[import-test] Mode: {mode}")
             pre_logs.append(f"[import-test] Skip flags: wiki={skip_wiki}, mb={skip_mb}, ai={skip_ai}")
 
@@ -2100,6 +2108,7 @@ def run_import_test_stream(req: ImportTestRequest):
                 import_quality=ffprobe_data if ffprobe_data else None,
             )
 
+            result = _attach_structured_trace(result, db, req, metadata, t0, "library_file")
             yield _sse("result", result.model_dump())
             yield _sse("done", {"total_ms": round((time.monotonic() - t0) * 1000)})
 
@@ -2117,6 +2126,32 @@ def run_import_test_stream(req: ImportTestRequest):
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get("/traces/{run_id}")
+def get_structured_trace(run_id: str, db: Session = Depends(get_db)):
+    """Return a persisted, redacted trace for replay and support review."""
+    from app.services.scraper_trace import diagnostic_bundle
+    try:
+        return diagnostic_bundle(db, run_id)
+    except LookupError:
+        raise HTTPException(404, "Scraper trace not found")
+
+
+@router.get("/traces/{run_id}/bundle")
+def download_trace_bundle(run_id: str, db: Session = Depends(get_db)):
+    """Download policy, versions and structured events without secrets/paths."""
+    from app.services.scraper_trace import diagnostic_bundle
+    try:
+        bundle = diagnostic_bundle(db, run_id)
+    except LookupError:
+        raise HTTPException(404, "Scraper trace not found")
+    payload = json.dumps(bundle, ensure_ascii=False, indent=2, default=str)
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{run_id}-diagnostics.json"'},
     )
 
 

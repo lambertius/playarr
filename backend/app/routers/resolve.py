@@ -46,7 +46,9 @@ from app.matching.schemas import (
     ManualSearchResultOut, ManualSearchResponse,
     ExportKodiRequest, ExportKodiResponse,
 )
-from app.models import VideoItem, ProcessingJob, JobStatus
+from app.models import (
+    VideoItem, ProcessingJob, JobStatus, ReviewActionPlan, ReviewCase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -632,6 +634,222 @@ def _build_review_item(vi: VideoItem, db: Session) -> ReviewItemOut:
         dup_group_key=_dup_group_key,
         expected_path=_expected_path,
     )
+
+
+class ReviewCaseDismissRequest(BaseModel):
+    expected_revision: int
+
+
+class ReviewCasePlanRequest(BaseModel):
+    expected_revision: int
+    actions: List[dict]
+
+
+def _review_case_payload(case: ReviewCase) -> dict:
+    return {
+        "stable_id": case.stable_id,
+        "category": case.category,
+        "status": case.status,
+        "revision": case.revision,
+        "trigger_code": case.trigger_code,
+        "evidence_hash": case.evidence_hash,
+        "created_at": case.created_at,
+        "updated_at": case.updated_at,
+        "resolved_at": case.resolved_at,
+        "items": [
+            {
+                "video_id": item.video_id,
+                "video_stable_id": item.video_stable_id,
+                "role": item.role,
+                "facts": item.evidence_summary_json,
+                "preview_url": f"/api/playback/preview/{item.video_id}" if item.video_id else None,
+                "poster_url": f"/api/playback/poster/{item.video_id}" if item.video_id else None,
+            }
+            for item in sorted(case.items, key=lambda value: value.video_stable_id)
+        ],
+        "edges": [
+            {
+                "id": edge.id,
+                "left_video_stable_id": edge.left_video_stable_id,
+                "right_video_stable_id": edge.right_video_stable_id,
+                "evidence_type": edge.evidence_type,
+                "score": edge.score,
+                "evidence_hash": edge.evidence_hash,
+                "evidence": edge.evidence_json,
+                "status": edge.status,
+            }
+            for edge in sorted(
+                case.edges,
+                key=lambda value: (value.left_video_stable_id, value.right_video_stable_id),
+            )
+        ],
+    }
+
+
+def _case_or_404(db: Session, stable_id: str) -> ReviewCase:
+    case = db.query(ReviewCase).filter(ReviewCase.stable_id == stable_id).one_or_none()
+    if case is None:
+        raise HTTPException(status_code=404, detail="Review case not found")
+    return case
+
+
+def _require_case_revision(case: ReviewCase, expected: int) -> None:
+    if case.revision != expected:
+        raise HTTPException(status_code=409, detail={
+            "code": "stale_revision",
+            "message": "This review case changed in another session",
+            "expected_revision": expected,
+            "current": _review_case_payload(case),
+            "retryable": True,
+            "field_errors": {},
+        })
+
+
+@review_router.get("/cases")
+def list_review_cases(
+    status: Optional[str] = Query("open"),
+    category: Optional[str] = Query(None),
+    db: Session = Depends(_get_db),
+):
+    """Return durable cases; transition-era flags are materialized first."""
+    from app.services.review_cases import sync_review_cases
+
+    sync_review_cases(db)
+    db.commit()
+    query = db.query(ReviewCase)
+    if status:
+        query = query.filter(ReviewCase.status == status)
+    if category:
+        query = query.filter(ReviewCase.category == category)
+    cases = query.order_by(ReviewCase.updated_at.desc(), ReviewCase.id.desc()).all()
+    return {"items": [_review_case_payload(case) for case in cases], "total": len(cases)}
+
+
+@review_router.post("/cases/{stable_id}/dismiss")
+def dismiss_review_case(
+    stable_id: str,
+    request: ReviewCaseDismissRequest,
+    db: Session = Depends(_get_db),
+):
+    from app.services.review_cases import dismiss_case
+
+    case = _case_or_404(db, stable_id)
+    _require_case_revision(case, request.expected_revision)
+    dismiss_case(case)
+    db.commit()
+    db.refresh(case)
+    return _review_case_payload(case)
+
+
+@review_router.post("/cases/{stable_id}/plans")
+def stage_review_case_plan(
+    stable_id: str,
+    request: ReviewCasePlanRequest,
+    db: Session = Depends(_get_db),
+):
+    """Validate a local plan and return its exact consequences before commit."""
+    case = _case_or_404(db, stable_id)
+    _require_case_revision(case, request.expected_revision)
+    item_ids = {item.video_stable_id for item in case.items}
+    allowed = {"keep", "dismiss", "no_change", "reclassify"}
+    consequences = {"metadata": [], "files": [], "relationships": []}
+    for index, action in enumerate(request.actions):
+        action_type = action.get("type")
+        target = action.get("video_stable_id")
+        if action_type not in allowed:
+            raise HTTPException(status_code=422, detail={
+                "code": "unsupported_review_action",
+                "message": f"Action {action_type!r} is not safe to stage yet",
+                "field_errors": {f"actions.{index}.type": "unsupported"},
+                "retryable": False,
+            })
+        if target and target not in item_ids:
+            raise HTTPException(status_code=422, detail={
+                "code": "unknown_case_item",
+                "message": "Action targets a video outside this case",
+                "field_errors": {f"actions.{index}.video_stable_id": "unknown"},
+                "retryable": False,
+            })
+        if action_type == "reclassify":
+            version_type = action.get("version_type")
+            if version_type not in {"normal", "cover", "live", "alternate", "uncensored", "18+"}:
+                raise HTTPException(status_code=422, detail="Invalid version_type")
+            consequences["metadata"].append({
+                "video_stable_id": target,
+                "field": "version_type",
+                "new_value": version_type,
+            })
+        elif action_type in {"keep", "dismiss"}:
+            consequences["relationships"].append({
+                "case": stable_id,
+                "result": "resolved" if action_type == "keep" else "dismissed",
+            })
+    plan = ReviewActionPlan(
+        case_id=case.id,
+        expected_revision=request.expected_revision,
+        actions_json=request.actions,
+        consequence_json=consequences,
+        status="draft",
+    )
+    db.add(plan)
+    db.commit()
+    return {
+        "plan_id": plan.id,
+        "case_stable_id": stable_id,
+        "expected_revision": plan.expected_revision,
+        "actions": plan.actions_json,
+        "consequences": plan.consequence_json,
+        "status": plan.status,
+    }
+
+
+@review_router.post("/cases/{stable_id}/plans/{plan_id}/commit")
+def commit_review_case_plan(
+    stable_id: str,
+    plan_id: str,
+    db: Session = Depends(_get_db),
+):
+    """Atomically commit the currently supported non-file review actions."""
+    from app.services.review_cases import dismiss_case
+
+    case = _case_or_404(db, stable_id)
+    plan = db.get(ReviewActionPlan, plan_id)
+    if plan is None or plan.case_id != case.id:
+        raise HTTPException(status_code=404, detail="Review plan not found")
+    if plan.status != "draft":
+        raise HTTPException(status_code=409, detail="Review plan is no longer a draft")
+    _require_case_revision(case, plan.expected_revision)
+    videos = {
+        video.stable_id: video
+        for video in db.query(VideoItem).filter(
+            VideoItem.stable_id.in_([item.video_stable_id for item in case.items]),
+        ).all()
+    }
+    final_action = None
+    for action in plan.actions_json:
+        action_type = action.get("type")
+        target = action.get("video_stable_id")
+        if action_type == "reclassify" and target in videos:
+            videos[target].version_type = action["version_type"]
+            videos[target].revision += 1
+        if action_type in {"keep", "dismiss"}:
+            final_action = action_type
+    if final_action == "dismiss":
+        dismiss_case(case)
+    elif final_action == "keep":
+        case.status = "resolved"
+        case.resolved_at = datetime.now(timezone.utc)
+    if final_action:
+        for video in videos.values():
+            video.review_status = "none"
+            video.review_category = None
+            video.review_reason = None
+    case.revision += 1
+    plan.status = "committed"
+    plan.committed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(case)
+    return {"plan_id": plan.id, "status": plan.status, "case": _review_case_payload(case)}
 
 
 @review_router.get("", response_model=ReviewListOut)

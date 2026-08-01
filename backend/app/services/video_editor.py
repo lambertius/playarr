@@ -8,6 +8,7 @@ Provides:
 - Audio passthrough by default
 """
 import json
+import hashlib
 import logging
 import os
 import shutil
@@ -37,6 +38,156 @@ ASPECT_RATIOS = {
     "1.85:1": (1.85, 1),
 }
 
+ENCODE_PROFILES = {"source_fidelity", "balanced", "custom"}
+_LOSSLESS_AUDIO_CODECS = {"alac", "flac", "ape", "wavpack", "tta"}
+
+
+def _stream_bit_depth(stream: Dict[str, Any]) -> int:
+    """Return the best available decoded bit depth for a video stream."""
+    for key in ("bits_per_raw_sample", "bits_per_sample"):
+        try:
+            value = int(stream.get(key) or 0)
+            if value:
+                return value
+        except (TypeError, ValueError):
+            pass
+    pix_fmt = str(stream.get("pix_fmt") or "")
+    for depth in (16, 14, 12, 10, 9):
+        if str(depth) in pix_fmt:
+            return depth
+    return 8
+
+
+def resolve_encode_plan(
+    input_path: str,
+    *,
+    profile: str = "source_fidelity",
+    crop: Optional[Dict[str, int]] = None,
+    target_dar: Optional[str] = None,
+    crf: int = 18,
+    preset: str = "medium",
+    audio_passthrough: bool = True,
+    trim_start: Optional[float] = None,
+    trim_end: Optional[float] = None,
+    audio_codec: Optional[str] = None,
+    audio_bitrate: Optional[str] = None,
+    probe: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Resolve user intent into an auditable, source-aware encode plan.
+
+    The plan is JSON serialisable and is stored with the job.  In particular,
+    source-fidelity never derives a maxrate from the input bitrate: CRF remains
+    a quality target instead of an accidental quality ceiling.
+    """
+    if profile not in ENCODE_PROFILES:
+        raise ValueError(f"Unknown encode profile: {profile}")
+    media = probe or probe_file(input_path)
+    streams = media.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not video:
+        raise ValueError("Source does not contain a video stream")
+
+    bit_depth = _stream_bit_depth(video)
+    transfer = video.get("color_transfer")
+    hdr = transfer in {"smpte2084", "arib-std-b67"}
+    source_pix_fmt = video.get("pix_fmt") or "unknown"
+    has_trim = bool((trim_start and trim_start > 0) or (trim_end and trim_end > 0))
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    if profile == "balanced" and (hdr or bit_depth > 8):
+        errors.append(
+            "Balanced is an 8-bit SDR profile and would discard HDR/bit-depth data; "
+            "use Source fidelity or Custom."
+        )
+
+    preserve_depth = profile in {"source_fidelity", "custom"} and (hdr or bit_depth > 8)
+    video_encoder = "libx265" if preserve_depth else "libx264"
+    if preserve_depth:
+        supported_high_depth = {
+            "yuv420p10le", "yuv422p10le", "yuv444p10le",
+            "yuv420p12le", "yuv422p12le", "yuv444p12le",
+        }
+        pixel_format = source_pix_fmt if source_pix_fmt in supported_high_depth else "yuv420p10le"
+        if source_pix_fmt != pixel_format:
+            warnings.append(
+                f"Source pixel format {source_pix_fmt} will be encoded as {pixel_format}; "
+                f"the {bit_depth}-bit/HDR signal is retained."
+            )
+    else:
+        pixel_format = source_pix_fmt if source_pix_fmt in {"yuv420p", "yuv422p", "yuv444p"} else "yuv420p"
+
+    copy_audio = bool(audio and audio_passthrough and not has_trim)
+    resolved_audio_codec: Optional[str] = "copy" if copy_audio else None
+    resolved_audio_bitrate = audio_bitrate
+    if audio and not copy_audio:
+        source_audio_codec = str(audio.get("codec_name") or "")
+        if audio_codec:
+            resolved_audio_codec = audio_codec
+        elif source_audio_codec in _LOSSLESS_AUDIO_CODECS or source_audio_codec.startswith("pcm_"):
+            # ALAC remains lossless and is supported by MP4/MOV; Matroska can
+            # carry it too.  Never silently turn a lossless source into AAC.
+            resolved_audio_codec = "alac"
+            resolved_audio_bitrate = None
+            warnings.append("Lossless source audio will be re-encoded losslessly as ALAC because trimming prevents stream copy.")
+        else:
+            resolved_audio_codec = "aac"
+        if has_trim:
+            warnings.append("Frame-accurate trimming requires audio re-encoding; sample rate and channel layout will be preserved.")
+
+    input_ext = Path(input_path).suffix.lower()
+    output_extension = input_ext if input_ext in {".mkv", ".mp4", ".m4v", ".mov"} else ".mkv"
+    source = {
+        "codec": video.get("codec_name"),
+        "width": video.get("width"),
+        "height": video.get("height"),
+        "pixel_format": source_pix_fmt,
+        "bit_depth": bit_depth,
+        "hdr": hdr,
+        "frame_rate": video.get("avg_frame_rate") or video.get("r_frame_rate"),
+        "sample_aspect_ratio": video.get("sample_aspect_ratio"),
+        "color_primaries": video.get("color_primaries"),
+        "color_transfer": transfer,
+        "color_space": video.get("color_space"),
+        "color_range": video.get("color_range"),
+        "rotation": (video.get("tags") or {}).get("rotate"),
+        "audio_codec": audio.get("codec_name") if audio else None,
+        "audio_sample_rate": audio.get("sample_rate") if audio else None,
+        "audio_channels": audio.get("channels") if audio else None,
+        "audio_channel_layout": audio.get("channel_layout") if audio else None,
+    }
+    return {
+        "profile": profile,
+        "source": source,
+        "output": {
+            "extension": output_extension,
+            "video_encoder": video_encoder,
+            "pixel_format": pixel_format,
+            "crf": crf,
+            "preset": preset,
+            "maxrate": None,
+            "frame_timing": "passthrough",
+            "metadata": "copy",
+            "chapters": "copy",
+            "color_metadata": "copy",
+            "sample_aspect_ratio": "preserve" if not target_dar else target_dar,
+            "rotation": "preserve",
+            "audio_codec": resolved_audio_codec,
+            "audio_bitrate": resolved_audio_bitrate,
+            "audio_sample_rate": "preserve",
+            "audio_channels": "preserve",
+        },
+        "transforms": {
+            "crop": crop,
+            "target_dar": target_dar,
+            "trim_start": trim_start,
+            "trim_end": trim_end,
+        },
+        "warnings": warnings,
+        "errors": errors,
+    }
+
 
 # ── Letterbox detection tunables ────────────────────────────────────────────
 # Luminance (0-255) at or below which a pixel counts as "black". Kept low so
@@ -48,6 +199,53 @@ _CROPDETECT_LIMIT = 24
 # of the frame comes from a near-black frame (fade, dark scene) and is unreliable
 # — discard it.
 _MIN_CONTENT_AREA_FRAC = 0.35
+_AUTO_CROP_CONFIDENCE = 0.80
+_MIN_MEANINGFUL_CROP_FRAC = 0.025
+
+
+def crop_evidence_hash(info: dict, source_checksum: Optional[str]) -> str:
+    evidence = {
+        "source_checksum": source_checksum,
+        "confidence": info.get("confidence"),
+        "sample_count": info.get("sample_count"),
+        "samples_expected": info.get("samples_expected"),
+        "per_window_bars": info.get("per_window_bars", []),
+        "crop": [info.get(key) for key in ("crop_w", "crop_h", "crop_x", "crop_y")],
+    }
+    payload = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _score_crop_samples(per_window: list, expected_samples: int, orig_w: int, orig_h: int) -> tuple[float, str | None]:
+    """Return a conservative confidence score for crop evidence windows."""
+    import statistics
+
+    if not per_window:
+        return 0.0, "no_valid_samples"
+    bars = [
+        (y, orig_h - (y + h), x, orig_w - (x + w))
+        for w, h, x, y in per_window
+    ]
+    medians = [statistics.median(values) for values in zip(*bars)]
+    tolerances = (max(4, orig_h * 0.02), max(4, orig_h * 0.02),
+                  max(4, orig_w * 0.02), max(4, orig_w * 0.02))
+    stable_count = sum(
+        all(abs(value - median) <= tolerance for value, median, tolerance in zip(sample, medians, tolerances))
+        for sample in bars
+    )
+    coverage = len(per_window) / max(1, expected_samples)
+    stability = stable_count / len(per_window)
+    confidence = 0.4 * coverage + 0.6 * stability
+    if len(per_window) == 1:
+        confidence = min(confidence, 0.55)
+        reason = "insufficient_samples"
+    elif stability < 0.75:
+        reason = "inconsistent_windows"
+    elif coverage < 0.5:
+        reason = "too_few_valid_windows"
+    else:
+        reason = None
+    return round(max(0.0, min(1.0, confidence)), 3), reason
 
 
 def _parse_cropdetect_lines(stderr: str, orig_w: int, orig_h: int) -> list:
@@ -149,9 +347,16 @@ def detect_letterbox(file_path: str, sample_duration: int = 30, skip_seconds: in
     if not original_w or not original_h:
         raise ValueError(f"Could not determine video dimensions for {file_path}")
 
-    def _no_letterbox() -> Dict[str, Any]:
+    def _no_letterbox(reason: str = "no_meaningful_bars", samples: Optional[list] = None) -> Dict[str, Any]:
         return {
             "detected": False,
+            "auto_apply": False,
+            "review_suggested": False,
+            "confidence": 0.0,
+            "sample_count": len(samples or []),
+            "samples_expected": len(windows),
+            "per_window_bars": samples or [],
+            "instability_reason": reason,
             "original_w": original_w, "original_h": original_h,
             "crop_w": original_w, "crop_h": original_h,
             "crop_x": 0, "crop_y": 0,
@@ -183,7 +388,20 @@ def detect_letterbox(file_path: str, sample_duration: int = 30, skip_seconds: in
             per_window.append(crop)
 
     if not per_window:
-        return _no_letterbox()
+        return _no_letterbox("no_valid_samples")
+
+    per_window_bars = [
+        {
+            "top": y,
+            "bottom": original_h - (y + h),
+            "left": x,
+            "right": original_w - (x + w),
+        }
+        for w, h, x, y in per_window
+    ]
+    confidence, instability_reason = _score_crop_samples(
+        per_window, len(windows), original_w, original_h,
+    )
 
     # ── Robust consensus: median of each bar across the sampled windows ──────
     tops = [y for (_w, _h, _x, y) in per_window]
@@ -204,8 +422,16 @@ def detect_letterbox(file_path: str, sample_duration: int = 30, skip_seconds: in
             return v, v
         return 0, 0                # lopsided → unreliable, don't auto-crop this axis
 
+    raw_bt, raw_bb, raw_bl, raw_br = bt, bb, bl, br
     bt, bb = _reconcile(bt, bb, original_h)
     bl, br = _reconcile(bl, br, original_w)
+    asymmetric = (
+        ((raw_bt > 0 or raw_bb > 0) and bt == 0)
+        or ((raw_bl > 0 or raw_br > 0) and bl == 0)
+    )
+    if asymmetric:
+        confidence = round(confidence * 0.5, 3)
+        instability_reason = "asymmetric_bars"
 
     # ── Relative + absolute threshold, then even-align ───────────────────────
     def _thr(v: int, dim: int) -> int:
@@ -225,12 +451,34 @@ def detect_letterbox(file_path: str, sample_duration: int = 30, skip_seconds: in
     # Guard against an implausible over-crop (would destroy the frame).
     if crop_w < original_w * 0.2 or crop_h < original_h * 0.2:
         logger.warning(f"Letterbox detection produced implausible crop for {file_path}; ignoring")
-        return _no_letterbox()
+        return _no_letterbox("implausible_crop", per_window_bars)
 
-    detected = (bt > 0 or bb > 0 or bl > 0 or br > 0)
+    candidate_detected = (bt > 0 or bb > 0 or bl > 0 or br > 0)
+    raw_candidate = max(raw_bt, raw_bb, raw_bl, raw_br) >= 4
+    removed_fraction = max((bt + bb) / original_h, (bl + br) / original_w)
+    meaningful = removed_fraction >= _MIN_MEANINGFUL_CROP_FRAC
+    auto_apply = bool(
+        candidate_detected
+        and meaningful
+        and confidence >= _AUTO_CROP_CONFIDENCE
+        and len(per_window) >= 2
+        and not asymmetric
+    )
+    review_suggested = bool((candidate_detected or raw_candidate) and not auto_apply)
+    if review_suggested and not instability_reason:
+        instability_reason = (
+            "crop_below_meaningful_threshold" if not meaningful else "confidence_below_auto_apply"
+        )
 
     return {
-        "detected": detected,
+        "detected": auto_apply,
+        "auto_apply": auto_apply,
+        "review_suggested": review_suggested,
+        "confidence": confidence,
+        "sample_count": len(per_window),
+        "samples_expected": len(windows),
+        "per_window_bars": per_window_bars,
+        "instability_reason": instability_reason,
         "original_w": original_w, "original_h": original_h,
         "crop_w": crop_w, "crop_h": crop_h,
         "crop_x": crop_x, "crop_y": crop_y,
@@ -279,9 +527,10 @@ def encode_video(
     trim_end: Optional[float] = None,
     audio_codec: Optional[str] = None,
     audio_bitrate: Optional[str] = None,
+    profile: str = "source_fidelity",
     progress_callback=None,
 ) -> Dict[str, Any]:
-    """Re-encode a video with H.264, optionally cropping, trimming, and/or setting DAR.
+    """Re-encode a video from a resolved source-aware profile.
 
     Args:
         input_path: Source video file
@@ -304,6 +553,22 @@ def encode_video(
 
     # Get source duration and audio info for progress tracking and smart defaults
     probe = probe_file(input_path)
+    plan = resolve_encode_plan(
+        input_path,
+        profile=profile,
+        crop=crop,
+        target_dar=target_dar,
+        crf=crf,
+        preset=preset,
+        audio_passthrough=audio_passthrough,
+        trim_start=trim_start,
+        trim_end=trim_end,
+        audio_codec=audio_codec,
+        audio_bitrate=audio_bitrate,
+        probe=probe,
+    )
+    if plan["errors"]:
+        raise ValueError(" ".join(plan["errors"]))
     duration = None
     source_audio_bitrate = None
     source_audio_codec = None
@@ -355,6 +620,11 @@ def encode_video(
         "-y",  # Overwrite output
     ]
 
+    # Preserve stored rotation rather than letting ffmpeg rotate pixels and then
+    # also carrying the original rotation metadata into the output.
+    if profile == "source_fidelity":
+        cmd.append("-noautorotate")
+
     # Trim: use -ss before -i for fast seek, -to for end point
     if trim_start and trim_start > 0:
         cmd.extend(["-ss", str(trim_start)])
@@ -368,23 +638,28 @@ def encode_video(
         cmd.extend(["-t", str(end_time)])
 
     cmd.extend([
-        "-c:v", "libx264",
+        "-map", "0",
+        "-map_metadata", "0",
+        "-map_chapters", "0",
+        "-c:v", plan["output"]["video_encoder"],
         "-crf", str(crf),
         "-preset", preset,
-        "-pix_fmt", "yuv420p",
+        "-pix_fmt", plan["output"]["pixel_format"],
+        "-fps_mode", "passthrough",
     ])
 
-    # Constrained CRF: cap bitrate at the source level so we never inflate the file
-    # beyond the source's quality envelope. This ensures output is "relatively lossless"
-    # compared to the source without producing unnecessarily large files.
-    if source_video_bitrate and source_video_bitrate > 0:
-        maxrate_kbps = source_video_bitrate // 1000
-        bufsize_kbps = maxrate_kbps * 2
-        cmd.extend([
-            "-maxrate", f"{maxrate_kbps}k",
-            "-bufsize", f"{bufsize_kbps}k",
-        ])
-        logger.info(f"Constrained CRF: maxrate={maxrate_kbps}k bufsize={bufsize_kbps}k (source video bitrate: {source_video_bitrate // 1000}k)")
+    # Re-state colour properties explicitly: container metadata copying alone is
+    # not sufficient for every encoder/muxer combination.
+    color_flags = {
+        "color_primaries": "-color_primaries",
+        "color_transfer": "-color_trc",
+        "color_space": "-colorspace",
+        "color_range": "-color_range",
+    }
+    for source_key, flag in color_flags.items():
+        value = plan["source"].get(source_key)
+        if value:
+            cmd.extend([flag, str(value)])
 
     if vf_filters:
         cmd.extend(["-vf", ",".join(vf_filters)])
@@ -403,21 +678,23 @@ def encode_video(
             aspect_val = target_dar
         cmd.extend(["-aspect", aspect_val])
 
-    if audio_passthrough:
+    resolved_audio_codec = plan["output"].get("audio_codec")
+    resolved_audio_bitrate = plan["output"].get("audio_bitrate")
+    if resolved_audio_codec == "copy":
         cmd.extend(["-c:a", "copy"])
-    else:
+    elif resolved_audio_codec:
         # Smart audio re-encoding: match source quality by default
-        chosen_codec = audio_codec or "aac"  # aac is universally compatible
+        chosen_codec = resolved_audio_codec
         # Validate codec choice
-        if chosen_codec not in ("aac", "opus", "flac"):
+        if chosen_codec not in ("aac", "opus", "flac", "alac"):
             chosen_codec = "aac"
 
-        if chosen_codec == "flac":
-            cmd.extend(["-c:a", "flac"])
+        if chosen_codec in {"flac", "alac"}:
+            cmd.extend(["-c:a", chosen_codec])
         elif chosen_codec == "opus":
             # Determine bitrate: use explicit setting, or match source, or sensible default
-            if audio_bitrate:
-                br = audio_bitrate
+            if resolved_audio_bitrate:
+                br = resolved_audio_bitrate
             elif source_audio_bitrate:
                 # Match source bitrate (round to nearest common value, cap at 256k)
                 src_kbps = source_audio_bitrate // 1000
@@ -427,8 +704,8 @@ def encode_video(
             cmd.extend(["-c:a", "libopus", "-b:a", br])
         else:
             # AAC — determine bitrate
-            if audio_bitrate:
-                br = audio_bitrate
+            if resolved_audio_bitrate:
+                br = resolved_audio_bitrate
             elif source_audio_bitrate:
                 src_kbps = source_audio_bitrate // 1000
                 br = f"{min(max(src_kbps, 96), 320)}k"
@@ -438,9 +715,6 @@ def encode_video(
 
     # Copy subtitle streams if present
     cmd.extend(["-c:s", "copy"])
-
-    # Map all streams
-    cmd.extend(["-map", "0"])
 
     # Progress tracking via pipe
     cmd.extend(["-progress", "pipe:1", "-nostats"])
@@ -523,7 +797,112 @@ def encode_video(
         "output_w": output_w,
         "output_h": output_h,
         "output_video_bitrate": output_video_bitrate,
+        "encode_plan": plan,
     }
+
+
+def validate_encoded_output(
+    input_path: str,
+    output_path: str,
+    plan: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Decode and compare a staged encode before the library file is touched."""
+    settings = get_settings()
+    source_probe = probe_file(input_path)
+    output_probe = probe_file(output_path)
+    source_video = next((s for s in source_probe.get("streams", []) if s.get("codec_type") == "video"), None)
+    output_video = next((s for s in output_probe.get("streams", []) if s.get("codec_type") == "video"), None)
+    source_audio = next((s for s in source_probe.get("streams", []) if s.get("codec_type") == "audio"), None)
+    output_audio = next((s for s in output_probe.get("streams", []) if s.get("codec_type") == "audio"), None)
+    if not source_video or not output_video:
+        raise RuntimeError("Staged validation failed: source or output video stream is missing")
+
+    checks: Dict[str, Any] = {}
+    transforms = plan.get("transforms", {})
+    source_duration = float(source_probe.get("format", {}).get("duration") or 0)
+    output_duration = float(output_probe.get("format", {}).get("duration") or 0)
+    expected_duration = max(
+        0.0,
+        source_duration
+        - float(transforms.get("trim_start") or 0)
+        - float(transforms.get("trim_end") or 0),
+    )
+    duration_tolerance = max(0.5, expected_duration * 0.01)
+    checks["duration_seconds"] = output_duration
+    if expected_duration and abs(output_duration - expected_duration) > duration_tolerance:
+        raise RuntimeError(
+            f"Staged validation failed: duration {output_duration:.3f}s differs from "
+            f"expected {expected_duration:.3f}s"
+        )
+
+    if plan.get("profile") == "source_fidelity":
+        source_depth = _stream_bit_depth(source_video)
+        output_depth = _stream_bit_depth(output_video)
+        checks["source_bit_depth"] = source_depth
+        checks["output_bit_depth"] = output_depth
+        if source_depth > 8 and output_depth < source_depth:
+            raise RuntimeError(
+                f"Staged validation failed: source is {source_depth}-bit but output is {output_depth}-bit"
+            )
+        source_transfer = source_video.get("color_transfer")
+        checks["color_transfer"] = output_video.get("color_transfer")
+        if source_transfer in {"smpte2084", "arib-std-b67"} and output_video.get("color_transfer") != source_transfer:
+            raise RuntimeError("Staged validation failed: HDR transfer metadata was not preserved")
+
+    if source_audio:
+        if not output_audio:
+            raise RuntimeError("Staged validation failed: audio stream is missing")
+        for key in ("channels", "sample_rate"):
+            source_value = str(source_audio.get(key) or "")
+            output_value = str(output_audio.get(key) or "")
+            checks[f"audio_{key}"] = output_value
+            if source_value and output_value and source_value != output_value:
+                raise RuntimeError(
+                    f"Staged validation failed: audio {key} changed from {source_value} to {output_value}"
+                )
+
+    # A successful full video decode is the last mandatory gate.  Corruption is
+    # caught here while the original is still in place.
+    decode = subprocess.run(
+        [settings.resolved_ffmpeg, "-v", "error", "-xerror", "-i", output_path,
+         "-map", "0:v:0", "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+        timeout=21_600,
+        **HIDE_WINDOW,
+    )
+    if decode.returncode != 0:
+        raise RuntimeError(f"Staged validation failed during full decode: {decode.stderr[:1000]}")
+    checks["full_decode"] = "passed"
+
+    # SSIM is meaningful only when geometry and timing were not intentionally
+    # changed.  Use a representative 30-second comparison in addition to the
+    # mandatory full decode and probe checks.
+    comparable = not any([
+        transforms.get("crop"), transforms.get("target_dar"),
+        transforms.get("trim_start"), transforms.get("trim_end"),
+    ])
+    checks["ssim"] = None
+    if comparable:
+        import re
+        metric = subprocess.run(
+            [settings.resolved_ffmpeg, "-v", "info", "-i", input_path, "-i", output_path,
+             "-filter_complex", "[0:v:0][1:v:0]ssim", "-an", "-t", "30", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            **HIDE_WINDOW,
+        )
+        match = re.search(r"All:([0-9.]+)", metric.stderr or "")
+        if metric.returncode == 0 and match:
+            checks["ssim"] = float(match.group(1))
+            if checks["ssim"] < 0.90:
+                raise RuntimeError(f"Staged validation failed: SSIM {checks['ssim']:.4f} is below 0.9000")
+        else:
+            checks["ssim_note"] = "metric unavailable; probe comparison and full decode passed"
+    else:
+        checks["ssim_note"] = "not comparable after an intentional crop, DAR, or trim transform"
+    return checks
 
 
 def _sync_editor_flags_from_sidecars(db, VideoItem):
@@ -593,6 +972,7 @@ def scan_library_for_letterboxing(
         on_progress: Optional callback(current, total, artist, title) called per file.
     """
     from app.models import VideoItem, QualitySignature
+    from sqlalchemy import or_
 
     import logging
     _log = logging.getLogger("playarr")
@@ -603,6 +983,18 @@ def scan_library_for_letterboxing(
     # may be missing even though the sidecar XML has them.  Do a quick
     # backfill so the DB filters below work correctly.
     _sync_editor_flags_from_sidecars(db, VideoItem)
+
+    # A false-positive dismissal applies only to the exact source file
+    # evidence. A replaced/changed file is eligible for review again.
+    for dismissed_video in db.query(VideoItem).filter(
+        VideoItem.exclude_from_editor_scan == True,
+        VideoItem.editor_crop_dismissed_evidence_hash.isnot(None),
+    ).all():
+        signature = dismissed_video.quality_signature
+        if signature and signature.letterbox_source_checksum != dismissed_video.file_checksum:
+            dismissed_video.exclude_from_editor_scan = False
+            dismissed_video.editor_crop_dismissed_evidence_hash = None
+    db.flush()
 
     def _apply_edit_filters(query):
         """Apply skip_cropped / skip_trimmed filters to a query."""
@@ -625,7 +1017,10 @@ def scan_library_for_letterboxing(
         .filter(
             VideoItem.file_path.isnot(None),
             QualitySignature.letterbox_scanned == True,
-            QualitySignature.letterbox_detected == True,
+            or_(
+                QualitySignature.letterbox_detected == True,
+                QualitySignature.letterbox_review_suggested == True,
+            ),
         )
     )
     if not include_excluded:
@@ -646,7 +1041,14 @@ def scan_library_for_letterboxing(
             "artist": video.artist,
             "title": video.title,
             "file_path": video.file_path,
-            "detected": True,
+            "detected": bool(qs.letterbox_detected),
+            "auto_apply": bool(qs.letterbox_detected),
+            "review_suggested": bool(qs.letterbox_review_suggested),
+            "confidence": qs.letterbox_confidence or 0.0,
+            "sample_count": qs.letterbox_sample_count,
+            "samples_expected": qs.letterbox_samples_expected,
+            "instability_reason": qs.letterbox_instability_reason,
+            "per_window_bars": (qs.letterbox_evidence_json or {}).get("per_window_bars", []),
             "original_w": qs.width,
             "original_h": qs.height,
             "crop_w": qs.letterbox_crop_w,
@@ -708,6 +1110,14 @@ def scan_library_for_letterboxing(
             qs.letterbox_bar_bottom = info["bar_bottom"]
             qs.letterbox_bar_left = info["bar_left"]
             qs.letterbox_bar_right = info["bar_right"]
+            qs.letterbox_confidence = info["confidence"]
+            qs.letterbox_sample_count = info["sample_count"]
+            qs.letterbox_samples_expected = info["samples_expected"]
+            qs.letterbox_review_suggested = info["review_suggested"]
+            qs.letterbox_instability_reason = info["instability_reason"]
+            qs.letterbox_evidence_json = {"per_window_bars": info["per_window_bars"]}
+            qs.letterbox_source_checksum = video.file_checksum
+            qs.letterbox_evidence_hash = crop_evidence_hash(info, video.file_checksum)
             db.commit()
 
             # Persist to sidecar XML so future scans with fresh DB can skip
@@ -717,7 +1127,7 @@ def scan_library_for_letterboxing(
             except Exception:
                 pass
 
-            if info["detected"]:
+            if info["detected"] or info["review_suggested"]:
                 results.append({
                     "video_id": video.id,
                     "artist": video.artist,
@@ -725,7 +1135,8 @@ def scan_library_for_letterboxing(
                     "file_path": video.file_path,
                     **info,
                 })
-                newly_detected += 1
+                if info["detected"]:
+                    newly_detected += 1
         except Exception as e:
             logger.warning(f"Letterbox scan failed for video {video.id}: {e}")
             continue

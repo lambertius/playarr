@@ -1,118 +1,130 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useCallback, useDeferredValue, useMemo, useState } from "react";
 import {
-  RefreshCw, Wifi, WifiOff, Search, AlertTriangle, RotateCcw,
-  ChevronLeft, ChevronRight, Trash2,
-  Download, FolderInput, Activity, CheckCircle2, XCircle, Ban, SkipForward,
-  Clapperboard, FileSearch, ArrowUpDown,
+  Activity, Ban, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight,
+  Clapperboard, Clock3, Download, FileSearch, FolderInput, RefreshCw,
+  RotateCcw, Search, ServerCog, SkipForward, Trash2, Wifi, WifiOff, XCircle,
 } from "lucide-react";
-import { useJobs, useJobLog, useRetryJob, useCancelJob, useClearHistory, useDeleteBatch } from "@/hooks/queries";
-import { jobsApi } from "@/lib/api";
+
+import { JobCard } from "@/components/QueueComponents";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { ErrorState, Skeleton } from "@/components/Feedback";
 import { useToast } from "@/components/Toast";
-import { useConfirm } from "@/components/ConfirmDialog";
-import { Tooltip } from "@/components/Tooltip";
+import {
+  useCancelJob, useJobLog, useJobPage, useOperationHealth, useRetryJob,
+  useUpdateYtdlp, useYtdlpStatus,
+} from "@/hooks/queries";
 import { useJobTelemetry } from "@/hooks/useJobTelemetry";
-import { JobCard } from "@/components/QueueComponents";
-import { isActiveJob } from "@/lib/utils";
+import { jobsApi } from "@/lib/api";
 import { getPref, setPref } from "@/lib/preferences";
-import type { JobSummary } from "@/types";
+import type {
+  ClearHistoryParams, JobCategory, JobPageParams, JobStatusGroup, JobSummary,
+} from "@/types";
 
-type QueueTab = "active" | "history";
-type HistoryFilter = "all" | "complete" | "failed" | "cancelled" | "skipped";
-type SourceFilter = "all" | "download" | "import" | "editor" | "scraper";
-type HistorySortBy = "date_added" | "date_completed" | "artist" | "title";
-type HistorySortDir = "asc" | "desc";
+const STATUS_TABS: Array<{
+  value: JobStatusGroup;
+  label: string;
+  icon: typeof Activity;
+}> = [
+  { value: "active", label: "Active", icon: Activity },
+  { value: "complete", label: "Complete", icon: CheckCircle2 },
+  { value: "failed", label: "Failed", icon: XCircle },
+  { value: "cancelled", label: "Cancelled", icon: Ban },
+  { value: "skipped", label: "Skipped", icon: SkipForward },
+];
 
-const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const CATEGORY_TABS: Array<{
+  value: JobCategory | "all";
+  label: string;
+  icon?: typeof Download;
+}> = [
+  { value: "all", label: "All" },
+  { value: "download", label: "Downloads", icon: Download },
+  { value: "import", label: "Imports", icon: FolderInput },
+  { value: "video_editor", label: "Video Editor", icon: Clapperboard },
+  { value: "scraper", label: "Scraper", icon: FileSearch },
+];
 
-// ── Queue page preferences (server-backed) ──────────────
-interface QueuePrefs {
-  tab: QueueTab;
-  sourceFilter: SourceFilter;
-  historyFilter: HistoryFilter;
-  statusFilter: string | null;
-  historySortBy: HistorySortBy;
-  historySortDir: HistorySortDir;
-  activePageSize: number;
-  historyPageSize: number;
+const PAGE_SIZES = [10, 20, 50, 100];
+
+interface QueuePreferences {
+  status: JobStatusGroup;
+  category: JobCategory | "all";
+  pageSize: number;
 }
 
-function queueLegacy(): QueuePrefs {
-  const g = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
-  return {
-    tab: (g("queue_tab") as QueueTab) || "active",
-    sourceFilter: (g("queue_source_filter") as SourceFilter) || "all",
-    historyFilter: (g("queue_history_filter") as HistoryFilter) || "all",
-    statusFilter: g("queue_status_filter") || null,
-    historySortBy: (g("queue_history_sort_by") as HistorySortBy) || "date_added",
-    historySortDir: (g("queue_history_sort_dir") as HistorySortDir) || "desc",
-    activePageSize: Number(g("queue_active_page_size")) || 20,
-    historyPageSize: Number(g("queue_history_page_size")) || 20,
-  };
+const DEFAULT_PREFS: QueuePreferences = {
+  status: "active",
+  category: "all",
+  pageSize: 20,
+};
+
+function loadPreferences(): QueuePreferences {
+  return { ...DEFAULT_PREFS, ...getPref<Partial<QueuePreferences>>("queue-v2", DEFAULT_PREFS) };
 }
 
-function getQueuePrefs(): QueuePrefs {
-  const fallback = queueLegacy();
-  return { ...fallback, ...getPref<Partial<QueuePrefs>>("queue", fallback) };
+function dateStart(value: string): string | undefined {
+  return value ? new Date(`${value}T00:00:00`).toISOString() : undefined;
 }
 
-function patchQueuePrefs(patch: Partial<QueuePrefs>): void {
-  setPref("queue", { ...getQueuePrefs(), ...patch });
+function dateEnd(value: string): string | undefined {
+  return value ? new Date(`${value}T23:59:59.999`).toISOString() : undefined;
 }
 
-const DOWNLOAD_JOB_TYPES = new Set(["import_url", "playlist_import", "redownload"]);
-const IMPORT_JOB_TYPES = new Set(["library_scan", "library_import", "library_import_video"]);
-const EDITOR_JOB_TYPES_PREFIX = "video_editor_";
-const SCRAPER_JOB_TYPES = new Set(["metadata_refresh", "batch_metadata_refresh", "kodi_export"]);
-
-function getSourceType(job: JobSummary): SourceFilter {
-  if (DOWNLOAD_JOB_TYPES.has(job.job_type)) return "download";
-  if (IMPORT_JOB_TYPES.has(job.job_type)) return "import";
-  if (job.job_type.startsWith(EDITOR_JOB_TYPES_PREFIX)) return "editor";
-  if (SCRAPER_JOB_TYPES.has(job.job_type)) return "scraper";
-  return "download";
+function compactAge(seconds: number): string {
+  if (seconds < 1) return "none";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
 }
 
-/* ── Pagination controls ── */
+function sumBacklog(values?: Record<string, number>): number {
+  if (!values) return 0;
+  return Object.entries(values)
+    .filter(([status]) => !["complete", "completed", "superseded"].includes(status))
+    .reduce((total, [, count]) => total + count, 0);
+}
+
 function Pagination({
-  page, totalPages, pageSize, total,
-  onPageChange, onPageSizeChange,
+  page, pageSize, total, totalPages, onPage, onPageSize,
 }: {
-  page: number; totalPages: number; pageSize: number; total: number;
-  onPageChange: (p: number) => void; onPageSizeChange: (s: number) => void;
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  onPage: (page: number) => void;
+  onPageSize: (size: number) => void;
 }) {
   if (total === 0) return null;
   const start = (page - 1) * pageSize + 1;
   const end = Math.min(page * pageSize, total);
   return (
-    <div className="flex items-center justify-between text-xs text-text-muted pt-3 pb-1">
-      <div className="flex items-center gap-2">
-        <span>Show</span>
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-text-muted">
+      <label className="flex items-center gap-2">
+        Show
         <select
           value={pageSize}
-          onChange={(e) => onPageSizeChange(Number(e.target.value))}
-          className="bg-surface-lighter border border-surface-border rounded px-2 py-1 text-xs text-text-secondary"
+          onChange={(event) => onPageSize(Number(event.target.value))}
+          className="rounded border border-surface-border bg-surface-lighter px-2 py-1 text-text-secondary"
         >
-          {PAGE_SIZE_OPTIONS.map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
+          {PAGE_SIZES.map((size) => <option key={size}>{size}</option>)}
         </select>
-        <span>per page</span>
-      </div>
-      <span className="text-text-secondary">{start}–{end} of {total}</span>
+      </label>
+      <span className="tabular-nums">{start}–{end} of {total}</span>
       <div className="flex items-center gap-1">
         <button
-          onClick={() => onPageChange(page - 1)}
+          onClick={() => onPage(page - 1)}
           disabled={page <= 1}
-          className="p-1 rounded hover:bg-surface-lighter disabled:opacity-30 disabled:cursor-not-allowed"
+          className="rounded p-1.5 hover:bg-surface-lighter disabled:opacity-30"
+          aria-label="Previous page"
         >
           <ChevronLeft size={16} />
         </button>
-        <span className="tabular-nums px-2 text-text-secondary">{page} / {totalPages || 1}</span>
+        <span className="min-w-16 text-center tabular-nums">{page} / {totalPages}</span>
         <button
-          onClick={() => onPageChange(page + 1)}
+          onClick={() => onPage(page + 1)}
           disabled={page >= totalPages}
-          className="p-1 rounded hover:bg-surface-lighter disabled:opacity-30 disabled:cursor-not-allowed"
+          className="rounded p-1.5 hover:bg-surface-lighter disabled:opacity-30"
+          aria-label="Next page"
         >
           <ChevronRight size={16} />
         </button>
@@ -121,717 +133,371 @@ function Pagination({
   );
 }
 
-/* ── Stat card ── */
-function StatCard({ icon, label, value, active, selected, color, onClick }: {
-  icon: React.ReactNode; label: string; value: number; active?: boolean; selected?: boolean; color: string; onClick?: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border transition-colors text-left w-full ${
-        selected ? `${color} border-current/40 ring-1 ring-current/30` :
-        active ? `${color} border-current/20` : "bg-surface/50 border-surface-border text-text-muted hover:bg-surface-lighter"
-      }`}
-    >
-      <span className="opacity-70">{icon}</span>
-      <div className="min-w-0">
-        <div className="text-lg font-bold tabular-nums leading-tight">{value}</div>
-        <div className="text-[10px] uppercase tracking-wider opacity-70">{label}</div>
-      </div>
-    </button>
-  );
-}
-
 export function QueuePage() {
+  const initialPrefs = useMemo(loadPreferences, []);
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
-  const { data: jobs, isLoading, isError, refetch } = useJobs({ limit: 10000 });
+  const { connected, getJobTelemetry } = useJobTelemetry();
   const retryMutation = useRetryJob();
   const cancelMutation = useCancelJob();
-  const clearHistoryMutation = useClearHistory();
-  const batchDeleteMutation = useDeleteBatch();
-  const { connected, getJobTelemetry } = useJobTelemetry();
+  const ytdlpUpdate = useUpdateYtdlp();
+  const ytdlp = useYtdlpStatus();
+  const operationHealth = useOperationHealth();
 
+  const [status, setStatus] = useState<JobStatusGroup>(initialPrefs.status);
+  const [category, setCategory] = useState<JobCategory | "all">(initialPrefs.category);
+  const [pageSize, setPageSize] = useState(initialPrefs.pageSize);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search.trim());
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const [expandedJobId, setExpandedJobId] = useState<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [activeTab, setActiveTab] = useState<QueueTab>(() => getQueuePrefs().tab);
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(() => getQueuePrefs().sourceFilter);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>(() => getQueuePrefs().historyFilter);
-  const [statusFilter, setStatusFilter] = useState<string | null>(() => getQueuePrefs().statusFilter);
-  const [historySortBy, setHistorySortBy] = useState<HistorySortBy>(() => getQueuePrefs().historySortBy);
-  const [historySortDir, setHistorySortDir] = useState<HistorySortDir>(() => getQueuePrefs().historySortDir);
 
-  // Persist filter state
-  useEffect(() => { patchQueuePrefs({ tab: activeTab }); }, [activeTab]);
-  useEffect(() => { patchQueuePrefs({ sourceFilter }); }, [sourceFilter]);
-  useEffect(() => { patchQueuePrefs({ historyFilter }); }, [historyFilter]);
-  useEffect(() => { patchQueuePrefs({ statusFilter }); }, [statusFilter]);
-  useEffect(() => { patchQueuePrefs({ historySortBy }); }, [historySortBy]);
-  useEffect(() => { patchQueuePrefs({ historySortDir }); }, [historySortDir]);
+  const params = useMemo<JobPageParams>(() => ({
+    status_group: status,
+    job_category: category,
+    search: deferredSearch || undefined,
+    date_from: dateStart(fromDate),
+    date_to: dateEnd(toDate),
+    sort_by: status === "active" ? "date_added" : "date_completed",
+    sort_dir: "desc",
+    page,
+    page_size: pageSize,
+  }), [category, deferredSearch, fromDate, page, pageSize, status, toDate]);
 
-  // Pagination
-  const [activePage, setActivePage] = useState(1);
-  const [activePageSize, setActivePageSize] = useState(() => getQueuePrefs().activePageSize);
-  const [historyPage, setHistoryPage] = useState(1);
-  const [historyPageSize, setHistoryPageSize] = useState(() => getQueuePrefs().historyPageSize);
-
-  // Separate active and history jobs
-  const { activeJobs, allActiveCount, historyJobs } = useMemo(() => {
-    if (!jobs) return { activeJobs: [], allActiveCount: 0, historyJobs: [] };
-
-    const sourceFiltered = sourceFilter === "all"
-      ? jobs
-      : jobs.filter((j) => getSourceType(j) === sourceFilter);
-
-    let pool = sourceFiltered;
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      pool = pool.filter(
-        (j) =>
-          (j.display_name || "").toLowerCase().includes(q) ||
-          (j.input_url || "").toLowerCase().includes(q) ||
-          (j.action_label || "").toLowerCase().includes(q) ||
-          j.job_type.toLowerCase().includes(q) ||
-          String(j.id).includes(q)
-      );
-    }
-
-    let active = pool.filter((j) => isActiveJob(j.status));
-    const allActiveCount = active.length;
-    // Apply status filter for active-tab sub-filtering (e.g. "downloading" only)
-    if (statusFilter === "downloading") {
-      active = active.filter((j) => j.status === "downloading");
-    }
-    // Sort: in-progress jobs first, then queued
-    active.sort((a, b) => {
-      const aQueued = a.status === "queued" ? 1 : 0;
-      const bQueued = b.status === "queued" ? 1 : 0;
-      return aQueued - bQueued;
-    });
-    const history = pool.filter((j) => !isActiveJob(j.status));
-    return { activeJobs: active, allActiveCount, historyJobs: history };
-  }, [jobs, sourceFilter, searchQuery, statusFilter]);
-
-  // Filtered history (by status)
-  const filteredHistory = useMemo(() => {
-    if (historyFilter === "all") return historyJobs;
-    return historyJobs.filter((j) => j.status === historyFilter);
-  }, [historyJobs, historyFilter]);
-
-  // Sorted history
-  const sortedHistory = useMemo(() => {
-    const sorted = [...filteredHistory];
-    const dir = historySortDir === "asc" ? 1 : -1;
-
-    const parseDisplayName = (dn: string | null | undefined) => {
-      if (!dn) return { artist: "", title: "" };
-      const actionSep = dn.indexOf(" \u203a ");
-      const core = actionSep >= 0 ? dn.slice(0, actionSep) : dn;
-      const dashIdx = core.indexOf(" \u2013 ");
-      if (dashIdx >= 0) return { artist: core.slice(0, dashIdx), title: core.slice(dashIdx + 3) };
-      return { artist: core, title: "" };
-    };
-
-    sorted.sort((a, b) => {
-      let cmp = 0;
-      switch (historySortBy) {
-        case "date_added":
-          cmp = (a.created_at || "").localeCompare(b.created_at || "");
-          break;
-        case "date_completed":
-          cmp = (a.completed_at || "").localeCompare(b.completed_at || "");
-          break;
-        case "artist": {
-          const aa = parseDisplayName(a.display_name).artist.toLowerCase();
-          const ba = parseDisplayName(b.display_name).artist.toLowerCase();
-          cmp = aa.localeCompare(ba);
-          break;
-        }
-        case "title": {
-          const at = parseDisplayName(a.display_name).title.toLowerCase();
-          const bt = parseDisplayName(b.display_name).title.toLowerCase();
-          cmp = at.localeCompare(bt);
-          break;
-        }
-      }
-      return cmp * dir;
-    });
-    return sorted;
-  }, [filteredHistory, historySortBy, historySortDir]);
-
-  // History type counts (for sub-tab badges)
-  const historyTypeCounts = useMemo(() => {
-    const c = { all: filteredHistory.length, download: 0, import: 0, editor: 0, scraper: 0 };
-    for (const j of filteredHistory) {
-      const src = getSourceType(j);
-      c[src]++;
-    }
-    return c;
-  }, [filteredHistory]);
-
-  // Status breakdown for stats
-  const statusCounts = useMemo(() => {
-    if (!jobs) return { downloading: 0, queued: 0, processing: 0, finalizing: 0, complete: 0, failed: 0, cancelled: 0, skipped: 0 };
-    const c = { downloading: 0, queued: 0, processing: 0, finalizing: 0, complete: 0, failed: 0, cancelled: 0, skipped: 0 };
-    for (const j of jobs) {
-      if (j.status === "downloading") c.downloading++;
-      else if (j.status === "queued") c.queued++;
-      else if (j.status === "failed") c.failed++;
-      else if (j.status === "cancelled") c.cancelled++;
-      else if (j.status === "skipped") c.skipped++;
-      else if (j.status === "finalizing") c.finalizing++;
-      else if (j.status === "complete") c.complete++;
-      else if (isActiveJob(j.status)) c.processing++;
-    }
-    return c;
-  }, [jobs]);
-
-  // History status counts
-  // Paginated slices
-  const activeTotalPages = Math.max(1, Math.ceil(activeJobs.length / activePageSize));
-  const historyTotalPages = Math.max(1, Math.ceil(sortedHistory.length / historyPageSize));
-
-  const activeSlice = useMemo(() => {
-    const start = (activePage - 1) * activePageSize;
-    return activeJobs.slice(start, start + activePageSize);
-  }, [activeJobs, activePage, activePageSize]);
-
-  const historySlice = useMemo(() => {
-    const start = (historyPage - 1) * historyPageSize;
-    return sortedHistory.slice(start, start + historyPageSize);
-  }, [sortedHistory, historyPage, historyPageSize]);
-
-  // Reset page when filter/search changes
-  const setActivePageSafe = useCallback((p: number) => setActivePage(Math.max(1, Math.min(p, activeTotalPages))), [activeTotalPages]);
-  const setHistoryPageSafe = useCallback((p: number) => setHistoryPage(Math.max(1, Math.min(p, historyTotalPages))), [historyTotalPages]);
-
-  // Clamp pages when data changes
-  useMemo(() => { if (activePage > activeTotalPages) setActivePage(Math.max(1, activeTotalPages)); }, [activeTotalPages]);
-  useMemo(() => { if (historyPage > historyTotalPages) setHistoryPage(Math.max(1, historyTotalPages)); }, [historyTotalPages]);
-
-  // Job log for expanded panel
+  const jobsQuery = useJobPage(params);
   const expandedLog = useJobLog(expandedJobId);
+  const data = jobsQuery.data;
+  const jobs = data?.items ?? [];
 
-  const handleRetry = useCallback(
-    (jobId: number) => {
-      retryMutation.mutate(jobId, {
-        onSuccess: () => toast({ type: "success", title: "Job retried" }),
-      });
-    },
-    [retryMutation, toast]
-  );
+  const selectStatus = (next: JobStatusGroup) => {
+    setStatus(next);
+    setPage(1);
+    setSelectedIds(new Set());
+    setPref("queue-v2", { status: next, category, pageSize });
+  };
 
-  const handleCancel = useCallback(
-    async (job: JobSummary) => {
-      const ok = await confirm({
-        title: "Cancel this job?",
-        description: `Job #${job.id} "${job.display_name || job.job_type}" will be cancelled.`,
-      });
-      if (ok) {
-        cancelMutation.mutate(job.id, {
-          onSuccess: () => toast({ type: "success", title: "Job cancelled" }),
-        });
-      }
-    },
-    [confirm, cancelMutation, toast]
-  );
+  const selectCategory = (next: JobCategory | "all") => {
+    setCategory(next);
+    setPage(1);
+    setSelectedIds(new Set());
+    setPref("queue-v2", { status, category: next, pageSize });
+  };
 
-  // Detect server-restart interrupted jobs
-  const interruptedJobs = useMemo(() => {
-    if (!jobs) return [];
-    return jobs.filter(
-      (j) => j.status === "failed" && !!j.error_message && j.error_message.includes("Server restarted")
-    );
-  }, [jobs]);
+  const changePageSize = (next: number) => {
+    setPageSize(next);
+    setPage(1);
+    setSelectedIds(new Set());
+    setPref("queue-v2", { status, category, pageSize: next });
+  };
 
-  const [retryingAll, setRetryingAll] = useState(false);
-  const handleRetryAllInterrupted = useCallback(async () => {
-    setRetryingAll(true);
-    for (const job of interruptedJobs) {
-      retryMutation.mutate(job.id);
-    }
-    toast({ type: "success", title: `Retrying ${interruptedJobs.length} interrupted job(s)` });
-    setRetryingAll(false);
-  }, [interruptedJobs, retryMutation, toast]);
-
-  const handleClearHistory = useCallback(async () => {
-    // Build context-sensitive clear parameters
-    const params: { status?: string; job_type?: string } = {};
-    let description = "This will permanently delete all completed, failed, cancelled, and skipped jobs from the queue.";
-
-    // Status filter
-    if (historyFilter !== "all") {
-      params.status = historyFilter;
-      description = `This will permanently delete all ${historyFilter} jobs.`;
-    }
-
-    // Source filter → job_type prefix
-    if (sourceFilter === "download") {
-      description = historyFilter !== "all"
-        ? `This will permanently delete all ${historyFilter} download jobs.`
-        : "This will permanently delete all download history.";
-    } else if (sourceFilter === "import") {
-      description = historyFilter !== "all"
-        ? `This will permanently delete all ${historyFilter} import jobs.`
-        : "This will permanently delete all import history.";
-    } else if (sourceFilter === "editor") {
-      params.job_type = "video_editor";
-      description = historyFilter !== "all"
-        ? `This will permanently delete all ${historyFilter} editor jobs.`
-        : "This will permanently delete all editor history.";
-    } else if (sourceFilter === "scraper") {
-      params.job_type = "metadata";
-      description = historyFilter !== "all"
-        ? `This will permanently delete all ${historyFilter} scraper jobs.`
-        : "This will permanently delete all scraper history.";
-    }
-
-    const ok = await confirm({
-      title: "Clear history?",
-      description,
-    });
-    if (ok) {
-      // For download/import source filters, we need to clear multiple job types
-      // so we'll pass them one at a time
-      if (sourceFilter === "download") {
-        let total = 0;
-        for (const jt of ["import_url", "playlist_import", "redownload"]) {
-          const result = await jobsApi.clearHistory({ ...params, job_type: jt });
-          total += result.deleted;
-        }
-        toast({ type: "success", title: `Cleared ${total} job(s)` });
-        refetch();
-      } else if (sourceFilter === "import") {
-        let total = 0;
-        for (const jt of ["library_scan", "library_import", "library_import_video"]) {
-          const result = await jobsApi.clearHistory({ ...params, job_type: jt });
-          total += result.deleted;
-        }
-        toast({ type: "success", title: `Cleared ${total} job(s)` });
-        refetch();
-      } else {
-        clearHistoryMutation.mutate(params, {
-          onSuccess: (data) => {
-            toast({ type: "success", title: `Cleared ${data.deleted} job(s)` });
-          },
-        });
-      }
-    }
-  }, [confirm, clearHistoryMutation, historyFilter, sourceFilter, toast, refetch]);
-
-  // Auto-switch to active tab when jobs start processing
-  const hasActiveJobs = allActiveCount > 0;
-
-  // ─── Bulk selection ─────────────────────────────────────
-  const toggleSelect = useCallback((id: number) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+  const toggleSelected = useCallback((jobId: number) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(jobId)) next.delete(jobId);
+      else next.add(jobId);
       return next;
     });
   }, []);
 
-  const toggleSelectAll = useCallback(() => {
-    const visible = activeTab === "active" ? activeSlice : historySlice;
-    const allSelected = visible.length > 0 && visible.every(j => selectedIds.has(j.id));
-    if (allSelected) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(visible.map(j => j.id)));
-    }
-  }, [activeTab, activeSlice, historySlice, selectedIds]);
+  const togglePage = () => {
+    const allSelected = jobs.length > 0 && jobs.every((job) => selectedIds.has(job.id));
+    setSelectedIds(allSelected ? new Set() : new Set(jobs.map((job) => job.id)));
+  };
 
-  // Clear selection when tab/filter changes
-  useEffect(() => { setSelectedIds(new Set()); }, [activeTab, sourceFilter, historyFilter, searchQuery]);
-
-  const selectedCount = selectedIds.size;
-
-  const handleBulkDelete = useCallback(async () => {
-    const videoIds = Array.from(selectedIds)
-      .map(id => jobs?.find(j => j.id === id)?.video_id)
-      .filter((v): v is number => v != null);
-    if (videoIds.length === 0) {
-      toast({ type: "warning", title: "No linked videos to delete" });
-      return;
-    }
-    const ok = await confirm({
-      title: `Delete ${videoIds.length} track(s)?`,
-      description: "This will permanently delete the selected tracks and their files from your library.",
+  const cancelJob = useCallback(async (job: JobSummary) => {
+    const accepted = await confirm({
+      title: "Cancel this job?",
+      description: `Job #${job.id} (${job.display_name || job.action_label || job.job_type}) will stop at its next safe checkpoint.`,
     });
-    if (ok) {
-      batchDeleteMutation.mutate(videoIds, {
-        onSuccess: (data) => {
-          toast({ type: "success", title: `Deleted ${data.count} track(s)` });
-          setSelectedIds(new Set());
-          refetch();
-        },
-        onError: (err: any) => {
-          toast({ type: "error", title: err?.response?.data?.detail || "Failed to delete tracks" });
-        },
+    if (!accepted) return;
+    cancelMutation.mutate(job.id, {
+      onSuccess: () => toast({ type: "success", title: "Cancellation requested" }),
+      onError: () => toast({ type: "error", title: "Could not cancel job" }),
+    });
+  }, [cancelMutation, confirm, toast]);
+
+  const retryJob = useCallback((jobId: number) => {
+    retryMutation.mutate(jobId, {
+      onSuccess: () => toast({ type: "success", title: "Job queued for retry" }),
+      onError: () => toast({ type: "error", title: "Could not retry job" }),
+    });
+  }, [retryMutation, toast]);
+
+  const handleSelectedAction = async () => {
+    const selected = jobs.filter((job) => selectedIds.has(job.id));
+    if (status === "active") {
+      const accepted = await confirm({
+        title: `Cancel ${selected.length} selected job${selected.length === 1 ? "" : "s"}?`,
+        description: "Each job will stop at its next safe checkpoint.",
       });
+      if (!accepted) return;
+      selected.forEach((job) => cancelMutation.mutate(job.id));
+      toast({ type: "success", title: `Cancellation requested for ${selected.length} job(s)` });
+    } else if (status === "failed" || status === "cancelled") {
+      selected.forEach((job) => retryMutation.mutate(job.id));
+      toast({ type: "success", title: `${selected.length} job(s) queued for retry` });
     }
-  }, [selectedIds, jobs, confirm, batchDeleteMutation, toast, refetch]);
-
-  const handleBulkRetry = useCallback(() => {
-    const ids = Array.from(selectedIds).filter(id => {
-      const j = jobs?.find(j => j.id === id);
-      return j?.status === "failed" || j?.status === "cancelled";
-    });
-    for (const id of ids) retryMutation.mutate(id);
-    toast({ type: "success", title: `Retrying ${ids.length} job(s)` });
     setSelectedIds(new Set());
-  }, [selectedIds, jobs, retryMutation, toast]);
+  };
 
-  const handleBulkCancel = useCallback(async () => {
-    const ids = Array.from(selectedIds).filter(id => {
-      const j = jobs?.find(j => j.id === id);
-      return j && isActiveJob(j.status);
-    });
-    const ok = await confirm({
-      title: `Cancel ${ids.length} job(s)?`,
-      description: "The selected active jobs will be cancelled.",
-    });
-    if (ok) {
-      for (const id of ids) cancelMutation.mutate(id);
-      toast({ type: "success", title: `Cancelled ${ids.length} job(s)` });
+  const clearScope = (): ClearHistoryParams => ({
+    status_group: status === "active" ? undefined : status,
+    job_category: category,
+    search: deferredSearch || undefined,
+    date_from: dateStart(fromDate),
+    date_to: dateEnd(toDate),
+  });
+
+  const clearHistory = async () => {
+    if (status === "active") return;
+    try {
+      const scope = clearScope();
+      const preview = await jobsApi.previewClearHistory(scope);
+      if (preview.count === 0) {
+        toast({ type: "info", title: "No matching history to clear" });
+        return;
+      }
+      const range = fromDate || toDate
+        ? ` Date range: ${fromDate || "beginning"} to ${toDate || "now"}.`
+        : " All dates are included.";
+      const accepted = await confirm({
+        title: `Delete ${preview.count} ${status} job${preview.count === 1 ? "" : "s"}?`,
+        description: `This removes only ${status} history in ${category === "all" ? "all categories" : category}.${range} Active jobs and operation audit records are preserved.`,
+      });
+      if (!accepted) return;
+      const result = await jobsApi.clearHistory(scope);
+      toast({ type: "success", title: `Cleared ${result.deleted} history item(s)` });
       setSelectedIds(new Set());
+      jobsQuery.refetch();
+    } catch {
+      toast({ type: "error", title: "Could not clear queue history" });
     }
-  }, [selectedIds, jobs, confirm, cancelMutation, toast]);
+  };
 
-  if (isLoading) {
+  const queueYtdlpUpdate = () => {
+    ytdlpUpdate.mutate(undefined, {
+      onSuccess: (result) => toast({
+        type: "success",
+        title: "yt-dlp update queued",
+        description: `Job #${result.job_id} will report progress in Active.`,
+      }),
+      onError: () => toast({ type: "error", title: "Could not queue yt-dlp update" }),
+    });
+  };
+
+  if (jobsQuery.isLoading && !data) {
     return (
-      <div className="p-4 md:p-6 space-y-4">
-        <Skeleton className="h-10 w-48" />
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-16 rounded-lg" />
-          ))}
-        </div>
-        {Array.from({ length: 5 }).map((_, i) => (
-          <Skeleton key={i} className="h-20 rounded-lg" />
+      <div className="mx-auto max-w-6xl space-y-4 p-4 md:p-6">
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-20 w-full" />
+        {Array.from({ length: 5 }).map((_, index) => (
+          <Skeleton key={index} className="h-20 w-full rounded-lg" />
         ))}
       </div>
     );
   }
 
-  if (isError) {
-    return (
-      <div className="p-6">
-        <ErrorState message="Failed to load jobs" onRetry={refetch} />
-      </div>
-    );
+  if (jobsQuery.isError && !data) {
+    return <div className="p-6"><ErrorState message="Failed to load the queue" onRetry={jobsQuery.refetch} /></div>;
   }
 
-  const renderJobCard = (job: JobSummary) => (
-    <JobCard
-      key={job.id}
-      job={job}
-      telemetry={getJobTelemetry(job.id)}
-      logText={expandedJobId === job.id ? expandedLog.data?.log_text : undefined}
-      isLoadingLog={expandedJobId === job.id && expandedLog.isLoading}
-      isExpanded={expandedJobId === job.id}
-      onToggleExpand={() =>
-        setExpandedJobId(expandedJobId === job.id ? null : job.id)
-      }
-      onRetry={job.status === "failed" || job.status === "cancelled" ? () => handleRetry(job.id) : undefined}
-      onCancel={isActiveJob(job.status) ? () => handleCancel(job) : undefined}
-      selected={selectedIds.has(job.id)}
-      onSelect={toggleSelect}
-    />
-  );
-
-  const currentJobs = activeTab === "active" ? activeSlice : historySlice;
-  const currentTotal = activeTab === "active" ? activeJobs.length : sortedHistory.length;
-  const currentPage = activeTab === "active" ? activePage : historyPage;
-  const currentTotalPages = activeTab === "active" ? activeTotalPages : historyTotalPages;
-  const currentPageSize = activeTab === "active" ? activePageSize : historyPageSize;
-  const onPageChange = activeTab === "active" ? setActivePageSafe : setHistoryPageSafe;
-  const onPageSizeChange = activeTab === "active"
-    ? (s: number) => { patchQueuePrefs({ activePageSize: s }); setActivePageSize(s); setActivePage(1); }
-    : (s: number) => { patchQueuePrefs({ historyPageSize: s }); setHistoryPageSize(s); setHistoryPage(1); };
+  const health = operationHealth.data;
+  const selectedCount = selectedIds.size;
+  const canActOnSelection = status === "active" || status === "failed" || status === "cancelled";
 
   return (
-    <div className="p-4 md:p-6 max-w-5xl mx-auto">
-      {/* Header row */}
-      <div className="flex items-center justify-between mb-5">
+    <div className="mx-auto max-w-6xl p-4 md:p-6">
+      <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold text-text-primary">Queue</h1>
-          <span
-            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${
-              connected
-                ? "bg-emerald-500/15 text-emerald-400"
-                : "bg-yellow-500/15 text-yellow-400"
-            }`}
-            title={connected ? "Live updates connected" : "Polling mode (SSE disconnected)"}
-          >
+          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] ${
+            connected ? "bg-emerald-500/15 text-emerald-400" : "bg-amber-500/15 text-amber-400"
+          }`}>
             {connected ? <Wifi size={10} /> : <WifiOff size={10} />}
             {connected ? "Live" : "Polling"}
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
-            <input
-              type="text"
-              placeholder="Search jobs..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="input-field pl-8 pr-3 py-1.5 text-sm w-56"
-            />
-          </div>
-          <button onClick={() => refetch()} className="btn-ghost btn-sm gap-1.5">
-            <RefreshCw size={14} /> Refresh
-          </button>
-        </div>
-      </div>
 
-      {/* Stats overview */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5 mb-5">
-        <StatCard icon={<Activity size={16} />} label="Active" value={allActiveCount} active={allActiveCount > 0} selected={statusFilter === "active"} color="bg-blue-500/10 text-blue-400"
-          onClick={() => { if (statusFilter === "active") { setStatusFilter(null); } else { setActiveTab("active"); setHistoryFilter("all"); setStatusFilter("active"); } }} />
-        <StatCard icon={<Download size={16} />} label="Downloading" value={statusCounts.downloading} active={statusCounts.downloading > 0} selected={statusFilter === "downloading"} color="bg-sky-500/10 text-sky-400"
-          onClick={() => { if (statusFilter === "downloading") { setStatusFilter(null); } else { setActiveTab("active"); setHistoryFilter("all"); setStatusFilter("downloading"); } }} />
-        <StatCard icon={<CheckCircle2 size={16} />} label="Complete" value={statusCounts.complete} selected={statusFilter === "complete"} color="bg-emerald-500/10 text-emerald-400"
-          onClick={() => { if (statusFilter === "complete") { setStatusFilter(null); setHistoryFilter("all"); } else { setActiveTab("history"); setHistoryFilter("complete"); setStatusFilter("complete"); } }} />
-        <StatCard icon={<XCircle size={16} />} label="Failed" value={statusCounts.failed} active={statusCounts.failed > 0} selected={statusFilter === "failed"} color="bg-red-500/10 text-red-400"
-          onClick={() => { if (statusFilter === "failed") { setStatusFilter(null); setHistoryFilter("all"); } else { setActiveTab("history"); setHistoryFilter("failed"); setStatusFilter("failed"); } }} />
-        <StatCard icon={<Ban size={16} />} label="Cancelled" value={statusCounts.cancelled} selected={statusFilter === "cancelled"} color="bg-yellow-500/10 text-yellow-400"
-          onClick={() => { if (statusFilter === "cancelled") { setStatusFilter(null); setHistoryFilter("all"); } else { setActiveTab("history"); setHistoryFilter("cancelled"); setStatusFilter("cancelled"); } }} />
-        <StatCard icon={<SkipForward size={16} />} label="Skipped" value={statusCounts.skipped} selected={statusFilter === "skipped"} color="bg-orange-500/10 text-orange-400"
-          onClick={() => { if (statusFilter === "skipped") { setStatusFilter(null); setHistoryFilter("all"); } else { setActiveTab("history"); setHistoryFilter("skipped"); setStatusFilter("skipped"); } }} />
-      </div>
-
-      {/* Server restart interrupted banner */}
-      {interruptedJobs.length > 0 && (
-        <div className="mb-4 flex items-center gap-3 bg-amber-500/10 border border-amber-500/20 rounded-lg px-4 py-2.5">
-          <AlertTriangle size={16} className="text-amber-400 shrink-0" />
-          <span className="text-sm text-amber-300 flex-1">
-            {interruptedJobs.length} job{interruptedJobs.length > 1 ? "s were" : " was"} interrupted by a server restart.
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-surface-border bg-surface/60 px-3 py-2 text-xs">
+          <Download size={14} className="text-accent" />
+          <span className="font-medium text-text-primary">yt-dlp</span>
+          <span className="text-text-muted">Installed <b className="font-mono text-text-secondary">{ytdlp.data?.installed_version || "missing"}</b></span>
+          <span className="text-text-muted">Latest <b className="font-mono text-text-secondary">{ytdlp.data?.latest_version || "unknown"}</b></span>
+          <span className="text-text-muted">
+            Checked {ytdlp.data?.last_checked_at ? new Date(ytdlp.data.last_checked_at).toLocaleTimeString() : "not yet"}
           </span>
           <button
-            onClick={handleRetryAllInterrupted}
-            disabled={retryingAll}
-            className="btn-ghost btn-sm gap-1 text-amber-400 hover:text-amber-300"
+            onClick={queueYtdlpUpdate}
+            disabled={ytdlpUpdate.isPending}
+            className="btn-secondary btn-sm gap-1"
           >
-            <RotateCcw size={14} />
-            Retry All
+            <RefreshCw size={13} className={ytdlpUpdate.isPending ? "animate-spin" : ""} />
+            {ytdlp.data?.update_available ? "Update" : "Check / reinstall"}
           </button>
         </div>
-      )}
+      </div>
 
-      {/* Tab bar + filters */}
-      <div className="flex items-center gap-1 border-b border-surface-border mb-4">
-        {/* Main tabs */}
-        <button
-          onClick={() => { setActiveTab("active"); setStatusFilter(null); }}
-          className={`relative px-4 py-2.5 text-sm font-medium transition-colors ${
-            activeTab === "active"
-              ? "text-accent"
-              : "text-text-muted hover:text-text-secondary"
-          }`}
-        >
-          <span className="flex items-center gap-2">
-            Active
-            {hasActiveJobs && (
-              <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold bg-accent/20 text-accent tabular-nums">
-                {allActiveCount}
-              </span>
-            )}
+      <details className="group mb-4 rounded-lg border border-surface-border bg-surface/40">
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-text-secondary">
+          <ServerCog size={14} className="text-accent" />
+          <span className="font-medium">System health</span>
+          <span className="text-text-muted">
+            {health
+              ? `${health.deployment_profile} · ${health.mutations.pending} mutations · ${sumBacklog(health.sidecars)} sidecars · ${sumBacklog(health.files)} file ops`
+              : "Loading…"}
           </span>
-          {activeTab === "active" && (
-            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent rounded-t" />
-          )}
-        </button>
-        <button
-          onClick={() => { setActiveTab("history"); setStatusFilter(null); }}
-          className={`relative px-4 py-2.5 text-sm font-medium transition-colors ${
-            activeTab === "history"
-              ? "text-accent"
-              : "text-text-muted hover:text-text-secondary"
-          }`}
-        >
-          <span className="flex items-center gap-2">
-            History
-            <span className="text-[11px] text-text-muted tabular-nums">
-              {historyJobs.length}
-            </span>
-          </span>
-          {activeTab === "history" && (
-            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent rounded-t" />
-          )}
-        </button>
+          <ChevronDown size={14} className="ml-auto transition-transform group-open:rotate-180" />
+        </summary>
+        {health && (
+          <div className="grid gap-2 border-t border-surface-border px-3 py-3 text-xs sm:grid-cols-2 lg:grid-cols-5">
+            <div><span className="block text-text-muted">Worker profile</span><b>{health.deployment_profile}</b></div>
+            <div><span className="block text-text-muted">Pending mutations</span><b>{health.mutations.pending} / {health.mutation_queue_limit}</b></div>
+            <div><span className="block text-text-muted">Oldest mutation</span><b>{compactAge(health.mutations.oldest_age_seconds)}</b></div>
+            <div><span className="block text-text-muted">Database retries</span><b>{health.database_retry_count}</b></div>
+            <div><span className="block text-text-muted">Outbox backlog</span><b>{sumBacklog(health.sidecars) + sumBacklog(health.files)}</b></div>
+          </div>
+        )}
+      </details>
 
-        {/* Spacer */}
-        <div className="flex-1" />
-
-        {/* Source filter pills */}
-        <div className="flex items-center bg-surface-lighter rounded-lg p-0.5 gap-0.5 mb-1">
-          {(["all", "download", "import", "editor", "scraper"] as const).map((f) => {
-            const labels: Record<SourceFilter, string> = {
-              all: "All", download: "Downloads", import: "Imports", editor: "Editor", scraper: "Scraper",
-            };
+      <div className="mb-3 border-b border-surface-border">
+        <div className="flex overflow-x-auto">
+          {STATUS_TABS.map(({ value, label, icon: Icon }) => {
+            const count = data?.status_counts[value] ?? 0;
             return (
               <button
-                key={f}
-                onClick={() => setSourceFilter(f)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                  sourceFilter === f
-                    ? "bg-accent/15 text-accent"
-                    : "text-text-muted hover:text-text-secondary"
+                key={value}
+                onClick={() => selectStatus(value)}
+                className={`relative flex shrink-0 items-center gap-1.5 px-3 py-2.5 text-sm font-medium ${
+                  status === value ? "text-accent" : "text-text-muted hover:text-text-secondary"
                 }`}
               >
-                {f === "download" && <Download size={12} />}
-                {f === "import" && <FolderInput size={12} />}
-                {f === "editor" && <Clapperboard size={12} />}
-                {f === "scraper" && <FileSearch size={12} />}
-                {labels[f]}
+                <Icon size={14} /> {label}
+                <span className="rounded-full bg-surface-lighter px-1.5 text-[10px] tabular-nums">{count}</span>
+                {status === value && <span className="absolute inset-x-0 bottom-0 h-0.5 rounded-t bg-accent" />}
               </button>
             );
           })}
         </div>
+      </div>
 
-        {/* Clear history button (visible on history tab) */}
-        {activeTab === "history" && (
-          <Tooltip content="Remove finished jobs from history. Respects the current status and source filters.">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        {CATEGORY_TABS.map(({ value, label, icon: Icon }) => {
+          const count = data?.category_counts[value] ?? 0;
+          return (
             <button
-              onClick={handleClearHistory}
-              disabled={clearHistoryMutation.isPending}
-              className="btn-ghost btn-sm gap-1 text-text-muted hover:text-red-400 text-xs mb-1 ml-1"
+              key={value}
+              onClick={() => selectCategory(value)}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium ${
+                category === value
+                  ? "border-accent/30 bg-accent/15 text-accent"
+                  : "border-surface-border bg-surface/40 text-text-muted hover:text-text-secondary"
+              }`}
             >
-              <Trash2 size={13} />
-              Clear
+              {Icon && <Icon size={12} />} {label}
+              <span className="tabular-nums opacity-70">{count}</span>
             </button>
-          </Tooltip>
+          );
+        })}
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-end gap-2 rounded-lg border border-surface-border bg-surface/40 p-3">
+        <label className="min-w-56 flex-1 text-[10px] uppercase tracking-wide text-text-muted">
+          Search
+          <span className="relative mt-1 block">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input
+              value={search}
+              onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+              placeholder="Name, action, URL, type or job ID"
+              className="input-field w-full py-1.5 pl-8 text-sm normal-case tracking-normal"
+            />
+          </span>
+        </label>
+        <label className="text-[10px] uppercase tracking-wide text-text-muted">
+          Added from
+          <input
+            type="date"
+            value={fromDate}
+            onChange={(event) => { setFromDate(event.target.value); setPage(1); }}
+            className="input-field mt-1 block py-1.5 text-sm normal-case tracking-normal"
+          />
+        </label>
+        <label className="text-[10px] uppercase tracking-wide text-text-muted">
+          Added through
+          <input
+            type="date"
+            value={toDate}
+            onChange={(event) => { setToDate(event.target.value); setPage(1); }}
+            className="input-field mt-1 block py-1.5 text-sm normal-case tracking-normal"
+          />
+        </label>
+        <button onClick={() => jobsQuery.refetch()} className="btn-ghost btn-sm gap-1.5">
+          <RefreshCw size={14} className={jobsQuery.isFetching ? "animate-spin" : ""} /> Refresh
+        </button>
+        {status !== "active" && (
+          <button onClick={clearHistory} className="btn-ghost btn-sm gap-1.5 text-red-400">
+            <Trash2 size={14} /> Clear this view…
+          </button>
         )}
       </div>
 
-      {/* History type sub-tabs — shows type breakdown when viewing history */}
-      {activeTab === "history" && filteredHistory.length > 0 && (
-        <div className="flex items-center gap-1 mb-3">
-          {(["all", "download", "import", "editor", "scraper"] as const).map((f) => {
-            const labels: Record<SourceFilter | "all", string> = {
-              all: "All Types", download: "Downloads", import: "Imports", editor: "Editor", scraper: "Scraper",
-            };
-            const icons: Record<string, React.ReactNode> = {
-              download: <Download size={12} />, import: <FolderInput size={12} />,
-              editor: <Clapperboard size={12} />, scraper: <FileSearch size={12} />,
-            };
-            const count = historyTypeCounts[f as keyof typeof historyTypeCounts];
-            return (
-              <button
-                key={f}
-                onClick={() => setSourceFilter(f === "all" ? "all" : f)}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                  sourceFilter === f
-                    ? "bg-accent/15 text-accent border-accent/30"
-                    : count > 0
-                    ? "bg-surface-lighter/50 text-text-secondary border-surface-border hover:bg-surface-lighter"
-                    : "bg-surface/30 text-text-muted/50 border-transparent cursor-default"
-                }`}
-                disabled={count === 0 && f !== "all"}
-              >
-                {icons[f]}
-                {labels[f]}
-                <span className={`text-[10px] tabular-nums ${sourceFilter === f ? "text-accent" : "text-text-muted"}`}>
-                  {count}
-                </span>
-              </button>
-            );
-          })}
-
-          {/* Sort controls */}
-          <div className="flex-1" />
-          <div className="flex items-center gap-1.5">
-            <ArrowUpDown size={12} className="text-text-muted" />
-            <select
-              value={historySortBy}
-              onChange={(e) => { setHistorySortBy(e.target.value as HistorySortBy); setHistoryPage(1); }}
-              className="bg-surface-lighter border border-surface-border rounded px-2 py-1 text-xs text-text-secondary"
-            >
-              <option value="date_added">Date Added</option>
-              <option value="date_completed">Date Completed</option>
-              <option value="artist">Artist</option>
-              <option value="title">Title</option>
-            </select>
-            <button
-              onClick={() => { setHistorySortDir(historySortDir === "asc" ? "desc" : "asc"); setHistoryPage(1); }}
-              className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-surface-lighter border border-surface-border text-text-secondary hover:text-text-primary transition-colors"
-              title={historySortDir === "asc" ? "Ascending (A → Z)" : "Descending (Z → A)"}
-            >
-              {historySortDir === "asc" ? "A → Z" : "Z → A"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Bulk action bar — always visible when there are jobs */}
-      {currentTotal > 0 && (
-        <div className="flex items-center gap-3 bg-surface-secondary/50 border border-surface-border rounded-lg px-4 py-2 mb-3">
+      {jobs.length > 0 && (
+        <div className="mb-3 flex items-center gap-3 rounded-lg border border-surface-border bg-surface/50 px-3 py-2">
           <input
             type="checkbox"
-            checked={currentJobs.length > 0 && currentJobs.every(j => selectedIds.has(j.id))}
-            ref={(el) => {
-              if (el) el.indeterminate = selectedCount > 0 && !currentJobs.every(j => selectedIds.has(j.id));
-            }}
-            onChange={toggleSelectAll}
-            className="accent-accent w-4 h-4 cursor-pointer"
+            checked={jobs.every((job) => selectedIds.has(job.id))}
+            onChange={togglePage}
+            className="h-4 w-4 accent-accent"
+            aria-label="Select this page"
           />
-          <span className="text-sm text-text-secondary flex-1">
-            {selectedCount > 0 ? `${selectedCount} selected` : "Select all"}
+          <span className="flex-1 text-sm text-text-secondary">
+            {selectedCount ? `${selectedCount} selected on this page` : "Select this page"}
           </span>
-          {selectedCount > 0 && (
-            <>
-              {activeTab === "active" && (
-                <Tooltip content="Cancel selected jobs — stops processing and marks them as cancelled">
-                  <button onClick={handleBulkCancel} className="btn-ghost btn-sm gap-1 text-yellow-400 hover:text-yellow-300 text-xs">
-                    <Ban size={13} /> Cancel
-                  </button>
-                </Tooltip>
-              )}
-              {activeTab === "history" && (
-                <Tooltip content="Retry selected jobs — re-queues them for processing">
-                  <button onClick={handleBulkRetry} className="btn-ghost btn-sm gap-1 text-accent hover:text-accent/80 text-xs">
-                    <RotateCcw size={13} /> Retry
-                  </button>
-                </Tooltip>
-              )}
-              <Tooltip content="Permanently remove selected jobs from the queue">
-                <button onClick={handleBulkDelete} className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300 text-xs">
-                  <Trash2 size={13} /> Delete
-                </button>
-              </Tooltip>
-            </>
+          {selectedCount > 0 && canActOnSelection && (
+            <button onClick={handleSelectedAction} className="btn-secondary btn-sm gap-1.5">
+              {status === "active" ? <Ban size={13} /> : <RotateCcw size={13} />}
+              {status === "active" ? "Cancel selected" : "Retry selected"}
+            </button>
           )}
         </div>
       )}
 
-      {/* Job list (single column, full width) */}
-      {currentTotal === 0 ? (
-        <div className="card text-center py-12">
-          <p className="text-sm text-text-muted">
-            {activeTab === "active"
-              ? "No active jobs — submit a URL or scan your library to get started"
-              : "No history items match this filter"}
-          </p>
+      {jobs.length === 0 ? (
+        <div className="card py-14 text-center">
+          <Clock3 size={26} className="mx-auto mb-2 text-text-muted" />
+          <p className="text-sm text-text-muted">No {status} jobs match these filters.</p>
         </div>
       ) : (
-        <>
-          <div className="space-y-2">
-            {currentJobs.map(renderJobCard)}
-          </div>
-          <Pagination
-            page={currentPage}
-            totalPages={currentTotalPages}
-            pageSize={currentPageSize}
-            total={currentTotal}
-            onPageChange={onPageChange}
-            onPageSizeChange={onPageSizeChange}
-          />
-        </>
+        <div className="space-y-2">
+          {jobs.map((job) => (
+            <JobCard
+              key={job.id}
+              job={job}
+              telemetry={getJobTelemetry(job.id)}
+              logText={expandedJobId === job.id ? expandedLog.data?.log_text : undefined}
+              isLoadingLog={expandedJobId === job.id && expandedLog.isLoading}
+              isExpanded={expandedJobId === job.id}
+              onToggleExpand={() => setExpandedJobId(expandedJobId === job.id ? null : job.id)}
+              onRetry={job.status_group === "failed" || job.status_group === "cancelled" ? () => retryJob(job.id) : undefined}
+              onCancel={job.status_group === "active" ? () => cancelJob(job) : undefined}
+              selected={selectedIds.has(job.id)}
+              onSelect={toggleSelected}
+            />
+          ))}
+        </div>
       )}
 
+      <Pagination
+        page={data?.page ?? page}
+        pageSize={pageSize}
+        total={data?.total ?? 0}
+        totalPages={data?.total_pages ?? 1}
+        onPage={(next) => { setPage(next); setSelectedIds(new Set()); }}
+        onPageSize={changePageSize}
+      />
       {dialog}
     </div>
   );

@@ -6,11 +6,12 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import String, and_, cast, func, not_, or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -26,6 +27,13 @@ from app.worker import dispatch_task
 from app.services.url_utils import is_playlist_url
 from app.services.downloader import extract_playlist_entries, get_available_formats
 from app.services.telemetry import telemetry_store
+from app.services.job_registry import (
+    TERMINAL_STATUS_GROUPS,
+    category_rule,
+    job_category as classify_job_category,
+    known_categories,
+    status_group as classify_status_group,
+)
 
 
 def _import_action_label(req: "VideoItemCreate") -> str:
@@ -627,10 +635,93 @@ def batch_delete_jobs(
     return {"deleted": deleted, "skipped": skipped, "count": len(deleted)}
 
 
+def _category_clause(category: str):
+    if category not in known_categories():
+        raise HTTPException(status_code=422, detail=f"Unknown job category: {category}")
+    exact_types, prefixes = category_rule(category)
+    known_match = or_(
+        ProcessingJob.job_type.in_(exact_types) if exact_types else False,
+        *(ProcessingJob.job_type.like(f"{prefix}%") for prefix in prefixes),
+    )
+    return not_(known_match) if category == "system" else known_match
+
+
+def _status_group_clause(group: str):
+    if group == "active":
+        return not_(ProcessingJob.status.in_(list(TERMINAL_STATUS_GROUPS)))
+    if group not in TERMINAL_STATUS_GROUPS:
+        raise HTTPException(status_code=422, detail=f"Unknown status group: {group}")
+    return ProcessingJob.status == group
+
+
+def _apply_job_filters(
+    query,
+    *,
+    status_group: Optional[str] = None,
+    job_category: Optional[str] = None,
+    search: Optional[str] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+):
+    if status_group:
+        query = query.filter(_status_group_clause(status_group))
+    if job_category and job_category != "all":
+        query = query.filter(_category_clause(job_category))
+    if search and search.strip():
+        needle = f"%{search.strip()}%"
+        query = query.filter(or_(
+            ProcessingJob.display_name.ilike(needle),
+            ProcessingJob.input_url.ilike(needle),
+            ProcessingJob.action_label.ilike(needle),
+            ProcessingJob.job_type.ilike(needle),
+            cast(ProcessingJob.id, String).ilike(needle),
+        ))
+    if date_from:
+        query = query.filter(ProcessingJob.created_at >= date_from)
+    if date_to:
+        query = query.filter(ProcessingJob.created_at <= date_to)
+    return query
+
+
+@router.get("/history/preview")
+def preview_clear_history(
+    status_group: Optional[str] = None,
+    job_category: Optional[str] = None,
+    search: Optional[str] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    db: Session = Depends(get_db),
+):
+    if status_group == "active":
+        raise HTTPException(status_code=422, detail="Active jobs cannot be cleared as history")
+    query = _apply_job_filters(
+        db.query(ProcessingJob).filter(
+            ProcessingJob.status.in_(list(TERMINAL_STATUS_GROUPS)),
+        ),
+        status_group=status_group,
+        job_category=job_category,
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return {
+        "count": query.count(),
+        "statuses": [status_group] if status_group else sorted(TERMINAL_STATUS_GROUPS),
+        "job_category": job_category or "all",
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+
+
 @router.delete("/history")
 def clear_history(
     status: Optional[str] = Query(None, description="Only clear jobs with this status (complete, failed, cancelled, skipped)"),
     job_type: Optional[str] = Query(None, description="Only clear jobs matching this job_type prefix"),
+    status_group: Optional[str] = Query(None),
+    job_category: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    date_from: Optional[datetime] = Query(None),
+    date_to: Optional[datetime] = Query(None),
     db: Session = Depends(get_db),
 ):
     """Delete completed/failed/cancelled/skipped jobs, optionally filtered."""
@@ -638,8 +729,15 @@ def clear_history(
         JobStatus.complete, JobStatus.failed,
         JobStatus.cancelled, JobStatus.skipped,
     ]
-    query = db.query(ProcessingJob).filter(
-        ProcessingJob.status.in_(terminal_statuses)
+    if status_group == "active":
+        raise HTTPException(status_code=422, detail="Active jobs cannot be cleared as history")
+    query = _apply_job_filters(
+        db.query(ProcessingJob).filter(ProcessingJob.status.in_(terminal_statuses)),
+        status_group=status_group,
+        job_category=job_category,
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
     )
     if status:
         query = query.filter(ProcessingJob.status == status)
@@ -647,7 +745,13 @@ def clear_history(
         query = query.filter(ProcessingJob.job_type.like(f"{job_type}%"))
     count = query.delete(synchronize_session="fetch")
     db.commit()
-    return {"deleted": count}
+    return {
+        "deleted": count,
+        "statuses": [status_group or status] if (status_group or status) else sorted(TERMINAL_STATUS_GROUPS),
+        "job_category": job_category or "all",
+        "date_from": date_from,
+        "date_to": date_to,
+    }
 
 
 @router.get("/", response_model=List[JobOut])
@@ -667,6 +771,73 @@ def list_jobs(
         query = query.filter(ProcessingJob.job_type == job_type)
 
     return query.offset(offset).limit(limit).all()
+
+
+class JobPage(BaseModel):
+    items: List[JobOut]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    status_counts: dict[str, int]
+    category_counts: dict[str, int]
+
+
+@router.get("/page", response_model=JobPage)
+def list_jobs_page(
+    status_group: str = Query("active"),
+    job_category: str = Query("all"),
+    search: Optional[str] = Query(None),
+    date_from: Optional[datetime] = Query(None),
+    date_to: Optional[datetime] = Query(None),
+    sort_by: Literal["date_added", "date_completed", "name"] = Query("date_added"),
+    sort_dir: Literal["asc", "desc"] = Query("desc"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=10, le=100),
+    db: Session = Depends(get_db),
+):
+    ungrouped = _apply_job_filters(
+        db.query(ProcessingJob),
+        search=search,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    status_counts = {group: 0 for group in ("active", *sorted(TERMINAL_STATUS_GROUPS))}
+    for status, count in ungrouped.with_entities(
+        ProcessingJob.status, func.count(ProcessingJob.id),
+    ).group_by(ProcessingJob.status).all():
+        group = classify_status_group(status)
+        status_counts[group] = status_counts.get(group, 0) + count
+
+    selected_status = _apply_job_filters(ungrouped, status_group=status_group)
+    category_counts = {category: 0 for category in ("all", *known_categories())}
+    for job_type, count in selected_status.with_entities(
+        ProcessingJob.job_type, func.count(ProcessingJob.id),
+    ).group_by(ProcessingJob.job_type).all():
+        category = classify_job_category(job_type)
+        category_counts[category] += count
+        category_counts["all"] += count
+
+    filtered = _apply_job_filters(selected_status, job_category=job_category)
+    total = filtered.count()
+    sort_column = {
+        "date_added": ProcessingJob.created_at,
+        "date_completed": ProcessingJob.completed_at,
+        "name": ProcessingJob.display_name,
+    }[sort_by]
+    order = sort_column.asc() if sort_dir == "asc" else sort_column.desc()
+    items = filtered.order_by(order, ProcessingJob.id.desc()).offset(
+        (page - 1) * page_size,
+    ).limit(page_size).all()
+    return JobPage(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=max(1, (total + page_size - 1) // page_size),
+        status_counts=status_counts,
+        category_counts=category_counts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1220,7 +1391,7 @@ def cancel_job(job_id: int, db: Session = Depends(get_db)):
     job = db.query(ProcessingJob).get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status in (JobStatus.cancelled, JobStatus.skipped):
+    if job.status in (JobStatus.cancelling, JobStatus.cancelled, JobStatus.skipped):
         raise HTTPException(status_code=400, detail=f"Job already {job.status.value}")
     # Allow force-cancelling completed batch jobs (they can appear stuck)
     BATCH_TYPES = {"batch_rescan", "batch_import", "batch_normalize", "library_import", "playlist_import"}
@@ -1242,16 +1413,15 @@ def cancel_job(job_id: int, db: Session = Depends(get_db)):
         cdb = CosmeticSessionLocal()
         try:
             cjob = cdb.query(ProcessingJob).get(job_id)
-            if cjob and cjob.status not in (JobStatus.cancelled, JobStatus.skipped):
-                cjob.status = JobStatus.cancelled
-                cjob.error_message = "Cancelled by user"
-                cjob.completed_at = cjob.completed_at or datetime.now(timezone.utc)
+            if cjob and cjob.status not in (JobStatus.cancelling, JobStatus.cancelled, JobStatus.skipped):
+                cjob.status = JobStatus.cancelling
+                cjob.current_step = "Cancellation requested; waiting for a safe checkpoint"
+                cjob.error_message = None
             for sid in sub_job_ids:
                 csub = cdb.query(ProcessingJob).get(sid)
                 if csub and csub.status not in (JobStatus.complete, JobStatus.failed, JobStatus.cancelled, JobStatus.skipped):
-                    csub.status = JobStatus.cancelled
-                    csub.error_message = "Parent job cancelled"
-                    csub.completed_at = datetime.now(timezone.utc)
+                    csub.status = JobStatus.cancelling
+                    csub.current_step = "Parent cancellation requested"
             cdb.commit()
             db_updated = True
             break
@@ -1270,16 +1440,15 @@ def cancel_job(job_id: int, db: Session = Depends(get_db)):
             try:
                 db.expire_all()
                 fb_job = db.query(ProcessingJob).get(job_id)
-                if fb_job and fb_job.status not in (JobStatus.cancelled, JobStatus.skipped):
-                    fb_job.status = JobStatus.cancelled
-                    fb_job.error_message = "Cancelled by user"
-                    fb_job.completed_at = fb_job.completed_at or datetime.now(timezone.utc)
+                if fb_job and fb_job.status not in (JobStatus.cancelling, JobStatus.cancelled, JobStatus.skipped):
+                    fb_job.status = JobStatus.cancelling
+                    fb_job.current_step = "Cancellation requested; waiting for a safe checkpoint"
+                    fb_job.error_message = None
                 for sid in sub_job_ids:
                     subj = db.query(ProcessingJob).get(sid)
                     if subj and subj.status not in (JobStatus.complete, JobStatus.failed, JobStatus.cancelled, JobStatus.skipped):
-                        subj.status = JobStatus.cancelled
-                        subj.error_message = "Parent job cancelled"
-                        subj.completed_at = datetime.now(timezone.utc)
+                        subj.status = JobStatus.cancelling
+                        subj.current_step = "Parent cancellation requested"
                 db.commit()
                 db_updated = True
                 break

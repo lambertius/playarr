@@ -14,6 +14,8 @@ interface VideoRowProps {
   onSelect?: (videoId: number, selected: boolean) => void;
 }
 
+export const LIBRARY_LIST_GRID = "grid-cols-[1.25rem_2.5rem_minmax(8rem,1fr)_minmax(10rem,1.2fr)_minmax(8rem,1fr)_4rem_5rem_5.5rem_5rem_6rem_2rem]";
+
 export function VideoRow({ video, onAction, selected, onSelect }: VideoRowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -26,7 +28,7 @@ export function VideoRow({ video, onAction, selected, onSelect }: VideoRowProps)
   );
 
   return (
-    <div className={`group flex items-center gap-3 px-4 py-2 border-b border-surface-border transition-all duration-150 ${
+    <div className={`group grid ${LIBRARY_LIST_GRID} min-w-[1050px] items-center gap-3 px-4 py-2 border-b border-surface-border transition-all duration-150 ${
       selected ? "bg-accent/5 shadow-[inset_3px_0_0_var(--color-accent)]" : "hover:bg-surface-lighter/80 hover:shadow-[inset_3px_0_0_var(--color-accent)]"
     }`}>
       {/* Selection checkbox */}
@@ -56,26 +58,24 @@ export function VideoRow({ video, onAction, selected, onSelect }: VideoRowProps)
         </div>
       </Link>
 
-      {/* Info */}
-      <Link to={`/video/${video.id}`} className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-text-primary truncate">{video.artist}</p>
-        <p className="text-xs text-text-secondary truncate">{video.title}</p>
-      </Link>
+      <Link to={`/video/${video.id}`} className="min-w-0 text-sm font-medium text-text-primary truncate">{video.artist}</Link>
+      <Link to={`/video/${video.id}`} className="min-w-0 text-sm text-text-secondary truncate">{video.title}</Link>
+      <Link to={`/video/${video.id}`} className="min-w-0 text-xs text-text-muted truncate">{video.album || "—"}</Link>
 
       {/* Meta cols */}
-      <span className="hidden md:block w-16 text-xs text-text-muted text-center">
+      <span className="text-xs text-text-muted text-center">
         {video.year ?? "—"}
       </span>
-      <div className="hidden sm:block w-16 text-center">
+      <div className="text-center">
         <QualityBadge resolution={video.resolution_label} />
       </div>
-      <div className="hidden sm:block w-16 text-center">
+      <div className="text-center">
         <VersionBadge versionType={video.version_type} />
       </div>
-      <div className="hidden sm:block w-16 text-center">
-        <EnrichmentBadge status={video.enrichment_status} />
+      <div className="text-center">
+        <EnrichmentBadge status={video.enrichment_status} detail={video.enrichment_detail} />
       </div>
-      <span className="hidden lg:block w-24 text-xs text-text-muted text-right">
+      <span className="text-xs text-text-muted text-right">
         {timeAgo(video.created_at)}
       </span>
 

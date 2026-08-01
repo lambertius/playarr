@@ -12,14 +12,15 @@ import os
 import shutil
 import threading
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
-from app.models import VideoItem, QualitySignature, ProcessingJob, JobStatus
+from app.models import VideoItem, QualitySignature, ProcessingJob, JobStatus, VideoEditorQueueEntry
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ def write_archive_manifest(
     original_library_path: str,
     library_dir: str,
     video_id: Optional[int] = None,
+    video_stable_id: Optional[str] = None,
     artist: str = "",
     title: str = "",
     archive_reason: str = "edit",
@@ -149,10 +151,12 @@ def write_archive_manifest(
             return
 
         manifest = {
+            "schema_version": 2,
             "checksum_md5": _file_checksum(archive_video_path),
             "original_relative_path": rel_path,
             "archived_filename": os.path.basename(archive_video_path),
             "video_id": video_id,
+            "video_stable_id": video_stable_id,
             "artist": artist,
             "title": title,
             "file_size_bytes": os.path.getsize(archive_video_path),
@@ -399,6 +403,12 @@ class EditorQueueItem(BaseModel):
     bar_bottom: int = 0
     bar_left: int = 0
     bar_right: int = 0
+    letterbox_confidence: Optional[float] = None
+    letterbox_sample_count: int = 0
+    letterbox_samples_expected: int = 0
+    letterbox_review_suggested: bool = False
+    letterbox_instability_reason: Optional[str] = None
+    letterbox_per_window_bars: List[dict] = []
     has_archive: bool = False
     exclude_from_scan: bool = False
     created_at: Optional[str] = None  # ISO timestamp — when video was added to library
@@ -441,6 +451,7 @@ class CropPreviewResponse(BaseModel):
 
 class EncodeRequest(BaseModel):
     video_id: int
+    profile: Literal["source_fidelity", "balanced", "custom"] = "source_fidelity"
     crop_w: Optional[int] = None
     crop_h: Optional[int] = None
     crop_x: Optional[int] = None
@@ -483,6 +494,40 @@ class LetterboxScanResult(BaseModel):
     bar_right: int
 
 
+def _crop_from_encode_request(req: EncodeRequest) -> Optional[dict]:
+    if req.crop_w is None or req.crop_h is None:
+        return None
+    return {
+        "crop_w": req.crop_w,
+        "crop_h": req.crop_h,
+        "crop_x": req.crop_x or 0,
+        "crop_y": req.crop_y or 0,
+    }
+
+
+def _resolve_request_plan(req: EncodeRequest, file_path: str) -> dict:
+    from app.services.video_editor import resolve_encode_plan
+    try:
+        plan = resolve_encode_plan(
+            file_path,
+            profile=req.profile,
+            crop=_crop_from_encode_request(req),
+            target_dar=req.target_dar,
+            crf=req.crf,
+            preset=req.preset,
+            audio_passthrough=req.audio_passthrough,
+            trim_start=req.trim_start,
+            trim_end=req.trim_end,
+            audio_codec=req.audio_codec,
+            audio_bitrate=req.audio_bitrate,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(422, f"Unable to resolve encode plan: {exc}") from exc
+    if plan["errors"]:
+        raise HTTPException(422, {"message": "Unsafe encode plan", "errors": plan["errors"]})
+    return plan
+
+
 class DetectLetterboxResponse(BaseModel):
     video_id: int
     detected: bool
@@ -496,9 +541,116 @@ class DetectLetterboxResponse(BaseModel):
     bar_bottom: int = 0
     bar_left: int = 0
     bar_right: int = 0
+    auto_apply: bool = False
+    review_suggested: bool = False
+    confidence: float = 0.0
+    sample_count: int = 0
+    samples_expected: int = 0
+    per_window_bars: List[dict] = []
+    instability_reason: Optional[str] = None
+
+
+class EditorQueueAddRequest(BaseModel):
+    video_ids: List[int]
+    source: Literal["manual", "scan", "legacy"] = "manual"
+
+
+class EditorQueueRemoveRequest(BaseModel):
+    video_ids: List[int]
+
+
+class EditorQueueSettingsPatch(BaseModel):
+    patch: dict
+
+
+def _editor_queue_state(db: Session) -> dict:
+    entries = db.query(VideoEditorQueueEntry).order_by(VideoEditorQueueEntry.position, VideoEditorQueueEntry.id).all()
+    terminal = [JobStatus.complete, JobStatus.failed, JobStatus.cancelled, JobStatus.skipped]
+    active_jobs = (
+        db.query(ProcessingJob)
+        .filter(ProcessingJob.job_type == "video_editor_encode", ProcessingJob.status.notin_(terminal))
+        .order_by(ProcessingJob.created_at, ProcessingJob.id)
+        .all()
+    )
+    return {
+        "entries": [
+            {
+                "video_id": entry.video_id,
+                "occurrence_id": entry.occurrence_id,
+                "source": entry.source,
+                "settings": entry.settings_json or {},
+                "position": entry.position,
+                "revision": entry.revision,
+            }
+            for entry in entries
+        ],
+        "active_jobs": [
+            {"video_id": job.video_id, "job_id": job.id, "status": job.status.value}
+            for job in active_jobs if job.video_id is not None
+        ],
+    }
 
 
 # ── Endpoints ─────────────────────────────────────────────
+
+@router.get("/queue-state")
+def get_editor_queue_state(db: Session = Depends(get_db)):
+    return _editor_queue_state(db)
+
+
+@router.post("/queue-state")
+def add_editor_queue_entries(req: EditorQueueAddRequest, db: Session = Depends(get_db)):
+    valid_ids = {
+        row[0] for row in db.query(VideoItem.id).filter(VideoItem.id.in_(set(req.video_ids))).all()
+    }
+    existing = {
+        entry.video_id: entry
+        for entry in db.query(VideoEditorQueueEntry).filter(VideoEditorQueueEntry.video_id.in_(valid_ids)).all()
+    }
+    next_position = (db.query(func.max(VideoEditorQueueEntry.position)).scalar() or -1) + 1
+    for video_id in req.video_ids:
+        if video_id not in valid_ids:
+            continue
+        entry = existing.get(video_id)
+        if entry:
+            if req.source == "manual" and entry.source != "manual":
+                entry.source = "manual"
+                entry.revision += 1
+            continue
+        db.add(VideoEditorQueueEntry(video_id=video_id, source=req.source, position=next_position))
+        next_position += 1
+    db.commit()
+    return _editor_queue_state(db)
+
+
+@router.post("/queue-state/remove")
+def remove_editor_queue_entries(req: EditorQueueRemoveRequest, db: Session = Depends(get_db)):
+    if req.video_ids:
+        db.query(VideoEditorQueueEntry).filter(VideoEditorQueueEntry.video_id.in_(set(req.video_ids))).delete(
+            synchronize_session=False,
+        )
+        db.commit()
+    return _editor_queue_state(db)
+
+
+@router.delete("/queue-state")
+def clear_editor_queue_state(db: Session = Depends(get_db)):
+    db.query(VideoEditorQueueEntry).delete(synchronize_session=False)
+    db.commit()
+    return _editor_queue_state(db)
+
+
+@router.patch("/queue-state/{video_id}")
+def patch_editor_queue_settings(video_id: int, req: EditorQueueSettingsPatch, db: Session = Depends(get_db)):
+    entry = db.query(VideoEditorQueueEntry).filter(VideoEditorQueueEntry.video_id == video_id).one_or_none()
+    if not entry:
+        raise HTTPException(404, "Video is not in the editor queue")
+    settings = dict(entry.settings_json or {})
+    settings.update(req.patch)
+    entry.settings_json = settings
+    entry.revision += 1
+    db.commit()
+    return _editor_queue_state(db)
 
 @router.get("/queue", response_model=List[EditorQueueItem])
 def get_editor_queue(
@@ -566,6 +718,12 @@ def get_editor_queue(
             bar_bottom=qs.letterbox_bar_bottom or 0 if qs and qs.letterbox_detected else 0,
             bar_left=qs.letterbox_bar_left or 0 if qs and qs.letterbox_detected else 0,
             bar_right=qs.letterbox_bar_right or 0 if qs and qs.letterbox_detected else 0,
+            letterbox_confidence=qs.letterbox_confidence if qs else None,
+            letterbox_sample_count=qs.letterbox_sample_count if qs else 0,
+            letterbox_samples_expected=qs.letterbox_samples_expected if qs else 0,
+            letterbox_review_suggested=qs.letterbox_review_suggested if qs else False,
+            letterbox_instability_reason=qs.letterbox_instability_reason if qs else None,
+            letterbox_per_window_bars=(qs.letterbox_evidence_json or {}).get("per_window_bars", []) if qs else [],
             has_archive=archive_file is not None,
             exclude_from_scan=v.exclude_from_editor_scan,
         ))
@@ -576,7 +734,7 @@ def get_editor_queue(
 @router.post("/detect-letterbox", response_model=DetectLetterboxResponse)
 def detect_letterbox_single(video_id: int = Query(...), db: Session = Depends(get_db)):
     """Detect letterboxing on a single video and persist results."""
-    from app.services.video_editor import detect_letterbox
+    from app.services.video_editor import crop_evidence_hash, detect_letterbox
 
     video = db.query(VideoItem).get(video_id)
     if not video:
@@ -599,6 +757,14 @@ def detect_letterbox_single(video_id: int = Query(...), db: Session = Depends(ge
         qs.letterbox_bar_bottom = info["bar_bottom"]
         qs.letterbox_bar_left = info["bar_left"]
         qs.letterbox_bar_right = info["bar_right"]
+        qs.letterbox_confidence = info["confidence"]
+        qs.letterbox_sample_count = info["sample_count"]
+        qs.letterbox_samples_expected = info["samples_expected"]
+        qs.letterbox_review_suggested = info["review_suggested"]
+        qs.letterbox_instability_reason = info["instability_reason"]
+        qs.letterbox_evidence_json = {"per_window_bars": info["per_window_bars"]}
+        qs.letterbox_source_checksum = video.file_checksum
+        qs.letterbox_evidence_hash = crop_evidence_hash(info, video.file_checksum)
         db.commit()
 
     return DetectLetterboxResponse(video_id=video_id, **info)
@@ -769,14 +935,15 @@ def _encode_update_job(job_id: int, **kwargs):
 
 
 def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, target_dar, crf, preset, audio_pt,
-                    trim_start=None, trim_end=None, audio_codec=None, audio_bitrate=None):
+                    trim_start=None, trim_end=None, audio_codec=None, audio_bitrate=None,
+                    profile="source_fidelity"):
     """Execute a single encode job (designed to run in a background thread).
 
     All DB writes are routed through the centralised write queue / _apply_lock
     so that encode jobs never collide with pipeline imports on the SQLite
     writer lock.
     """
-    from app.services.video_editor import encode_video
+    from app.services.video_editor import encode_video, resolve_encode_plan, validate_encoded_output
     from app.services.media_analyzer import extract_quality_signature
     from app.worker import is_cancelled
     from app.pipeline_url.write_queue import db_write, db_write_soon
@@ -790,10 +957,28 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
                                                   started_at=datetime.now(timezone.utc),
                                                   current_step="Encoding video..."))
 
-        # Output to temp file next to original — always use .mp4 for H.264
+        plan = resolve_encode_plan(
+            input_path,
+            profile=profile,
+            crop=crop_params,
+            target_dar=target_dar,
+            crf=crf,
+            preset=preset,
+            audio_passthrough=audio_pt,
+            trim_start=trim_start,
+            trim_end=trim_end,
+            audio_codec=audio_codec,
+            audio_bitrate=audio_bitrate,
+        )
+        if plan["errors"]:
+            raise RuntimeError(" ".join(plan["errors"]))
+
+        # Stage beside the source so final replacement remains on the same
+        # filesystem. Source fidelity keeps a compatible source container.
         base, ext = os.path.splitext(input_path)
-        temp_output = f"{base}_edited.mp4"
-        final_path = f"{base}.mp4" if ext.lower() != ".mp4" else input_path
+        output_ext = plan["output"]["extension"]
+        temp_output = f"{base}_edited{output_ext}"
+        final_path = f"{base}{output_ext}" if ext.lower() != output_ext else input_path
 
         _last_db_update = [0.0]  # throttle DB writes to once per second
 
@@ -821,12 +1006,21 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             trim_end=trim_end,
             audio_codec=audio_codec,
             audio_bitrate=audio_bitrate,
+            profile=profile,
             progress_callback=_progress,
         )
 
         # Verify output exists and is valid
         if not os.path.isfile(temp_output) or os.path.getsize(temp_output) < 1024:
             raise RuntimeError("Encoded output file is missing or too small")
+
+        db_write_soon(lambda: _encode_update_job(
+            job_id,
+            current_step="Validating staged output before replacement...",
+            progress_percent=99,
+        ))
+        verification = validate_encoded_output(input_path, temp_output, stats["encode_plan"])
+        stats["verification"] = verification
 
         # Archive original to the _archive subdirectory of the
         # library root that contains the file
@@ -886,12 +1080,14 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
         # Read artist/title for manifest before moving into the lock
         _v_artist = ""
         _v_title = ""
+        _v_stable_id = None
         sdb = SessionLocal()
         try:
             v_pre = sdb.query(VideoItem).get(video_id)
             if v_pre:
                 _v_artist = v_pre.artist or ""
                 _v_title = v_pre.title or ""
+                _v_stable_id = v_pre.stable_id
         finally:
             sdb.close()
 
@@ -916,6 +1112,7 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             # stores/compares a bare basename and can't re-link source-dir files.
             library_dir=_lib_root,
             video_id=video_id,
+            video_stable_id=_v_stable_id,
             artist=_v_artist,
             title=_v_title,
             archive_reason=reason,
@@ -950,6 +1147,10 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             summary_lines.append(f"Video bitrate: {src_br // 1000:,}k → {out_br // 1000:,}k")
         summary_lines.extend([
             f"File size: {input_bytes:,} → {output_bytes:,} bytes ({size_pct:.0f}% {size_change})",
+            "Validation: full decode passed" + (
+                f", SSIM {stats['verification']['ssim']:.4f}"
+                if stats.get("verification", {}).get("ssim") is not None else ""
+            ),
             f"",
             f"Original archived to: {archive_path}",
         ])
@@ -990,6 +1191,14 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
                     qs.letterbox_bar_bottom = None
                     qs.letterbox_bar_left = None
                     qs.letterbox_bar_right = None
+                    qs.letterbox_confidence = None
+                    qs.letterbox_sample_count = 0
+                    qs.letterbox_samples_expected = 0
+                    qs.letterbox_review_suggested = False
+                    qs.letterbox_instability_reason = None
+                    qs.letterbox_evidence_json = None
+                    qs.letterbox_evidence_hash = None
+                    qs.letterbox_source_checksum = None
 
                 # Mark job complete
                 j = sdb2.query(ProcessingJob).get(job_id)
@@ -1046,6 +1255,17 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             logger.error(f"Failed to mark encode job {job_id} as failed", exc_info=True)
 
 
+@router.post("/encode-plan")
+def get_encode_plan(req: EncodeRequest, db: Session = Depends(get_db)):
+    """Return the exact source facts, output decisions, and warnings before encode."""
+    video = db.query(VideoItem).get(req.video_id)
+    if not video:
+        raise HTTPException(404, "Video not found")
+    if not video.file_path or not os.path.isfile(video.file_path):
+        raise HTTPException(400, "Video file not found on disk")
+    return _resolve_request_plan(req, video.file_path)
+
+
 @router.post("/encode")
 def encode_single(req: EncodeRequest, db: Session = Depends(get_db)):
     """Encode a single video with the specified settings.
@@ -1058,14 +1278,8 @@ def encode_single(req: EncodeRequest, db: Session = Depends(get_db)):
     if not video.file_path or not os.path.isfile(video.file_path):
         raise HTTPException(400, "Video file not found on disk")
 
-    crop = None
-    if req.crop_w is not None and req.crop_h is not None:
-        crop = {
-            "crop_w": req.crop_w,
-            "crop_h": req.crop_h,
-            "crop_x": req.crop_x or 0,
-            "crop_y": req.crop_y or 0,
-        }
+    crop = _crop_from_encode_request(req)
+    plan = _resolve_request_plan(req, video.file_path)
 
     job = ProcessingJob(
         video_id=video.id,
@@ -1074,6 +1288,8 @@ def encode_single(req: EncodeRequest, db: Session = Depends(get_db)):
         display_name=f"{video.artist} \u2013 {video.title} \u203a Video Edit",
         action_label="Video Edit",
         input_params={
+            "profile": req.profile,
+            "resolved_plan": plan,
             "crop": crop,
             "target_dar": req.target_dar,
             "crf": req.crf,
@@ -1093,7 +1309,8 @@ def encode_single(req: EncodeRequest, db: Session = Depends(get_db)):
         target=_run_encode_job,
         args=(job.id, video.id, video.file_path, crop, req.target_dar, req.crf, req.preset, req.audio_passthrough),
         kwargs={"trim_start": req.trim_start, "trim_end": req.trim_end,
-                "audio_codec": req.audio_codec, "audio_bitrate": req.audio_bitrate},
+                "audio_codec": req.audio_codec, "audio_bitrate": req.audio_bitrate,
+                "profile": req.profile},
         daemon=True,
     )
     t.start()
@@ -1275,6 +1492,10 @@ def set_exclude_from_scan(req: ExcludeFromScanRequest, db: Session = Depends(get
     if not video:
         raise HTTPException(404, "Video not found")
     video.exclude_from_editor_scan = req.exclude
+    signature = db.query(QualitySignature).filter(QualitySignature.video_id == video.id).one_or_none()
+    video.editor_crop_dismissed_evidence_hash = (
+        signature.letterbox_evidence_hash if req.exclude and signature else None
+    )
     db.commit()
     action = "excluded from" if req.exclude else "re-included in"
     logger.info(f"Video {req.video_id} {action} editor scans")
@@ -1297,14 +1518,8 @@ def batch_encode(req: BatchEncodeRequest, db: Session = Depends(get_db)):
         if not video or not video.file_path or not os.path.isfile(video.file_path):
             continue
 
-        crop = None
-        if item.crop_w is not None and item.crop_h is not None:
-            crop = {
-                "crop_w": item.crop_w,
-                "crop_h": item.crop_h,
-                "crop_x": item.crop_x or 0,
-                "crop_y": item.crop_y or 0,
-            }
+        crop = _crop_from_encode_request(item)
+        plan = _resolve_request_plan(item, video.file_path)
 
         job = ProcessingJob(
             video_id=video.id,
@@ -1313,6 +1528,8 @@ def batch_encode(req: BatchEncodeRequest, db: Session = Depends(get_db)):
             display_name=f"{video.artist} \u2013 {video.title} \u203a Video Edit",
             action_label="Video Edit",
             input_params={
+                "profile": item.profile,
+                "resolved_plan": plan,
                 "crop": crop,
                 "target_dar": item.target_dar,
                 "crf": item.crf,
@@ -1330,7 +1547,8 @@ def batch_encode(req: BatchEncodeRequest, db: Session = Depends(get_db)):
         jobs_info.append((
             (job.id, video.id, video.file_path, crop, item.target_dar, item.crf, item.preset, item.audio_passthrough),
             {"trim_start": item.trim_start, "trim_end": item.trim_end,
-             "audio_codec": item.audio_codec, "audio_bitrate": item.audio_bitrate},
+             "audio_codec": item.audio_codec, "audio_bitrate": item.audio_bitrate,
+             "profile": item.profile},
         ))
 
     if not jobs_info:

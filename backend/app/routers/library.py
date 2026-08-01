@@ -23,7 +23,8 @@ from app.metadata.models import ArtistEntity, AlbumEntity, TrackEntity
 from app.schemas import (
     VideoItemOut, VideoItemSummary, VideoItemUpdate,
     PaginatedResponse, MetadataSnapshotOut,
-    CanonicalTrackOut, ArtistEntityOut, ProcessingStateOut,
+    CanonicalTrackCreate, CanonicalTrackUpdate, CanonicalTrackOut,
+    SetParentVideoRequest, ArtistEntityOut, ProcessingStateOut,
     SourceOut, SourceCreate, SourceUpdate,
 )
 
@@ -128,7 +129,7 @@ def list_videos(
     song_rating: Optional[int] = Query(None, description="Filter by song rating value"),
     video_rating: Optional[int] = Query(None, description="Filter by video rating value"),
     quality: Optional[str] = Query(None, description="Filter by quality bucket: 360p, 480p, 720p, 1080p, 2K, 4K"),
-    sort_by: Optional[str] = Query(None, pattern="^(artist|title|year|created_at|updated_at)$"),
+    sort_by: Optional[str] = Query(None, pattern="^(artist|title|album|year|quality|enrichment|created_at|updated_at)$"),
     sort_dir: Optional[str] = Query(None, pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
@@ -178,7 +179,11 @@ def list_videos(
         ps = VideoItem.processing_state
         ai_done = func.json_extract(ps, "$.ai_enriched.completed")
         sc_done = func.json_extract(ps, "$.scenes_analyzed.completed")
-        if enrichment == "enriched":
+        ai_state = func.json_extract(ps, "$.ai_enriched.status")
+        sc_state = func.json_extract(ps, "$.scenes_analyzed.status")
+        ai_error = func.json_extract(ps, "$.ai_enriched.error")
+        sc_error = func.json_extract(ps, "$.scenes_analyzed.error")
+        if enrichment in ("complete", "enriched"):
             query = query.filter(ai_done == True, sc_done == True)  # noqa: E712
         elif enrichment == "partial":
             query = query.filter(
@@ -187,9 +192,15 @@ def list_videos(
                     (ai_done != True) & (sc_done == True),   # noqa: E712
                 )
             )
-        elif enrichment == "pending":
+        elif enrichment in ("not_requested", "pending"):
             query = query.filter(or_(ai_done != True, ai_done == None))  # noqa: E711, E712
             query = query.filter(or_(sc_done != True, sc_done == None))  # noqa: E711, E712
+        elif enrichment == "failed":
+            query = query.filter(or_(ai_error.is_not(None), sc_error.is_not(None)))
+        elif enrichment in ("queued", "running"):
+            query = query.filter(or_(ai_state == enrichment, sc_state == enrichment))
+        elif enrichment == "stale":
+            query = query.filter(VideoItem.review_category == "ai_partial")
 
     if import_method:
         if import_method == "scanned":
@@ -224,9 +235,18 @@ def list_videos(
         _lib = get_preference(db, "library", {}) or {}
         sort_by = sort_by or _lib.get("sort") or "artist"
         sort_dir = sort_dir or _lib.get("dir") or "asc"
-    if sort_by not in ("artist", "title", "year", "created_at", "updated_at"):
+    if sort_by not in ("artist", "title", "album", "year", "quality", "enrichment", "created_at", "updated_at"):
         sort_by = "artist"
-    sort_col = getattr(VideoItem, sort_by, VideoItem.artist)
+    if sort_by == "quality":
+        if not quality:
+            query = query.outerjoin(QualitySignature, QualitySignature.video_id == VideoItem.id)
+        sort_col = QualitySignature.height
+    elif sort_by == "enrichment":
+        ai_done = func.coalesce(func.json_extract(VideoItem.processing_state, "$.ai_enriched.completed"), 0)
+        scenes_done = func.coalesce(func.json_extract(VideoItem.processing_state, "$.scenes_analyzed.completed"), 0)
+        sort_col = ai_done + scenes_done
+    else:
+        sort_col = getattr(VideoItem, sort_by, VideoItem.artist)
     if sort_dir == "desc":
         sort_col = sort_col.desc()
     query = query.order_by(sort_col)
@@ -234,7 +254,7 @@ def list_videos(
     # Pagination
     items = query.options(selectinload(VideoItem.quality_signature)).offset((page - 1) * page_size).limit(page_size).all()
 
-    # Convert to summary models
+    # Convert to summary models with an explainable enrichment lifecycle.
     summaries = []
     for item in items:
         has_poster = any(a.asset_type == "poster" for a in item.media_assets)
@@ -247,8 +267,50 @@ def list_videos(
             e_status = "partial"
         else:
             e_status = "pending"
+        completed_steps = []
+        failed_steps = []
+        running = False
+        queued = False
+        timestamps = []
+        provider = None
+        model = None
+        for step, raw in ps.items():
+            if not isinstance(raw, dict):
+                continue
+            if raw.get("completed") is True:
+                completed_steps.append(step)
+            state = str(raw.get("status") or raw.get("state") or "").lower()
+            running = running or state == "running"
+            queued = queued or state == "queued"
+            error = raw.get("error") or raw.get("error_message")
+            if error:
+                failed_steps.append({
+                    "step": step,
+                    "code": raw.get("error_code") or "step_failed",
+                    "message": str(error),
+                })
+            provider = provider or raw.get("provider")
+            model = model or raw.get("model")
+            for key in ("completed_at", "updated_at", "started_at", "attempted_at"):
+                if raw.get(key):
+                    timestamps.append(str(raw[key]))
+        if running:
+            lifecycle = "running"
+        elif queued:
+            lifecycle = "queued"
+        elif failed_steps and completed_steps:
+            lifecycle = "partial"
+        elif failed_steps:
+            lifecycle = "failed"
+        elif ai_done and scenes_done:
+            lifecycle = "complete"
+        elif completed_steps:
+            lifecycle = "partial"
+        else:
+            lifecycle = "not_requested"
         summaries.append(VideoItemSummary(
             id=item.id,
+            stable_id=item.stable_id,
             artist=item.artist,
             title=item.title,
             album=item.album,
@@ -258,6 +320,15 @@ def list_videos(
             version_type=item.version_type or "normal",
             review_status=item.review_status or "none",
             enrichment_status=e_status,
+            enrichment_detail={
+                "state": lifecycle,
+                "completed_steps": completed_steps,
+                "failed_steps": failed_steps,
+                "provider": provider,
+                "model": model,
+                "last_run_at": max(timestamps) if timestamps else None,
+                "stale_reason": item.review_reason if item.review_category == "ai_partial" else None,
+            },
             import_method=item.import_method,
             duration_seconds=item.quality_signature.duration_seconds if item.quality_signature else None,
             created_at=item.created_at,
@@ -354,59 +425,37 @@ def party_mode(
     min_song_rating: Optional[int] = Query(None, description="Minimum song rating (inclusive)"),
     min_video_rating: Optional[int] = Query(None, description="Minimum video rating (inclusive)"),
     party_year: Optional[int] = Query(None, description="\"Party like it's…\" target year: exclude videos newer than this and weight the queue toward this era"),
+    playlist_id: Optional[int] = None,
+    use_saved_playlist: bool = True,
     db: Session = Depends(get_db),
 ):
     """Return all matching video IDs shuffled randomly for party mode queue."""
     from app.routers.preferences import get_preference
 
-    # ── Party Mode playlist override ─────────────────────────────────────
-    # If a Party Mode playlist is configured (Settings → Party Mode) it is
-    # authoritative: play its videos shuffled, ignoring the filters/exclusions
-    # below. This mirrors the web client's launch() playlist path so the *same*
-    # chosen playlist plays everywhere Party Mode runs — the web player, TV,
-    # Cast, and the Kodi add-on (which reaches Party Mode only via this endpoint
-    # and had no way to inherit the playlist before).
+    # An explicit start-panel playlist wins. Saved defaults are consulted only
+    # when the caller allows it; neither path bypasses audience filters.
     _pl_pref = get_preference(db, "partyPlaylist", {}) or {}
-    _pl_id = _pl_pref.get("playlistId") if isinstance(_pl_pref, dict) else None
-    if _pl_id:
+    saved_playlist_id = _pl_pref.get("playlistId") if isinstance(_pl_pref, dict) else None
+    selected_playlist_id = playlist_id if playlist_id is not None else (saved_playlist_id if use_saved_playlist else None)
+    if selected_playlist_id is not None:
         from app.models import PlaylistEntry
-        _pl_rows = (
-            db.query(VideoItem.id, VideoItem.artist, VideoItem.title, QualitySignature.duration_seconds)
-            .join(PlaylistEntry, PlaylistEntry.video_id == VideoItem.id)
-            .outerjoin(QualitySignature, QualitySignature.video_id == VideoItem.id)
-            .filter(PlaylistEntry.playlist_id == _pl_id)
-            .all()
-        )
-        if _pl_rows:
-            _pl_ids = [r[0] for r in _pl_rows]
-            _pl_posters = {
-                row[0] for row in db.query(MediaAsset.video_id).filter(
-                    MediaAsset.asset_type == "poster",
-                    MediaAsset.video_id.in_(_pl_ids),
-                ).all()
-            }
-            _pl_plays = {
-                vid: cnt for vid, cnt in db.query(
-                    PlaybackHistory.video_id, func.count(PlaybackHistory.id)
-                ).filter(PlaybackHistory.video_id.in_(_pl_ids))
-                 .group_by(PlaybackHistory.video_id).all()
-            }
-            _pl_tracks = [
-                {
-                    "videoId": r[0],
-                    "artist": r[1],
-                    "title": r[2],
-                    "hasPoster": r[0] in _pl_posters,
-                    "playCount": _pl_plays.get(r[0], 0),
-                    "duration": r[3],
-                }
-                for r in _pl_rows
-            ]
-            random.shuffle(_pl_tracks)
-            return {"tracks": _pl_tracks, "total": len(_pl_tracks)}
-        # Empty or missing playlist → fall through to filter-based generation.
+        # Retain the established safe fallback: deleting every occurrence from
+        # a saved playlist must not turn Party Mode into an unexplained empty
+        # screen. Audience filters below still apply to the fallback library.
+        has_entries = db.query(PlaylistEntry.id).filter(
+            PlaylistEntry.playlist_id == selected_playlist_id,
+        ).first()
+        if not has_entries:
+            selected_playlist_id = None
 
     query = db.query(VideoItem.id, VideoItem.artist, VideoItem.title, VideoItem.version_type, VideoItem.year, QualitySignature.duration_seconds).outerjoin(QualitySignature, QualitySignature.video_id == VideoItem.id)
+    if selected_playlist_id is not None:
+        query = (
+            query.join(PlaylistEntry, PlaylistEntry.video_id == VideoItem.id)
+            .add_columns(PlaylistEntry.occurrence_id)
+            .filter(PlaylistEntry.playlist_id == selected_playlist_id)
+            .order_by(PlaylistEntry.position)
+        )
 
     # --- Inclusion filters (same as list_videos) ---
     if search:
@@ -460,6 +509,8 @@ def party_mode(
         return [v.strip() for v in val.split(",") if v.strip()]
 
     ex_version_types = _csv(exclude_version_types) if exclude_version_types else list(_saved.get("version_types") or [])
+    if not exclude_version_types and _saved.get("exclude_adult", True) and "18+" not in ex_version_types:
+        ex_version_types.append("18+")
     ex_artists = _csv(exclude_artists) if exclude_artists else list(_saved.get("artists") or [])
     ex_genres = _csv(exclude_genres) if exclude_genres else list(_saved.get("genres") or [])
     ex_albums = _csv(exclude_albums) if exclude_albums else list(_saved.get("albums") or [])
@@ -511,6 +562,7 @@ def party_mode(
 
     tracks = [
         {
+            **({"queueEntryId": item.occurrence_id} if selected_playlist_id is not None else {}),
             "videoId": item.id,
             "artist": item.artist,
             "title": item.title,
@@ -3329,15 +3381,13 @@ def unlink_canonical(video_id: int, db: Session = Depends(get_db)):
 @router.post("/{video_id}/canonical-create")
 def create_canonical_for_video(
     video_id: int,
-    body: "CanonicalTrackCreate",
+    body: CanonicalTrackCreate,
     db: Session = Depends(get_db),
 ):
     """Create a new canonical track and link the video to it."""
     from app.services.canonical_track import (
         create_canonical_track_manual, link_video_to_canonical_track,
     )
-    from app.schemas import CanonicalTrackCreate  # noqa: F811
-
     item = db.query(VideoItem).get(video_id)
     if not item:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -3370,13 +3420,11 @@ def create_canonical_for_video(
 @router.put("/{video_id}/canonical-track")
 def edit_canonical_track(
     video_id: int,
-    body: "CanonicalTrackUpdate",
+    body: CanonicalTrackUpdate,
     db: Session = Depends(get_db),
 ):
     """Edit the canonical track linked to a video."""
     from app.services.canonical_track import update_canonical_track
-    from app.schemas import CanonicalTrackUpdate  # noqa: F811
-
     item = db.query(VideoItem).get(video_id)
     if not item:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -3410,13 +3458,11 @@ def edit_canonical_track(
 @router.post("/{video_id}/parent-video")
 def set_parent(
     video_id: int,
-    body: "SetParentVideoRequest",
+    body: SetParentVideoRequest,
     db: Session = Depends(get_db),
 ):
     """Set or clear a video's parent video (hierarchical version chain)."""
     from app.services.canonical_track import set_parent_video
-    from app.schemas import SetParentVideoRequest  # noqa: F811
-
     item = db.query(VideoItem).get(video_id)
     if not item:
         raise HTTPException(status_code=404, detail="Video not found")

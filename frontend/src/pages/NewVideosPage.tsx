@@ -18,12 +18,10 @@ import {
   useRefreshNewVideos,
   useNewVideosImportCart,
   useNewVideosClearCart,
-  useNewVideosDismiss,
 } from "@/hooks/queries";
 import type { NewVideoCategory, SuggestedVideoItem } from "@/types";
 import { SuggestionCard } from "@/components/new-videos/SuggestionCard";
 import { CartPanel } from "@/components/new-videos/CartPanel";
-import { AddVideoModal } from "@/components/AddVideoModal";
 import { ImportOptionsModal } from "@/components/new-videos/ImportOptionsModal";
 import type { ImportOptions } from "@/components/new-videos/ImportOptionsModal";
 
@@ -44,9 +42,7 @@ export function NewVideosPage() {
   const refreshMutation = useRefreshNewVideos();
   const importAllMutation = useNewVideosImportCart();
   const clearCartMutation = useNewVideosClearCart();
-  const dismissMutation = useNewVideosDismiss();
   const [showCart, setShowCart] = useState(false);
-  const [importUrl, setImportUrl] = useState<string | null>(null);
   const [showImportOptions, setShowImportOptions] = useState(false);
 
   const cartCount = cart?.count ?? feed?.cart_count ?? 0;
@@ -56,26 +52,11 @@ export function NewVideosPage() {
   // the (now instant) POST.
   const isRefreshing = refreshMutation.isPending || !!feed?.refreshing;
 
-  const handleAddVideo = useCallback((url: string) => {
-    setImportUrl(url);
-  }, []);
-
   const handleImportAll = useCallback((options: ImportOptions) => {
     importAllMutation.mutate(options, {
       onSuccess: () => setShowImportOptions(false),
     });
   }, [importAllMutation]);
-
-  const handleImportSuccess = useCallback((url: string) => {
-    if (!feed) return;
-    for (const cat of CATEGORY_ORDER) {
-      const video = feed.categories[cat]?.videos?.find(v => v.url === url);
-      if (video) {
-        dismissMutation.mutate({ id: video.id, type: "permanent" });
-        break;
-      }
-    }
-  }, [feed, dismissMutation]);
 
   return (
     <div className="p-6 space-y-6">
@@ -112,7 +93,7 @@ export function NewVideosPage() {
             className="btn btn-sm"
           >
             <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
-            <span className="ml-1">{isRefreshing ? "Refreshing…" : "Refresh"}</span>
+            <span className="ml-1">{isRefreshing ? "Building fresh list…" : "Fresh list"}</span>
           </button>
           </Tooltip>
         </div>
@@ -159,7 +140,6 @@ export function NewVideosPage() {
             description={meta.description}
             icon={meta.icon}
             videos={videos}
-            onAdd={handleAddVideo}
           />
         );
       })}
@@ -170,7 +150,7 @@ export function NewVideosPage() {
           <Trophy size={48} className="mx-auto mb-4 opacity-30" />
           <p className="text-lg">{isRefreshing ? "Generating recommendations…" : "No recommendations yet"}</p>
           <p className="text-sm mt-1">
-            {isRefreshing ? "This can take a minute" : "Click Refresh to discover music videos"}
+            {isRefreshing ? "This can take a minute" : "Choose Fresh list to discover music videos"}
           </p>
           <button
             onClick={() => refreshMutation.mutate({ force: true })}
@@ -182,14 +162,6 @@ export function NewVideosPage() {
           </button>
         </div>
       )}
-
-      {/* Add Video modal */}
-      <AddVideoModal
-        open={importUrl !== null}
-        onClose={() => setImportUrl(null)}
-        initialUrl={importUrl ?? undefined}
-        onImportSuccess={handleImportSuccess}
-      />
 
       {/* Import Options modal for cart Import All */}
       <ImportOptionsModal
@@ -209,14 +181,12 @@ function CategorySection({
   description,
   icon: Icon,
   videos,
-  onAdd,
 }: {
   category: NewVideoCategory;
   label: string;
   description: string;
   icon: React.ElementType;
   videos: SuggestedVideoItem[];
-  onAdd?: (url: string) => void;
 }) {
   return (
     <section className="pt-5 border-t-2 border-surface-border first:border-t-0 first:pt-0">
@@ -230,7 +200,7 @@ function CategorySection({
       {/* Responsive column grid */}
       <div className="grid grid-cols-[repeat(auto-fill,200px)] gap-4">
         {videos.slice(0, 20).map(video => (
-          <SuggestionCard key={video.id} video={video} onAdd={onAdd} />
+          <SuggestionCard key={video.id} video={video} />
         ))}
       </div>
     </section>

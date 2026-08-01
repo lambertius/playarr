@@ -113,7 +113,7 @@ def _update_job(job_id: int, _retries: int = 10, **kwargs):
     _is_terminal = False
     _status = kwargs.get("status")
     if _status is not None and hasattr(_status, "value"):
-        _is_terminal = _status.value in ("failed", "complete", "cancelled", "skipped", "finalizing")
+        _is_terminal = _status.value in ("failed", "complete", "cancelling", "cancelled", "skipped", "finalizing")
 
     _kw = dict(kwargs)  # snapshot for closure
 
@@ -122,9 +122,12 @@ def _update_job(job_id: int, _retries: int = 10, **kwargs):
         try:
             job = db.query(ProcessingJob).get(job_id)
             if job:
-                # Guard: never overwrite 'cancelled' with a non-terminal status.
-                if (job.status == JobStatus.cancelled
-                        and _kw.get('status') not in (None, JobStatus.cancelled)):
+                # Once cancellation starts, only its terminal acknowledgement
+                # (or a failure explaining why cleanup failed) may replace it.
+                if (job.status in (JobStatus.cancelling, JobStatus.cancelled)
+                        and _kw.get('status') not in (
+                            None, JobStatus.cancelling, JobStatus.cancelled, JobStatus.failed,
+                        )):
                     return
                 for k, v in _kw.items():
                     setattr(job, k, v)
@@ -188,11 +191,11 @@ def _update_job_raw_fallback(job_id: int, **kwargs):
             cur_status = wc.execute(
                 "SELECT status FROM processing_jobs WHERE id=?", (job_id,)
             ).fetchone()
-            if cur_status and cur_status[0] == "cancelled":
+            if cur_status and cur_status[0] in ("cancelling", "cancelled"):
                 new_status = kwargs.get("status")
                 if hasattr(new_status, "value"):
                     new_status = new_status.value
-                if new_status not in (None, "cancelled"):
+                if new_status not in (None, "cancelling", "cancelled", "failed"):
                     return
             sets.append("updated_at=?")
             vals.append(datetime.now(timezone.utc).isoformat())
@@ -898,6 +901,7 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
                         _existing_file_path,
                         _rdl_settings.library_dir,
                         video_id=video_item.id,
+                        video_stable_id=video_item.stable_id,
                         artist=video_item.artist or "",
                         title=video_item.title or "",
                         archive_reason="redownload",
@@ -1809,13 +1813,18 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
         _check_cancelled(job_id)
 
         # --- A4: Resolve metadata (network I/O + reads only) ---
-        _skip_wiki = not scrape_wikipedia
-        _skip_mb = not scrape_musicbrainz
-        _skip_ai = not (ai_auto or ai_only)
-        if ai_only:
-            _skip_wiki = True
-            _skip_mb = True
-            _skip_ai = False
+        from app.services.import_policy import ImportPolicy
+        import_policy = ImportPolicy.from_legacy(
+            scrape_wikipedia=scrape_wikipedia,
+            scrape_musicbrainz=scrape_musicbrainz,
+            ai_auto=ai_auto,
+            ai_only=ai_only,
+            normalise_audio=normalize,
+        )
+        _skip_wiki = import_policy.skip_wikipedia
+        _skip_mb = import_policy.skip_musicbrainz
+        _skip_ai = import_policy.skip_ai
+        _append_job_log(job_id, f"Import policy: {import_policy.model_dump_json()}")
 
         # resolve_metadata_unified only reads settings from its db param
         settings_db = SessionLocal()
@@ -2954,6 +2963,54 @@ def normalize_task(self, job_id: int, video_id: int, target_lufs: float = None):
         _update_job(job_id, status=JobStatus.failed, error_message=str(e))
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, max_retries=0)
+def ytdlp_update_task(self, job_id: int):
+    """Install/update yt-dlp with durable queue progress and error reporting."""
+    from app.services import ytdlp_updater
+
+    _update_job(
+        job_id,
+        status=JobStatus.analyzing,
+        started_at=datetime.now(timezone.utc),
+        current_step="Checking latest yt-dlp release",
+        progress_percent=10,
+    )
+    _append_job_log(job_id, "Checking installed and latest yt-dlp versions")
+    try:
+        _update_job(job_id, current_step="Downloading and verifying yt-dlp", progress_percent=35)
+        success, message, new_version = ytdlp_updater.update()
+        _append_job_log(job_id, message)
+        if not success:
+            _update_job(
+                job_id,
+                status=JobStatus.failed,
+                completed_at=datetime.now(timezone.utc),
+                current_step="Update failed",
+                error_message=message,
+            )
+            return {"success": False, "message": message}
+        _update_job(
+            job_id,
+            status=JobStatus.complete,
+            completed_at=datetime.now(timezone.utc),
+            current_step=f"yt-dlp {new_version or 'update'} installed",
+            progress_percent=100,
+            error_message=None,
+        )
+        return {"success": True, "message": message, "version": new_version}
+    except Exception as exc:
+        message = f"yt-dlp update failed: {exc}"
+        _append_job_log(job_id, message)
+        _update_job(
+            job_id,
+            status=JobStatus.failed,
+            completed_at=datetime.now(timezone.utc),
+            current_step="Update failed",
+            error_message=message,
+        )
+        return {"success": False, "message": message}
 
 
 # ---------------------------------------------------------------------------

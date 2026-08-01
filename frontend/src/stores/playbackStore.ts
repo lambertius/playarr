@@ -4,6 +4,8 @@ export type RepeatMode = "off" | "all" | "one";
 export type FullscreenMode = "off" | "theater" | "video";
 
 export interface PlaybackTrack {
+  /** Identity of this queue occurrence; distinct even when videoId repeats. */
+  queueEntryId?: string;
   videoId: number;
   artist: string;
   title: string;
@@ -26,6 +28,7 @@ interface PlaybackState {
   shuffle: boolean;
   repeat: RepeatMode;
   fullscreenMode: FullscreenMode;
+  nativeFullscreen: boolean;
 
   /** TV/kiosk mode: the on-screen <video> carries its own audio (single
    *  stream) and AudioManager stays silent, so there's no dual-stream sync. */
@@ -50,6 +53,7 @@ interface PlaybackState {
   resume: () => void;
   stop: () => void;
   next: () => void;
+  random: () => void;
   prev: () => void;
   seekTo: (time: number) => void;
   setCurrentTime: (time: number) => void;
@@ -62,6 +66,7 @@ interface PlaybackState {
   stopIndividual: () => void;
 
   setFullscreenMode: (mode: FullscreenMode) => void;
+  setNativeFullscreen: (on: boolean) => void;
   cycleFullscreen: () => void;
   exitFullscreen: () => void;
   setTvMode: (on: boolean) => void;
@@ -91,6 +96,13 @@ function weightedRandomIndex(queue: PlaybackTrack[], exclude: number): number {
   return queue.length - 1;
 }
 
+function withOccurrence(track: PlaybackTrack): PlaybackTrack {
+  if (track.queueEntryId) return track;
+  const generated = globalThis.crypto?.randomUUID?.()
+    ?? `queue-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return { ...track, queueEntryId: generated };
+}
+
 export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   queue: [],
   currentIndex: -1,
@@ -100,6 +112,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   shuffle: false,
   repeat: "off",
   fullscreenMode: "off",
+  nativeFullscreen: false,
   tvMode: false,
   pausedForIndividual: false,
   individualTrack: null,
@@ -113,7 +126,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
 
   play: (track) =>
     set({
-      queue: [track],
+      queue: [withOccurrence(track)],
       currentIndex: 0,
       isPlaying: true,
       currentTime: 0,
@@ -126,19 +139,19 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     set((s) => {
       const q = [...s.queue];
       const insertAt = s.currentIndex + 1;
-      q.splice(insertAt, 0, track);
+      q.splice(insertAt, 0, withOccurrence(track));
       return { queue: q };
     }),
 
   addToQueue: (track) =>
-    set((s) => ({ queue: [...s.queue, track] })),
+    set((s) => ({ queue: [...s.queue, withOccurrence(track)] })),
 
   addMultipleToQueue: (tracks) =>
-    set((s) => ({ queue: [...s.queue, ...tracks] })),
+    set((s) => ({ queue: [...s.queue, ...tracks.map(withOccurrence)] })),
 
   replaceQueue: (tracks, startIndex = 0) =>
     set({
-      queue: tracks,
+      queue: tracks.map(withOccurrence),
       currentIndex: startIndex,
       isPlaying: true,
       currentTime: 0,
@@ -212,6 +225,20 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       };
     }),
 
+  random: () =>
+    set((s) => {
+      if (s.queue.length <= 1) return { currentTime: 0, isPlaying: s.queue.length === 1 };
+      const nextIdx = weightedRandomIndex(s.queue, s.currentIndex);
+      return {
+        currentIndex: nextIdx,
+        currentTime: 0,
+        duration: s.queue[nextIdx]?.duration ?? 0,
+        isPlaying: true,
+        individualTrack: null,
+        pausedForIndividual: false,
+      };
+    }),
+
   prev: () =>
     set((s) => {
       if (s.individualTrack) {
@@ -260,7 +287,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   playIndividual: (track) =>
     set((s) => ({
       pausedForIndividual: s.queue.length > 0 && s.isPlaying,
-      individualTrack: track,
+      individualTrack: withOccurrence(track),
       isPlaying: true,
       currentTime: 0,
       duration: track.duration ?? 0,
@@ -276,22 +303,12 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
 
   setFullscreenMode: (mode) => {
     set({ fullscreenMode: mode });
-    if (mode !== "off" && !document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {});
-    } else if (mode === "off" && document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    }
   },
   cycleFullscreen: () => {
     const s = get();
     const modes: FullscreenMode[] = ["off", "theater", "video"];
     const next = modes[(modes.indexOf(s.fullscreenMode) + 1) % modes.length];
     set({ fullscreenMode: next });
-    if (next !== "off" && !document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {});
-    } else if (next === "off" && document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    }
   },
   exitFullscreen: () => {
     set({ fullscreenMode: "off" });
@@ -299,6 +316,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       document.exitFullscreen().catch(() => {});
     }
   },
+  setNativeFullscreen: (on) => set({ nativeFullscreen: on }),
 
   setTvMode: (on) => set({ tvMode: on }),
 }));

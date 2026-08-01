@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Compass, Download, Power, ScrollText, ExternalLink, Tv, Cast, Image, Music, Puzzle, Wrench, Star } from "lucide-react";
+import { Save, Database, Plus, X, FolderOpen, ScanLine, HeartPulse, FileText, RefreshCw, ChevronDown, ChevronUp, Info, AlertTriangle, HardDrive, Film, Sparkles, Play, Server, Compass, Download, Power, ScrollText, ExternalLink, Tv, Cast, Image, Music, Wrench, Star } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettings, useUpdateSetting, useLibraryScan, useLibraryExport, useYtdlpStatus, useUpdateYtdlp } from "@/hooks/queries";
 import { settingsApi, statsApi } from "@/lib/api";
@@ -347,33 +347,40 @@ interface NavItem { id: string; label: string; icon: React.ReactNode }
 interface NavGroup { heading: string; items: NavItem[] }
 
 const SETTINGS_NAV: NavGroup[] = [
-  { heading: "Library", items: [
-    { id: "library", label: "Library & Storage", icon: <HardDrive size={16} /> },
-    { id: "import",  label: "Import Defaults",   icon: <Download size={16} /> },
+  { heading: "Library and files", items: [
+    { id: "library", label: "Library & files", icon: <HardDrive size={16} /> },
   ]},
-  { heading: "Media", items: [
-    { id: "av",       label: "Video & Audio", icon: <Film size={16} /> },
-    { id: "previews", label: "Previews",      icon: <Image size={16} /> },
+  { heading: "Imports and scraping", items: [
+    { id: "import", label: "Import defaults", icon: <Download size={16} /> },
   ]},
-  { heading: "Intelligence", items: [
-    { id: "ai",        label: "AI",        icon: <Sparkles size={16} /> },
-    { id: "newvideos", label: "Discovery", icon: <Compass size={16} /> },
+  { heading: "AI", items: [
+    { id: "ai", label: "AI providers & policy", icon: <Sparkles size={16} /> },
   ]},
   { heading: "Playback", items: [
     { id: "nowplaying", label: "Now Playing", icon: <Play size={16} /> },
+    { id: "previews", label: "Previews", icon: <Image size={16} /> },
+  ]},
+  { heading: "TV, Cast and Party", items: [
     { id: "partymode",  label: "Party Mode",  icon: <Music size={16} /> },
     { id: "tvmode",     label: "TV Mode",     icon: <Tv size={16} /> },
     { id: "castmode",   label: "Cast Mode",   icon: <Cast size={16} /> },
-    { id: "kodi",       label: "Kodi Add-on", icon: <Puzzle size={16} /> },
+  ]},
+  { heading: "Discovery", items: [
+    { id: "newvideos", label: "New Videos", icon: <Compass size={16} /> },
+  ]},
+  { heading: "Video editor", items: [
+    { id: "av", label: "Encode & audio", icon: <Film size={16} /> },
+  ]},
+  { heading: "TMVDB", items: [
+    { id: "tmvdb", label: "Community metadata", icon: <Compass size={16} /> },
   ]},
   { heading: "System", items: [
     { id: "server",     label: "Server",             icon: <Server size={16} /> },
     { id: "startup",    label: "Startup & Behaviour", icon: <Power size={16} /> },
     { id: "management", label: "Server Management",  icon: <Wrench size={16} /> },
-    { id: "logs",       label: "Logs",               icon: <ScrollText size={16} /> },
   ]},
-  { heading: "Integrations", items: [
-    { id: "tmvdb", label: "TMVDB", icon: <Compass size={16} /> },
+  { heading: "Diagnostics", items: [
+    { id: "logs", label: "Logs & diagnostics", icon: <ScrollText size={16} /> },
   ]},
 ];
 
@@ -744,7 +751,6 @@ export function SettingsPage() {
             );
           }} />
         ));
-      case "kodi": return extraSection("Kodi Add-on", <KodiPluginSettings />);
       case "management": return extraSection("Server Management", <RestartServerButton />);
       case "logs": return extraSection("Log Viewer", <LogViewer />, true);
       case "about": return extraSection("System Information", (
@@ -1142,8 +1148,8 @@ function YtdlpUpdater() {
     updateMutation.mutate(undefined, {
       onSuccess: (res) => {
         toast({
-          type: res.success ? "success" : "error",
-          title: res.success ? "yt-dlp updated" : "yt-dlp update failed",
+          type: "success",
+          title: "yt-dlp update queued",
           description: res.message,
         });
       },
@@ -1206,7 +1212,8 @@ function YtdlpUpdater() {
 
 /* ── Kodi add-on download (version-matched to this server) ── */
 
-function KodiPluginSettings() {
+/** Deprecated compatibility component; no navigation entry or API route exposes it. */
+export function KodiPluginSettings() {
   const [info, setInfo] = useState<{ available: boolean; version: string; filename: string } | null>(null);
 
   useEffect(() => {
@@ -1504,7 +1511,7 @@ function SourceDirectoriesEditor({
 /* ── Library Naming Convention Editor ── */
 
 const FOLDER_STRUCTURE_PRESETS = [
-  { value: "{artist}/{file_folder}", label: "Artist / Video Folder", description: "Best for Kodi — artist artwork lives alongside videos" },
+  { value: "{artist}/{file_folder}", label: "Artist / Video Folder", description: "Artist artwork lives alongside videos" },
   { value: "{file_folder}", label: "Flat (Video Folder only)", description: "All video folders directly in library root" },
   { value: "{artist}/{album}/{file_folder}", label: "Artist / Album / Video Folder", description: "Deep nesting — groups videos by artist and album" },
   { value: "{album}/{file_folder}", label: "Album / Video Folder", description: "Groups videos by album name" },
@@ -1583,8 +1590,8 @@ function NamingConventionEditor({
         <div className="flex items-center gap-2">
           <label className="text-sm font-medium text-text-primary">Folder Structure</label>
           {structure === "{artist}/{file_folder}" && (
-            <Tooltip content="This layout is the most compatible with Kodi. Artist artwork and NFOs are organised into per-artist folders alongside their video subfolders.">
-              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-green-500/20 text-green-400 rounded">Kodi Recommended</span>
+            <Tooltip content="Artist artwork and metadata are organised into per-artist folders alongside video subfolders.">
+              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-green-500/20 text-green-400 rounded">Recommended</span>
             </Tooltip>
           )}
         </div>
@@ -1679,9 +1686,8 @@ function NamingConventionEditor({
         <div className="flex items-start gap-2 p-2.5 rounded-lg bg-green-500/5 border border-green-500/20">
           <Info size={14} className="text-green-400 mt-0.5 shrink-0" />
           <p className="text-xs text-green-300/80">
-            <strong>Kodi-optimized layout:</strong> Artist / Video Folder structure with quality tags in brackets.
-            This is the most compatible layout for Kodi music video libraries — artist artwork, NFOs,
-            and video subfolders are organised naturally for Kodi's scraper.
+            <strong>Media-library layout:</strong> Artist / Video Folder structure with quality tags in brackets.
+            Artist artwork, metadata files, and video subfolders remain organised together for portable media libraries.
           </p>
         </div>
       )}
@@ -2815,13 +2821,14 @@ function SettingRow({
 
   const isBoolean = setting.value_type === "bool" || value === "true" || value === "false";
   const isNumber = setting.value_type === "int" || setting.value_type === "float" || /^\d+(\.\d+)?$/.test(setting.value);
+  const isSecret = setting.key.endsWith("_api_key") || setting.key.includes("secret") || setting.key.includes("token");
 
   const label = meta?.label || setting.key.replace(/_/g, " ").replace(/\./g, " ");
   const description = meta?.description;
 
   return (
-    <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-      <div className="flex-1 min-w-0">
+    <div className="grid grid-cols-1 sm:grid-cols-[minmax(11rem,0.9fr)_minmax(12rem,1fr)_minmax(15rem,1.35fr)] sm:items-start gap-2 sm:gap-4">
+      <div className="min-w-0 sm:pt-2">
         <div className="flex items-center gap-1">
           <label className="text-sm font-medium text-text-primary">{label}</label>
           {meta?.tooltip && (
@@ -2830,11 +2837,8 @@ function SettingRow({
             </Tooltip>
           )}
         </div>
-        {description && (
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{description}</p>
-        )}
       </div>
-      <div className="flex items-center gap-2 shrink-0 sm:pt-0.5">
+      <div className="flex items-center gap-2 min-w-0">
         {isBoolean ? (
           <button
             onClick={() => {
@@ -2870,10 +2874,13 @@ function SettingRow({
           </select>
         ) : (
           <input
-            type={isNumber ? "number" : "text"}
+            type={isSecret ? "password" : isNumber ? "number" : "text"}
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            className="input-field w-48 text-sm"
+            onFocus={() => { if (isSecret && value.startsWith("••••")) setValue(""); }}
+            aria-describedby={`setting-description-${setting.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
+            autoComplete={isSecret ? "new-password" : undefined}
+            className="input-field w-full text-sm"
             onKeyDown={(e) => {
               if (e.key === "Enter" && isDirty) onSave(value, setting.value_type);
             }}
@@ -2891,6 +2898,10 @@ function SettingRow({
           </Tooltip>
         )}
       </div>
+      <p id={`setting-description-${setting.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`} className="text-xs text-text-muted leading-relaxed sm:pt-2">
+        {description || "No additional description."}
+        {isSecret && <span className="block mt-1 text-emerald-400/80">Stored securely; the configured value is never returned in full.</span>}
+      </p>
     </div>
   );
 }

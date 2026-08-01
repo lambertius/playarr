@@ -1324,6 +1324,8 @@ function DuplicateGroupCard({
   onSetVersion: (videoId: number, vt: string, approve?: boolean) => void;
 }) {
   const navigate = useNavigate();
+  const [activePreviewKey, setActivePreviewKey] = useState<string | null>(null);
+  const previewRefs = useRef(new Map<string, HTMLVideoElement>());
   // Only items actually in the review queue are actionable (not comparison-only partners)
   const reviewItems = items.filter((i) => i.review_category === "duplicate");
   const reviewIds = reviewItems.map((i) => i.video_id);
@@ -1332,6 +1334,16 @@ function DuplicateGroupCard({
   // Sort by quality score descending so best is first
   const sorted = [...items].sort((a, b) => (b.quality_score ?? 0) - (a.quality_score ?? 0));
   const bestScore = sorted[0]?.quality_score ?? 0;
+  const pairs = sorted.flatMap((left, leftIndex) =>
+    sorted.slice(leftIndex + 1).map((right) => [left, right] as const)
+  );
+
+  const playPreview = (key: string) => {
+    for (const [candidateKey, element] of previewRefs.current) {
+      if (candidateKey !== key && !element.paused) element.pause();
+    }
+    setActivePreviewKey(key);
+  };
 
   const toggleGroupSelect = () => {
     if (allGroupSelected) {
@@ -1368,9 +1380,86 @@ function DuplicateGroupCard({
         <span className="text-[10px] text-purple-400/70 ml-auto">{items.length} items</span>
       </div>
 
-      {/* Members grid */}
+      {/* Each evidence edge gets an explicit equal A/B comparison. */}
+      <div className="space-y-3 p-3">
+        {pairs.map(([left, right], pairIndex) => (
+          <div key={`${left.video_id}-${right.video_id}`} className="overflow-hidden rounded-lg border border-surface-border bg-surface/50">
+            <div className="flex flex-wrap items-center gap-2 border-b border-surface-border px-3 py-2 text-[11px] text-text-muted">
+              <GitCompare size={12} className="text-purple-400" />
+              <span className="font-medium text-text-secondary">Pair {pairIndex + 1}</span>
+              <span>Same normalized artist and title</span>
+              {(left.review_reason || right.review_reason) && (
+                <span className="ml-auto max-w-lg truncate">{left.review_reason || right.review_reason}</span>
+              )}
+            </div>
+            <div className="grid md:grid-cols-2 md:divide-x md:divide-surface-border">
+              {([left, right] as const).map((item, panelIndex) => {
+                const previewKey = `${pairIndex}:${item.video_id}`;
+                const score = item.quality_score ?? 0;
+                const isBest = score > 0
+                  && score === bestScore
+                  && sorted.filter((candidate) => (candidate.quality_score ?? 0) === bestScore).length === 1;
+                const isComparisonOnly = item.review_category !== "duplicate";
+                return (
+                  <section key={previewKey} className={cn("p-3", isBest && "bg-emerald-500/5")}>
+                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                      <span className={cn(
+                        "rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider",
+                        panelIndex === 0 ? "bg-purple-500/10 text-purple-400" : "bg-blue-500/10 text-blue-400",
+                      )}>
+                        {panelIndex === 0 ? "A" : "B"} · #{item.video_id}
+                      </span>
+                      {isComparisonOnly && <span className="rounded bg-zinc-500/10 px-1.5 py-0.5 text-[10px] text-zinc-400">Existing</span>}
+                      {item.version_type && item.version_type !== "normal" && (
+                        <VersionBadge versionType={item.version_type} className="px-1.5 py-0 text-[10px]" />
+                      )}
+                      {isBest && <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400">Best quality</span>}
+                    </div>
+                    <video
+                      ref={(element) => {
+                        if (element) previewRefs.current.set(previewKey, element);
+                        else previewRefs.current.delete(previewKey);
+                      }}
+                      src={`/api/playback/preview/${item.video_id}`}
+                      poster={item.thumbnail_url || undefined}
+                      controls
+                      preload="metadata"
+                      muted={activePreviewKey !== previewKey}
+                      onPlay={() => playPreview(previewKey)}
+                      className="aspect-video w-full rounded-md bg-black object-contain"
+                    />
+                    <div className="mt-2 min-w-0">
+                      <p className="truncate text-xs font-medium text-text-primary">{item.artist} — {item.title}</p>
+                      <p className="truncate text-[11px] text-text-muted">{item.filename || `Library video #${item.video_id}`}</p>
+                      <QualitySpecs item={item} />
+                      <div className="mt-1 grid grid-cols-2 gap-x-3 text-[10px] text-text-muted">
+                        <span>Added/updated</span><span className="text-right text-text-secondary">{item.updated_at ? timeAgo(item.updated_at) : "Unknown"}</span>
+                        <span>Source</span><span className="text-right text-text-secondary">{item.import_method || "Unknown"}</span>
+                        <span>Version</span><span className="text-right text-text-secondary">{item.version_type || "normal"}</span>
+                      </div>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between border-t border-surface-border pt-2">
+                      <button onClick={() => navigate(`/video/${item.video_id}`)} className="btn-ghost btn-sm text-xs">Open details</button>
+                      <div className="flex items-center gap-1">
+                        <VersionTypeDropdown currentType={item.version_type} onSelect={(version) => onSetVersion(item.video_id, version)} />
+                        <Tooltip content="Delete this library video and its files">
+                          <button onClick={() => onDelete(item.video_id)} className="btn-ghost btn-sm text-red-400/70 hover:text-red-300">
+                            <Trash2 size={13} />
+                          </button>
+                        </Tooltip>
+                      </div>
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Transition fallback retained but not rendered. */}
       <div className={cn(
-        "grid divide-x divide-surface-border",
+        "hidden grid divide-x divide-surface-border",
         sorted.length === 2 ? "grid-cols-2" : sorted.length === 3 ? "grid-cols-3" : "grid-cols-2",
       )}>
         {sorted.map((item, idx) => {

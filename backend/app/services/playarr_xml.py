@@ -11,15 +11,17 @@ The Kodi .nfo is left untouched — this is a separate, Playarr-specific file.
 
 import logging
 import os
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from uuid import NAMESPACE_URL, uuid5
 from xml.etree.ElementTree import Element, SubElement, tostring, indent, parse
 
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-PLAYARR_XML_VERSION = "1"
+PLAYARR_XML_VERSION = "2"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -65,13 +67,50 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     `video` must be a fully-loaded VideoItem with relationships:
     genres, sources, media_assets, quality_signature.
     """
-    from app.models import MediaAsset
+    from app.models import MediaAsset, VideoItem
+    from app.version import APP_VERSION
 
     root = Element("playarr")
     root.set("version", PLAYARR_XML_VERSION)
-    root.set("exported", _now_iso())
+    root.set("schemaVersion", PLAYARR_XML_VERSION)
+    root.set("playarrVersion", APP_VERSION)
+    entity_revision = max(1, int(getattr(video, "revision", 1) or 1))
+    sidecar_revision = max(
+        entity_revision,
+        int(getattr(video, "sidecar_revision", entity_revision) or entity_revision),
+    )
+    generated_at = _now_iso()
+    root.set("sidecarRevision", str(sidecar_revision))
+    root.set("entityRevision", str(entity_revision))
+    root.set("generatedAt", generated_at)
+    root.set("exported", generated_at)  # v1 reader compatibility
 
     folder_path = video.folder_path or ""
+
+    # Stable portable identity.  The existing <playarr_ids> block remains for
+    # one dual-read/dual-write release, but v2 readers use this contract.
+    portable_identity = SubElement(root, "portable_identity")
+    portable_video_id = getattr(video, "playarr_video_id", None)
+    portable_track_id = getattr(video, "playarr_track_id", None)
+    if not portable_video_id or not portable_track_id:
+        # Deterministic and filesystem-free. Persisting the IDs is handled by
+        # the mutation that scheduled this sidecar; the portable document must
+        # still never fall back to a numeric SQL row identifier.
+        from app.services.content_id import compute_ids_for_video
+        computed_ids = compute_ids_for_video(video)
+        portable_video_id = portable_video_id or computed_ids["playarr_video_id"]
+        portable_track_id = portable_track_id or computed_ids["playarr_track_id"]
+    if portable_video_id:
+        root.set("playarrVideoId", portable_video_id)
+        portable_identity.set("videoId", portable_video_id)
+    if portable_track_id:
+        root.set("playarrTrackId", portable_track_id)
+        portable_identity.set("trackId", portable_track_id)
+    entity_stable_id = getattr(video, "stable_id", None) or str(
+        uuid5(NAMESPACE_URL, f"playarr:video-entity:{portable_video_id}")
+    )
+    root.set("entityId", entity_stable_id)
+    portable_identity.set("entityId", entity_stable_id)
 
     # ── identity ──
     identity = SubElement(root, "identity")
@@ -89,7 +128,13 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
         _opt(ver, "original_artist", video.original_artist)
         _opt(ver, "original_title", video.original_title)
         if getattr(video, "parent_video_id", None):
-            _txt(ver, "parent_video_id", str(video.parent_video_id))
+            parent = db.get(VideoItem, video.parent_video_id)
+            parent_ref = getattr(parent, "playarr_video_id", None) if parent else None
+            if parent and not parent_ref:
+                from app.services.content_id import compute_ids_for_video
+                parent_ref = compute_ids_for_video(parent)["playarr_video_id"]
+            if parent_ref:
+                _txt(ver, "parent_video_ref", parent_ref)
 
     # ── canonical tracking (outside <version> so it applies to all videos) ──
     _opt(identity, "canonical_provenance", getattr(video, "canonical_provenance", None))
@@ -129,6 +174,25 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
             _txt(artist_el, "name", a.get("name", ""))
             _opt(artist_el, "mb_artist_id", a.get("mb_artist_id"))
 
+    # Preserve the raw source value and a stable global consolidation reference.
+    # The library-level manifest carries the complete aggregate for rebuild.
+    try:
+        from app.services.consolidations import matching_artist_consolidation
+        primary_artist = (video.artist or "").split(";")[0].strip()
+        consolidation = matching_artist_consolidation(
+            db, primary_artist, getattr(video, "mb_artist_id", None),
+        )
+        if consolidation:
+            ace = SubElement(root, "artist_consolidation")
+            ace.set("stableId", consolidation["stable_id"])
+            ace.set("revision", str(consolidation["revision"]))
+            _txt(ace, "mask_name", consolidation["mask_name"])
+            _txt(ace, "raw_target_name", primary_artist)
+            _opt(ace, "mb_artist_id", getattr(video, "mb_artist_id", None))
+    except ImportError:
+        # Compatibility with the preceding release during dual-read migration.
+        pass
+
     # ── sources (YouTube URLs etc.) ──
     if video.sources:
         sources_el = SubElement(root, "sources")
@@ -166,6 +230,13 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
             lb = SubElement(qual, "letterbox")
             _txt(lb, "scanned", True)
             _txt(lb, "detected", q.letterbox_detected)
+            _opt(lb, "confidence", getattr(q, "letterbox_confidence", None))
+            _txt(lb, "sample_count", getattr(q, "letterbox_sample_count", 0))
+            _txt(lb, "samples_expected", getattr(q, "letterbox_samples_expected", 0))
+            _txt(lb, "review_suggested", getattr(q, "letterbox_review_suggested", False))
+            _opt(lb, "instability_reason", getattr(q, "letterbox_instability_reason", None))
+            _opt(lb, "evidence_hash", getattr(q, "letterbox_evidence_hash", None))
+            _opt(lb, "source_checksum", getattr(q, "letterbox_source_checksum", None))
             if q.letterbox_detected:
                 _opt(lb, "crop_w", q.letterbox_crop_w)
                 _opt(lb, "crop_h", q.letterbox_crop_h)
@@ -229,6 +300,11 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
 
     # ── file info ──
     file_el = SubElement(root, "file")
+    if video.file_path:
+        from app.config import get_settings
+        library_root = get_settings().library_dir
+        _opt(file_el, "relative_path", _rel_path(video.file_path, library_root))
+    _opt(file_el, "checksum", getattr(video, "file_checksum", None))
     _opt(file_el, "resolution_label", video.resolution_label)
     _opt(file_el, "file_size_bytes", video.file_size_bytes)
     _opt(file_el, "import_method", video.import_method)
@@ -272,6 +348,7 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     # ── flags ──
     flags = SubElement(root, "flags")
     _txt(flags, "exclude_from_editor_scan", video.exclude_from_editor_scan)
+    _opt(flags, "editor_crop_dismissed_evidence_hash", getattr(video, "editor_crop_dismissed_evidence_hash", None))
     if getattr(video, "editor_edit_type", None):
         _txt(flags, "editor_edit_type", video.editor_edit_type)
     if video.locked_fields:
@@ -402,6 +479,10 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     _txt(ts, "updated_at", video.updated_at.isoformat() if video.updated_at else "")
     _txt(ts, "exported_at", _now_iso())
 
+    # contentHash covers the complete logical document before the hash
+    # attribute itself is attached, avoiding a recursive digest definition.
+    canonical_payload = tostring(root, encoding="utf-8", xml_declaration=True)
+    root.set("contentHash", f"sha256:{hashlib.sha256(canonical_payload).hexdigest()}")
     return root
 
 
@@ -433,9 +514,9 @@ def write_playarr_xml(video, db: Session) -> Optional[str]:
     xml_filename = f"{base}.playarr.xml"
     xml_path = os.path.join(video.folder_path, xml_filename)
 
-    xml_bytes = tostring(root, encoding="unicode", xml_declaration=True)
-    with open(xml_path, "w", encoding="utf-8") as f:
-        f.write(xml_bytes)
+    xml_bytes = tostring(root, encoding="utf-8", xml_declaration=True)
+    from app.services.sidecar_store import atomic_write_sidecar
+    atomic_write_sidecar(xml_path, xml_bytes)
 
     logger.info(f"Wrote Playarr XML: {xml_path}")
     return xml_path
@@ -477,6 +558,16 @@ def _bool(el: Optional[Element], default: bool = False) -> bool:
     return t in ("true", "1", "yes") if t else default
 
 
+def _int_attr(el: Element, name: str, default: Optional[int] = None) -> Optional[int]:
+    value = el.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
     """
     Parse a .playarr.xml file into a dict suitable for creating/updating
@@ -497,9 +588,19 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
 
     folder_path = os.path.dirname(xml_path)
     result: Dict[str, Any] = {
-        "xml_version": root.get("version", "1"),
-        "exported_at": root.get("exported", ""),
+        "xml_version": root.get("schemaVersion") or root.get("version", "1"),
+        "playarr_version": root.get("playarrVersion"),
+        "sidecar_revision": _int_attr(root, "sidecarRevision"),
+        "entity_revision": _int_attr(root, "entityRevision"),
+        "content_hash": root.get("contentHash"),
+        "exported_at": root.get("generatedAt") or root.get("exported", ""),
     }
+
+    portable_identity = root.find("portable_identity")
+    if portable_identity is not None:
+        result["entity_stable_id"] = portable_identity.get("entityId") or root.get("entityId")
+        result["playarr_video_id"] = portable_identity.get("videoId") or root.get("playarrVideoId")
+        result["playarr_track_id"] = portable_identity.get("trackId") or root.get("playarrTrackId")
 
     # ── identity ──
     identity = root.find("identity")
@@ -516,9 +617,14 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
             result["alternate_version_label"] = _text(ver.find("label")) or None
             result["original_artist"] = _text(ver.find("original_artist")) or None
             result["original_title"] = _text(ver.find("original_title")) or None
-            parent_vid = _text(ver.find("parent_video_id"))
-            if parent_vid:
-                result["parent_video_id"] = int(parent_vid)
+            parent_ref = _text(ver.find("parent_video_ref"))
+            if parent_ref:
+                result["parent_video_ref"] = parent_ref
+            else:
+                # v1 compatibility only. Numeric IDs are never emitted by v2.
+                parent_vid = _text(ver.find("parent_video_id"))
+                if parent_vid:
+                    result["legacy_parent_video_id"] = int(parent_vid)
             # Legacy: canonical_provenance was previously nested inside <version>
             if not result.get("canonical_provenance"):
                 result["canonical_provenance"] = _text(ver.find("canonical_provenance")) or None
@@ -572,6 +678,16 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         if artist_list:
             result["artist_ids"] = artist_list
 
+    consolidation_el = root.find("artist_consolidation")
+    if consolidation_el is not None:
+        result["artist_consolidation"] = {
+            "stable_id": consolidation_el.get("stableId"),
+            "revision": int(consolidation_el.get("revision") or 0),
+            "mask_name": _text(consolidation_el.find("mask_name")) or None,
+            "raw_target_name": _text(consolidation_el.find("raw_target_name")) or None,
+            "mb_artist_id": _text(consolidation_el.find("mb_artist_id")) or None,
+        }
+
     # ── sources ──
     sources_el = root.find("sources")
     if sources_el is not None:
@@ -612,6 +728,13 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         if lb is not None:
             result["quality"]["letterbox_scanned"] = _bool(lb.find("scanned"))
             result["quality"]["letterbox_detected"] = _bool(lb.find("detected"))
+            result["quality"]["letterbox_confidence"] = _float(lb.find("confidence"))
+            result["quality"]["letterbox_sample_count"] = _int(lb.find("sample_count"))
+            result["quality"]["letterbox_samples_expected"] = _int(lb.find("samples_expected"))
+            result["quality"]["letterbox_review_suggested"] = _bool(lb.find("review_suggested"))
+            result["quality"]["letterbox_instability_reason"] = _text(lb.find("instability_reason"))
+            result["quality"]["letterbox_evidence_hash"] = _text(lb.find("evidence_hash"))
+            result["quality"]["letterbox_source_checksum"] = _text(lb.find("source_checksum"))
             result["quality"]["letterbox_crop_w"] = _int(lb.find("crop_w"))
             result["quality"]["letterbox_crop_h"] = _int(lb.find("crop_h"))
             result["quality"]["letterbox_crop_x"] = _int(lb.find("crop_x"))
@@ -645,6 +768,8 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
     # ── file info ──
     file_el = root.find("file")
     if file_el is not None:
+        result["relative_path"] = _text(file_el.find("relative_path")) or None
+        result["file_checksum"] = _text(file_el.find("checksum")) or None
         result["resolution_label"] = _text(file_el.find("resolution_label")) or None
         result["file_size_bytes"] = _int(file_el.find("file_size_bytes"))
         result["import_method"] = _text(file_el.find("import_method")) or None
@@ -719,6 +844,7 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
     flags_el = root.find("flags")
     if flags_el is not None:
         result["exclude_from_editor_scan"] = _bool(flags_el.find("exclude_from_editor_scan"))
+        result["editor_crop_dismissed_evidence_hash"] = _text(flags_el.find("editor_crop_dismissed_evidence_hash"))
         edit_type = _text(flags_el.find("editor_edit_type"))
         if edit_type:
             result["editor_edit_type"] = edit_type

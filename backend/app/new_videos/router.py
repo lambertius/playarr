@@ -389,8 +389,15 @@ def dismiss_video(req: DismissRequest, db: Session = Depends(get_db)):
         category=sv.category,
     )
 
+    category = sv.category
     db.commit()
-    return {"status": "dismissed", "type": req.dismissal_type}
+    category_feed = recommendation_service.get_feed(db)["categories"][category]["videos"]
+    return {
+        "status": "dismissed",
+        "type": req.dismissal_type,
+        "replacement": category_feed[-1] if category_feed else None,
+        "exhausted": not bool(category_feed),
+    }
 
 
 @router.post("/undismiss")
@@ -482,7 +489,14 @@ def add_video(req: CartAddRequest, db: Session = Depends(get_db)):
     dispatch_task(import_video_task, job_id=job.id, url=sv.url,
                   normalize=True, scrape=True, scrape_musicbrainz=True)
 
-    return {"status": "importing", "job_id": job.id}
+    category_feed = recommendation_service.get_feed(db)["categories"][sv.category]["videos"]
+    return {
+        "status": "importing",
+        "job_id": job.id,
+        "category": sv.category,
+        "replacement": category_feed[-1] if category_feed else None,
+        "exhausted": not bool(category_feed),
+    }
 
 
 # ── Feedback endpoint ────────────────────────────────────────────────────────

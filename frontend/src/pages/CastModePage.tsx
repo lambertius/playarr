@@ -50,8 +50,8 @@ export function CastModePage() {
     (async () => {
       try {
         await launch(
-          { party_year: choice.partyYear },
-          { navigate: false, fullscreenMode: choice.fullscreenMode, ignoreSavedEra: true },
+          { ...choice.filters, party_year: choice.partyYear },
+          { navigate: false, fullscreenMode: choice.fullscreenMode, ignoreSavedEra: true, playlistId: choice.playlistId },
         );
         setPhase("ready");
       } catch {

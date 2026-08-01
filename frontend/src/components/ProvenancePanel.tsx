@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShieldCheck, UploadCloud, Eye, Fingerprint, Loader2, BadgeCheck, Bot, PencilLine, HelpCircle } from "lucide-react";
+import { ShieldCheck, UploadCloud, Eye, Fingerprint, Loader2, BadgeCheck, Bot, PencilLine, HelpCircle, RotateCcw, X } from "lucide-react";
 import type { VideoItemDetail } from "@/types";
 import { libraryApi, tmvdbApi } from "@/lib/api";
 import { useToast } from "@/components/Toast";
@@ -36,10 +36,12 @@ export function ProvenancePanel({ video }: ProvenancePanelProps) {
   const [confirming, setConfirming] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  const [actingId, setActingId] = useState<string | null>(null);
 
   const { data: contributions } = useQuery({
     queryKey: ["tmvdb-contributions", video.id],
     queryFn: () => tmvdbApi.contributions(video.id, 5),
+    refetchInterval: 2500,
   });
 
   const { data: preview, isFetching: previewLoading } = useQuery({
@@ -72,7 +74,7 @@ export function ProvenancePanel({ video }: ProvenancePanelProps) {
     setPushing(true);
     try {
       const res = await tmvdbApi.push(video.id);
-      const t = res.status === "submitted" ? "success" : res.status === "skipped" ? "info" : "error";
+      const t = res.status === "pending" ? "success" : res.status === "ineligible" ? "info" : "error";
       toast({ type: t as "success" | "info" | "error", title: res.message });
       qc.invalidateQueries({ queryKey: ["tmvdb-contributions", video.id] });
     } catch (e: unknown) {
@@ -80,6 +82,23 @@ export function ProvenancePanel({ video }: ProvenancePanelProps) {
       toast({ type: "error", title: msg || "Push failed — is TMVDB enabled in Settings?" });
     } finally {
       setPushing(false);
+    }
+  };
+
+  const updateContribution = async (id: string, action: "cancel" | "retry") => {
+    setActingId(id);
+    try {
+      await tmvdbApi[action](id);
+      toast({
+        type: "success",
+        title: action === "cancel" ? "Contribution cancelled" : "Contribution queued for retry",
+      });
+      qc.invalidateQueries({ queryKey: ["tmvdb-contributions", video.id] });
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast({ type: "error", title: msg || `Could not ${action} contribution` });
+    } finally {
+      setActingId(null);
     }
   };
 
@@ -166,18 +185,43 @@ export function ProvenancePanel({ video }: ProvenancePanelProps) {
           </h4>
           <ul className="space-y-1 text-xs">
             {contributions.map((c) => (
-              <li key={c.id} className="flex justify-between items-center">
-                <span className="text-text-muted">
-                  {c.created_at ? new Date(c.created_at).toLocaleString() : "—"}
+              <li key={c.id} className="flex justify-between items-center gap-2 rounded bg-bg-base/30 px-2 py-1.5">
+                <span className="min-w-0 text-text-muted">
+                  <span className="block">{c.created_at ? new Date(c.created_at).toLocaleString() : "—"}</span>
+                  {c.operation_id && (
+                    <span className="block truncate font-mono text-[9px]" title={c.operation_id}>{c.operation_id}</span>
+                  )}
+                  {c.error?.message && <span className="block text-red-300" title={c.error.message}>{c.error.message}</span>}
                 </span>
-                <span
-                  className={
+                <span className="flex shrink-0 items-center gap-1.5">
+                  <span className={
                     c.status === "submitted" ? "text-emerald-400"
-                    : c.status === "skipped" ? "text-text-muted"
+                    : ["pending", "running", "retry"].includes(c.status) ? "text-amber-300"
+                    : c.status === "cancelled" ? "text-text-muted"
                     : "text-red-400"
-                  }
-                >
-                  {c.status}
+                  }>
+                    {c.status}
+                  </span>
+                  {typeof c.id === "string" && ["pending", "retry"].includes(c.status) && (
+                    <button
+                      className="icon-btn"
+                      disabled={actingId === c.id}
+                      onClick={() => updateContribution(c.id as string, "cancel")}
+                      title="Cancel pending contribution"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                  {typeof c.id === "string" && c.status === "failed" && (
+                    <button
+                      className="icon-btn"
+                      disabled={actingId === c.id}
+                      onClick={() => updateContribution(c.id as string, "retry")}
+                      title="Retry failed contribution"
+                    >
+                      <RotateCcw size={11} />
+                    </button>
+                  )}
                 </span>
               </li>
             ))}
@@ -199,9 +243,26 @@ export function ProvenancePanel({ video }: ProvenancePanelProps) {
               <Loader2 size={12} className="animate-spin" /> Building…
             </div>
           ) : preview ? (
-            <pre className="mt-2 max-h-72 overflow-auto rounded bg-bg-base/50 p-2 text-[10px] leading-relaxed text-text-muted">
-              {JSON.stringify(preview, null, 2)}
-            </pre>
+            <div className="mt-2 space-y-2 rounded bg-bg-base/50 p-2 text-[10px] text-text-muted">
+              <div className="flex flex-wrap gap-1">
+                {Object.entries(preview.eligibility).map(([field, state]) => (
+                  <span
+                    key={field}
+                    className={`rounded px-1.5 py-0.5 ${state.eligible ? "bg-emerald-500/15 text-emerald-300" : "bg-surface text-text-muted"}`}
+                    title={state.reason}
+                  >
+                    {field}: {state.eligible ? "eligible" : state.reason.replaceAll("_", " ")}
+                  </span>
+                ))}
+              </div>
+              {!preview.can_submit && (
+                <p className="text-amber-300">Nothing will be submitted until at least one field is edited, verified, or locked.</p>
+              )}
+              <details>
+                <summary className="cursor-pointer">Exact gated payload</summary>
+                <pre className="mt-1 max-h-64 overflow-auto leading-relaxed">{JSON.stringify(preview.submission, null, 2)}</pre>
+              </details>
+            </div>
           ) : null
         )}
       </div>

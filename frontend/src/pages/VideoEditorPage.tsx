@@ -9,10 +9,10 @@ import {
   RotateCcw, AlertTriangle, Archive,
 } from "lucide-react";
 import { useEditorQueue, useDetectLetterbox, useScanLetterbox, useEditorScanResults, useEditorEncodeStatus, useVideoEditorEncode, useVideoEditorBatchEncode, useSetExcludeFromScan, useRestoreFromArchive } from "@/hooks/queries";
-import { playbackApi, jobsApi } from "@/lib/api";
+import { playbackApi, jobsApi, videoEditorApi } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
-import type { EditorQueueItem, EncodeRequest, CropPreviewResponse, LetterboxScanItem } from "@/types";
+import type { EditorQueueItem, EncodeRequest, EncodePlan, CropPreviewResponse, LetterboxScanItem } from "@/types";
 
 // ── Aspect ratio presets ──────────────────────────────────
 const RATIO_PRESETS = [
@@ -47,23 +47,6 @@ function loadQueueIds(): number[] {
   }
 }
 
-function saveQueueIds(ids: number[]) {
-  localStorage.setItem(QUEUE_KEY, JSON.stringify(ids));
-}
-
-function loadEncodeJobs(): { videoId: number; jobId: number }[] {
-  try {
-    const raw = localStorage.getItem(ENCODE_JOBS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveEncodeJobs(jobs: { videoId: number; jobId: number }[]) {
-  localStorage.setItem(ENCODE_JOBS_KEY, JSON.stringify(jobs));
-}
-
 function loadManualIds(): Set<number> {
   try {
     const raw = localStorage.getItem(MANUAL_IDS_KEY);
@@ -71,10 +54,6 @@ function loadManualIds(): Set<number> {
   } catch {
     return new Set();
   }
-}
-
-function saveManualIds(ids: Set<number>) {
-  localStorage.setItem(MANUAL_IDS_KEY, JSON.stringify([...ids]));
 }
 
 // ── Numeric Stepper — larger +/- buttons for number inputs ──
@@ -187,13 +166,14 @@ export function VideoEditorPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
 
-  // Queue state (persisted in localStorage)
-  const [queueIds, setQueueIds] = useState<number[]>(loadQueueIds);
+  // Queue state is durable and shared by the backend.
+  const [queueIds, setQueueIds] = useState<number[]>([]);
   const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set());
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
   // Encode settings per-item overrides (keyed by video_id)
   const [itemSettings, setItemSettings] = useState<Record<number, {
+    profile: EncodeRequest["profile"];
     ratio: string;
     customRatioW: number;
     customRatioH: number;
@@ -214,6 +194,7 @@ export function VideoEditorPage() {
   }>>({});
 
   // Global defaults
+  const [globalProfile, setGlobalProfile] = useState<EncodeRequest["profile"]>("source_fidelity");
   const [globalCrf, setGlobalCrf] = useState(18);
   const [globalPreset, setGlobalPreset] = useState("medium");
   const [globalAudioPassthrough, setGlobalAudioPassthrough] = useState(true);
@@ -227,7 +208,7 @@ export function VideoEditorPage() {
   const [showScanDialog, setShowScanDialog] = useState(false);
 
   // Manual item tracking (persisted in localStorage)
-  const [manualIds, setManualIds] = useState<Set<number>>(loadManualIds);
+  const [manualIds, setManualIds] = useState<Set<number>>(new Set());
 
   // Tag filter for queue display
   type TagFilter = "all" | "letterboxed" | "manual";
@@ -242,7 +223,7 @@ export function VideoEditorPage() {
   const [currentPage, setCurrentPage] = useState(1);
 
   // Encode job tracking: list of { videoId, jobId } — persisted so it survives page navigation
-  const [encodeJobs, setEncodeJobs] = useState<{ videoId: number; jobId: number }[]>(loadEncodeJobs);
+  const [encodeJobs, setEncodeJobs] = useState<{ videoId: number; jobId: number }[]>([]);
   const activeEncodeJob = encodeJobs[0] ?? null;
 
   // Post-encode summary (shown as dismissible banner after encode completes)
@@ -250,6 +231,7 @@ export function VideoEditorPage() {
 
   // Encode confirmation modal — list of video IDs pending confirmation
   const [encodeConfirmIds, setEncodeConfirmIds] = useState<number[] | null>(null);
+  const [encodeConfirmPlans, setEncodeConfirmPlans] = useState<Record<number, EncodePlan>>({});
 
   // Restore-original confirmation modal
   const [restoreConfirm, setRestoreConfirm] = useState<{ videoId: number; title: string } | null>(null);
@@ -446,28 +428,48 @@ export function VideoEditorPage() {
     isDragging.current = false;
   }, []);
 
-  // Sync queueIds to localStorage
-  useEffect(() => { saveQueueIds(queueIds); }, [queueIds]);
-
-  // Sync encodeJobs to localStorage
-  useEffect(() => { saveEncodeJobs(encodeJobs); }, [encodeJobs]);
-
-  // Sync manualIds to localStorage
-  useEffect(() => { saveManualIds(manualIds); }, [manualIds]);
-
-  // Track which items we've already triggered auto-detection for (persists across hot reloads)
-  const AUTO_DETECTED_KEY = "playarr_editor_auto_detected";
-  const autoDetectedRef = useRef<Set<number>>(
-    (() => {
+  // One-release migration from browser-only queue state. Once the server has
+  // accepted it, legacy keys are deleted and can no longer override devices.
+  const queueHydratedRef = useRef(false);
+  useEffect(() => {
+    if (queueHydratedRef.current) return;
+    queueHydratedRef.current = true;
+    let cancelled = false;
+    void (async () => {
       try {
-        const stored = localStorage.getItem(AUTO_DETECTED_KEY);
-        return stored ? new Set(JSON.parse(stored) as number[]) : new Set<number>();
-      } catch { return new Set<number>(); }
-    })()
-  );
+        let state = await videoEditorApi.getQueueState();
+        const legacyIds = loadQueueIds();
+        const legacyManual = loadManualIds();
+        if (state.entries.length === 0 && legacyIds.length > 0) {
+          state = await videoEditorApi.addQueueEntries(legacyIds, "legacy");
+          if (legacyManual.size > 0) {
+            state = await videoEditorApi.addQueueEntries([...legacyManual], "manual");
+          }
+        }
+        if (cancelled) return;
+        setQueueIds(state.entries.map(entry => entry.video_id));
+        setManualIds(new Set(state.entries.filter(entry => entry.source === "manual").map(entry => entry.video_id)));
+        setItemSettings(Object.fromEntries(
+          state.entries
+            .filter(entry => Object.keys(entry.settings).length > 0)
+            .map(entry => [entry.video_id, entry.settings]),
+        ) as typeof itemSettings);
+        setEncodeJobs(state.active_jobs.map(job => ({ videoId: job.video_id, jobId: job.job_id })));
+        [QUEUE_KEY, ENCODE_JOBS_KEY, MANUAL_IDS_KEY, "playarr_editor_auto_detected"].forEach(key => localStorage.removeItem(key));
+        localStorage.setItem("playarr:editor-queue:migrated:v1", "done");
+      } catch {
+        toast({ type: "error", title: "Could not load the shared video editor queue" });
+      }
+    })();
+    return () => { cancelled = true; };
+  // Initial hydration only; subsequent mutations update the same server state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Track which items we've already triggered auto-detection for this mount.
+  const autoDetectedRef = useRef<Set<number>>(new Set());
   const markAutoDetected = useCallback((vid: number) => {
     autoDetectedRef.current.add(vid);
-    try { localStorage.setItem(AUTO_DETECTED_KEY, JSON.stringify([...autoDetectedRef.current])); } catch {}
   }, []);
 
   // Load stored crop / auto-detect letterboxing for queue items.
@@ -525,11 +527,29 @@ export function VideoEditorPage() {
   }, [queueItems]);
 
   // ── Queue management ────────────────────────────────────
-  const addToQueue = useCallback((videoIds: number[]) => {
+  const addToQueue = useCallback((videoIds: number[], source: "manual" | "scan" = "scan") => {
     setQueueIds(prev => {
       const newIds = videoIds.filter(id => !prev.includes(id));
       return [...prev, ...newIds];
     });
+    if (source === "manual") {
+      setManualIds(prev => new Set([...prev, ...videoIds]));
+    }
+    void videoEditorApi.addQueueEntries(videoIds, source).catch(() => {
+      toast({ type: "error", title: "Could not persist editor queue additions" });
+    });
+  }, [toast]);
+
+  useEffect(() => {
+    const receiveManualAdd = (event: Event) => {
+      const ids = (event as CustomEvent<number[]>).detail ?? [];
+      if (ids.length > 0) {
+        setQueueIds(prev => [...prev, ...ids.filter(id => !prev.includes(id))]);
+        setManualIds(prev => new Set([...prev, ...ids]));
+      }
+    };
+    window.addEventListener("playarr:editor-queue-added", receiveManualAdd);
+    return () => window.removeEventListener("playarr:editor-queue-added", receiveManualAdd);
   }, []);
 
   const removeFromQueue = useCallback((videoId: number) => {
@@ -537,7 +557,10 @@ export function VideoEditorPage() {
     setCheckedIds(prev => { const n = new Set(prev); n.delete(videoId); return n; });
     setManualIds(prev => { const n = new Set(prev); n.delete(videoId); return n; });
     if (selectedId === videoId) setSelectedId(null);
-  }, [selectedId]);
+    void videoEditorApi.removeQueueEntries([videoId]).catch(() => {
+      toast({ type: "error", title: "Could not persist editor queue removal" });
+    });
+  }, [selectedId, toast]);
 
   const clearQueue = useCallback(() => {
     setQueueIds([]);
@@ -547,14 +570,19 @@ export function VideoEditorPage() {
     // must keep being tracked even when the queue is cleared.
     setManualIds(new Set());
     autoDetectedRef.current.clear();
-    try { localStorage.removeItem(AUTO_DETECTED_KEY); } catch {}
-  }, []);
+    void videoEditorApi.clearQueueState().catch(() => {
+      toast({ type: "error", title: "Could not clear the shared editor queue" });
+    });
+  }, [toast]);
 
   const clearCheckedFromQueue = useCallback(() => {
     setQueueIds(prev => prev.filter(id => !checkedIds.has(id)));
     if (selectedId && checkedIds.has(selectedId)) setSelectedId(null);
+    void videoEditorApi.removeQueueEntries([...checkedIds]).catch(() => {
+      toast({ type: "error", title: "Could not persist editor queue removals" });
+    });
     setCheckedIds(new Set());
-  }, [checkedIds, selectedId]);
+  }, [checkedIds, selectedId, toast]);
 
   // ── Toggle check ────────────────────────────────────────
   const toggleCheck = useCallback((videoId: number) => {
@@ -576,6 +604,7 @@ export function VideoEditorPage() {
   // ── Get settings for a specific item ────────────────────
   const getItemSettings = useCallback((videoId: number) => {
     return itemSettings[videoId] ?? {
+      profile: globalProfile,
       ratio: globalRatio,
       customRatioW: 16,
       customRatioH: 9,
@@ -590,14 +619,19 @@ export function VideoEditorPage() {
       cropLinkLR: false,
       cropLinkTB: false,
     };
-  }, [itemSettings, globalRatio, globalCrf, globalPreset, globalAudioPassthrough]);
+  }, [itemSettings, globalProfile, globalRatio, globalCrf, globalPreset, globalAudioPassthrough]);
 
+  const settingsSaveTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
   const updateItemSetting = useCallback((videoId: number, updates: Partial<typeof itemSettings[number]>) => {
-    setItemSettings(prev => ({
-      ...prev,
-      [videoId]: { ...getItemSettings(videoId), ...updates },
-    }));
-  }, [getItemSettings]);
+    const next = { ...getItemSettings(videoId), ...updates };
+    setItemSettings(prev => ({ ...prev, [videoId]: next }));
+    clearTimeout(settingsSaveTimers.current[videoId]);
+    settingsSaveTimers.current[videoId] = setTimeout(() => {
+      void videoEditorApi.patchQueueSettings(videoId, next as unknown as Record<string, unknown>).catch(() => {
+        toast({ type: "error", title: "Could not persist editor settings" });
+      });
+    }, 400);
+  }, [getItemSettings, toast]);
 
   // ── Selected item data ──────────────────────────────────
   const selectedItem = useMemo(
@@ -934,7 +968,13 @@ export function VideoEditorPage() {
         });
         toast({ type: "success", title: "Letterboxing detected — crop set" });
       } else {
-        toast({ type: "info", title: "No letterboxing detected" });
+        toast({
+          type: result.review_suggested ? "warning" : "info",
+          title: result.review_suggested ? "Crop needs review — not auto-applied" : "No letterboxing detected",
+          description: result.review_suggested
+            ? `${Math.round(result.confidence * 100)}% confidence from ${result.sample_count}/${result.samples_expected} samples${result.instability_reason ? ` · ${result.instability_reason.replaceAll("_", " ")}` : ""}`
+            : undefined,
+        });
       }
     } catch {
       toast({ type: "error", title: "Letterbox detection failed" });
@@ -947,6 +987,7 @@ export function VideoEditorPage() {
     if (checkedIds.size === 0) return;
     setBatchDetecting(true);
     let detected = 0;
+    let suggested = 0;
     let failed = 0;
     for (const videoId of checkedIds) {
       try {
@@ -965,6 +1006,8 @@ export function VideoEditorPage() {
               effective_ratio: `${result.crop_w}:${result.crop_h}`,
             },
           });
+        } else if (result.review_suggested) {
+          suggested++;
         }
       } catch {
         failed++;
@@ -973,6 +1016,8 @@ export function VideoEditorPage() {
     setBatchDetecting(false);
     if (detected > 0) {
       toast({ type: "success", title: `Letterboxing detected on ${detected} of ${checkedIds.size} video${checkedIds.size > 1 ? "s" : ""}` });
+    } else if (suggested > 0) {
+      toast({ type: "warning", title: `${suggested} possible crop${suggested === 1 ? "" : "s"} need manual review; none were auto-applied` });
     } else if (failed > 0) {
       toast({ type: "error", title: `Detection failed for ${failed} video${failed > 1 ? "s" : ""}` });
     } else {
@@ -985,6 +1030,7 @@ export function VideoEditorPage() {
     const s = getItemSettings(videoId);
     const req: EncodeRequest = {
       video_id: videoId,
+      profile: s.profile,
       crf: s.crf,
       preset: s.preset,
       audio_passthrough: s.audioPassthrough,
@@ -1031,17 +1077,29 @@ export function VideoEditorPage() {
   }, [buildEncodeRequest, encodeSingle, encodeBatch, toast]);
 
   // ── Encode trigger paths — all open the confirmation modal ──
+  const openEncodeConfirmation = useCallback(async (videoIds: number[]) => {
+    try {
+      const resolved = await Promise.all(
+        videoIds.map(async id => [id, await videoEditorApi.getEncodePlan(buildEncodeRequest(id))] as const),
+      );
+      setEncodeConfirmPlans(Object.fromEntries(resolved));
+      setEncodeConfirmIds(videoIds);
+    } catch {
+      toast({ type: "error", title: "Encode plan is unsafe or could not be resolved" });
+    }
+  }, [buildEncodeRequest, toast]);
+
   const handleApplyChecked = useCallback(() => {
     if (checkedIds.size === 0) {
       toast({ type: "warning", title: "No videos checked" });
       return;
     }
-    setEncodeConfirmIds([...checkedIds]);
-  }, [checkedIds, toast]);
+    void openEncodeConfirmation([...checkedIds]);
+  }, [checkedIds, openEncodeConfirmation, toast]);
 
   const handleEncodeSingle = useCallback((videoId: number) => {
-    setEncodeConfirmIds([videoId]);
-  }, []);
+    void openEncodeConfirmation([videoId]);
+  }, [openEncodeConfirmation]);
 
   // ── Restore original from archive (confirm-gated) ───────
   const handleRestoreConfirm = useCallback(async () => {
@@ -1078,16 +1136,20 @@ export function VideoEditorPage() {
         const cur = prev[id] ?? getItemSettings(id);
         next[id] = {
           ...cur,
+          profile: globalProfile,
           crf: globalCrf,
           preset: globalPreset,
           // Trim requires audio re-encode — never force passthrough back on
           audioPassthrough: cur.trimEnabled ? false : globalAudioPassthrough,
         };
+        void videoEditorApi.patchQueueSettings(id, next[id] as unknown as Record<string, unknown>).catch(() => {
+          toast({ type: "error", title: "Could not persist editor defaults" });
+        });
       }
       return next;
     });
     toast({ type: "success", title: `Defaults applied to ${queueIds.length} queued item${queueIds.length > 1 ? "s" : ""}` });
-  }, [queueIds, getItemSettings, globalCrf, globalPreset, globalAudioPassthrough, toast]);
+  }, [queueIds, getItemSettings, globalProfile, globalCrf, globalPreset, globalAudioPassthrough, toast]);
 
   const handleToggleExcludeFromScan = useCallback(async (videoId: number, currentlyExcluded: boolean) => {
     const newExclude = !currentlyExcluded;
@@ -1205,6 +1267,19 @@ export function VideoEditorPage() {
               </Tooltip>
             </div>
             <p className="text-[10px] text-text-muted">Per-item settings override these defaults.</p>
+            <label className="text-xs text-text-secondary block">
+              Profile
+              <select
+                value={globalProfile}
+                onChange={e => setGlobalProfile(e.target.value as EncodeRequest["profile"])}
+                className="input-sm w-full mt-1"
+              >
+                <option value="source_fidelity">Source fidelity</option>
+                <option value="balanced">Balanced (8-bit SDR)</option>
+                <option value="custom">Custom</option>
+              </select>
+              <span className="text-[10px] text-text-muted">Source fidelity preserves HDR, bit depth, timing, metadata, chapters and audio whenever possible.</span>
+            </label>
             <div className="grid grid-cols-2 gap-2">
               <label className="text-xs text-text-secondary">
                 CRF (Quality)
@@ -1629,6 +1704,18 @@ export function VideoEditorPage() {
                   </h4>
                   <div className="flex flex-wrap items-end gap-3">
                     <label className="text-xs text-text-secondary">
+                      Profile
+                      <select
+                        value={selectedSettings?.profile ?? globalProfile}
+                        onChange={e => updateItemSetting(selectedItem.video_id, { profile: e.target.value as EncodeRequest["profile"] })}
+                        className="input-sm w-auto mt-1 block"
+                      >
+                        <option value="source_fidelity">Source fidelity</option>
+                        <option value="balanced">Balanced (8-bit SDR)</option>
+                        <option value="custom">Custom</option>
+                      </select>
+                    </label>
+                    <label className="text-xs text-text-secondary">
                       Stretch to ratio (DAR)
                       <select
                         value={selectedSettings?.ratio ?? "original"}
@@ -2031,6 +2118,7 @@ export function VideoEditorPage() {
             if (hasTrim && s.trimEnd > 0) trimParts.push(`${s.trimEnd}s from end`);
             return {
               videoId: id,
+              plan: encodeConfirmPlans[id],
               title: item ? `${item.artist} — ${item.title}` : `Video #${id}`,
               cropText: hasCrop && s.crop
                 ? `${s.crop.crop_w}×${s.crop.crop_h} at +${s.crop.crop_x},+${s.crop.crop_y} (from ${s.crop.original_w}×${s.crop.original_h})`
@@ -2045,12 +2133,16 @@ export function VideoEditorPage() {
               hasEdits: hasCrop || !!s.targetDar || hasTrim,
             };
           })}
-          onCancel={() => setEncodeConfirmIds(null)}
+          onCancel={() => {
+            setEncodeConfirmIds(null);
+            setEncodeConfirmPlans({});
+          }}
           onConfirm={() => {
             // Re-validate the snapshot: an encode may have completed (dropping its id
             // from the queue) while the modal was open — never re-encode a finished output.
             const ids = (encodeConfirmIds ?? []).filter(id => queueIds.includes(id) && !encodingVideoIds.has(id));
             setEncodeConfirmIds(null);
+            setEncodeConfirmPlans({});
             if (ids.length) startEncode(ids);
           }}
         />
@@ -2087,6 +2179,7 @@ export function VideoEditorPage() {
 function EncodeConfirmDialog({ rows, onCancel, onConfirm }: {
   rows: {
     videoId: number;
+    plan?: EncodePlan;
     title: string;
     cropText: string | null;
     darText: string | null;
@@ -2114,11 +2207,22 @@ function EncodeConfirmDialog({ rows, onCancel, onConfirm }: {
             <div key={r.videoId} className="rounded border border-surface-border bg-surface/40 px-3 py-2">
               <div className="text-xs font-medium text-text-primary truncate">{r.title}</div>
               <ul className="text-[11px] text-text-secondary mt-1 space-y-0.5">
+                {r.plan && (
+                  <li className="text-text-muted">
+                    Profile: {r.plan.profile.replace("_", " ")} · {r.plan.output.video_encoder}/{r.plan.output.pixel_format}
+                    {r.plan.source.hdr ? " · HDR retained" : ""} · {r.plan.output.extension} · timing/metadata/chapters preserved
+                  </li>
+                )}
                 {r.cropText && <li className="flex items-center gap-1.5"><Scissors size={10} className="text-accent flex-shrink-0" /> Crop: {r.cropText}</li>}
                 {r.darText && <li className="flex items-center gap-1.5"><Film size={10} className="text-blue-400 flex-shrink-0" /> DAR: {r.darText}</li>}
                 {r.trimText && <li className="flex items-center gap-1.5"><Timer size={10} className="text-red-400 flex-shrink-0" /> Trim: {r.trimText}</li>}
                 <li className="text-text-muted">Video: CRF {r.crf} · {r.preset} preset · Audio: {r.audioText}</li>
                 <li className="text-text-muted flex items-center gap-1.5"><Archive size={10} className="flex-shrink-0" /> Original will be archived</li>
+                {r.plan?.warnings.map((warning, index) => (
+                  <li key={index} className="text-amber-400 flex items-start gap-1.5">
+                    <AlertTriangle size={10} className="mt-0.5 flex-shrink-0" /> {warning}
+                  </li>
+                ))}
               </ul>
               {!r.hasEdits && (
                 <div className="flex items-center gap-1.5 text-[11px] text-amber-400 mt-1.5">
@@ -2205,6 +2309,11 @@ function QueueRow({ item, checked, selected, settings, isEncoding, isActiveEncod
           {item.video_codec && <span>· {item.video_codec}</span>}
           {item.letterbox_detected && (
             <span className="text-orange-400">· Letterboxed</span>
+          )}
+          {item.letterbox_review_suggested && (
+            <span className="text-amber-400" title={item.letterbox_instability_reason || undefined}>
+              · Review crop {item.letterbox_confidence != null ? `${Math.round(item.letterbox_confidence * 100)}%` : ""}
+            </span>
           )}
           {isManual && (
             <span className="text-blue-400">· Manual</span>
@@ -2446,11 +2555,6 @@ function VideoPreview({ videoId, originalW, originalH, crop, targetDar, showOver
 
 // ── Export utility for use from VideoDetailPage ───────────
 export function addToVideoEditorQueue(videoIds: number[]) {
-  const current = loadQueueIds();
-  const newIds = videoIds.filter(id => !current.includes(id));
-  saveQueueIds([...current, ...newIds]);
-  // Mark as manually added
-  const manuals = loadManualIds();
-  for (const id of newIds) manuals.add(id);
-  saveManualIds(manuals);
+  void videoEditorApi.addQueueEntries(videoIds, "manual");
+  window.dispatchEvent(new CustomEvent("playarr:editor-queue-added", { detail: videoIds }));
 }

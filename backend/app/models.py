@@ -19,6 +19,7 @@ Tables:
 import enum
 from datetime import datetime, timezone
 from typing import Optional, List
+from uuid import uuid4
 
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, Text, DateTime,
@@ -60,6 +61,7 @@ class JobStatus(str, enum.Enum):
     writing_nfo = "writing_nfo"
     asset_fetch = "asset_fetch"
     finalizing = "finalizing"
+    cancelling = "cancelling"
     complete = "complete"
     failed = "failed"
     cancelled = "cancelled"
@@ -96,6 +98,11 @@ class VideoItem(Base):
     __tablename__ = "video_items"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    stable_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid4()), nullable=False, unique=True, index=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    sidecar_revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
 
     # Identity
     artist: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
@@ -244,6 +251,7 @@ class VideoItem(Base):
     exclude_from_editor_scan: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0", nullable=False,
     )
+    editor_crop_dismissed_evidence_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # Video editor — what type of edit has been applied: 'crop', 'trim', 'both', or None
     editor_edit_type: Mapped[Optional[str]] = mapped_column(
@@ -485,6 +493,14 @@ class QualitySignature(Base):
     letterbox_bar_bottom: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     letterbox_bar_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     letterbox_bar_right: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    letterbox_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    letterbox_sample_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    letterbox_samples_expected: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    letterbox_review_suggested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    letterbox_instability_reason: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    letterbox_evidence_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    letterbox_evidence_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    letterbox_source_checksum: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     video_item: Mapped["VideoItem"] = relationship(back_populates="quality_signature")
 
@@ -568,6 +584,31 @@ class ContributionLog(Base):
     )
 
 
+class ContributionOutbox(Base):
+    """Durable, idempotent TMVDB submission snapshot."""
+    __tablename__ = "contribution_outbox"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    video_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("video_items.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    operation_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False, unique=True, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    envelope_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    eligibility_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default="5")
+    remote_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    response_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 # ---------------------------------------------------------------------------
 # MediaAsset — poster/thumb images
 # ---------------------------------------------------------------------------
@@ -646,6 +687,28 @@ class Genre(Base):
 # ProcessingJob — background job tracking
 # ---------------------------------------------------------------------------
 
+class VideoEditorQueueEntry(Base):
+    """Durable editor draft entry shared by every browser/device."""
+    __tablename__ = "video_editor_queue_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    occurrence_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid4()), unique=True, nullable=False, index=True,
+    )
+    video_id: Mapped[int] = mapped_column(
+        ForeignKey("video_items.id", ondelete="CASCADE"), unique=True, nullable=False, index=True,
+    )
+    source: Mapped[str] = mapped_column(String(30), default="manual", nullable=False)
+    settings_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc), nullable=False,
+    )
+
+
 class ProcessingJob(Base):
     __tablename__ = "processing_jobs"
 
@@ -656,6 +719,18 @@ class ProcessingJob(Base):
 
     # Job identity
     celery_task_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    request_id: Mapped[Optional[str]] = mapped_column(
+        String(80), nullable=True, index=True,
+        default=lambda: __import__(
+            "app.services.request_context", fromlist=["current_request_id"]
+        ).current_request_id(),
+    )
+    operation_id: Mapped[str] = mapped_column(
+        String(80), nullable=False, unique=True, index=True,
+        default=lambda: __import__(
+            "app.services.request_context", fromlist=["new_operation_id"]
+        ).new_operation_id(),
+    )
     job_type: Mapped[str] = mapped_column(String(100), nullable=False)  # "import_url", "rescan", "normalize", "library_scan", "playlist_import"
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.queued, index=True)
 
@@ -695,6 +770,15 @@ class ProcessingJob(Base):
 
     video_item: Mapped[Optional["VideoItem"]] = relationship(back_populates="processing_jobs")
 
+    @property
+    def status_group(self) -> str:
+        from app.services.job_registry import status_group
+        return status_group(self.status)
+
+    @property
+    def job_category(self) -> str:
+        from app.services.job_registry import job_category
+        return job_category(self.job_type)
 
 # ---------------------------------------------------------------------------
 # Settings — global & per-user KV
@@ -708,6 +792,7 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     value_type: Mapped[str] = mapped_column(String(20), default="string")  # string, int, float, bool, json
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
 
     __table_args__ = (
         UniqueConstraint("user_id", "key", name="uq_setting_user_key"),
@@ -763,6 +848,10 @@ class Playlist(Base):
     __tablename__ = "playlists"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    stable_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid4()), nullable=False, unique=True, index=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -784,6 +873,9 @@ class PlaylistEntry(Base):
     __tablename__ = "playlist_entries"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    occurrence_id: Mapped[str] = mapped_column(
+        String(36), default=lambda: str(uuid4()), nullable=False, unique=True, index=True,
+    )
     playlist_id: Mapped[int] = mapped_column(
         ForeignKey("playlists.id", ondelete="CASCADE"), index=True
     )
@@ -797,6 +889,259 @@ class PlaylistEntry(Base):
 
     playlist: Mapped["Playlist"] = relationship(back_populates="entries")
     video_item: Mapped["VideoItem"] = relationship()
+
+
+# ---------------------------------------------------------------------------
+# Durable mutation, sidecar and filesystem operation boundary
+# ---------------------------------------------------------------------------
+
+class MutationCommand(Base):
+    """Idempotent command accepted by an HTTP endpoint or background worker."""
+
+    __tablename__ = "mutation_commands"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4()),
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False, unique=True, index=True)
+    command_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    entity_stable_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    expected_revision: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    actor_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    request_id: Mapped[Optional[str]] = mapped_column(
+        String(80), nullable=True, index=True,
+        default=lambda: __import__(
+            "app.services.request_context", fromlist=["current_request_id"]
+        ).current_request_id(),
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50", index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_mutation_pending_priority", "status", "priority", "created_at"),
+    )
+
+
+class SidecarOutbox(Base):
+    """Durable request to reconcile one database entity to its sidecar."""
+
+    __tablename__ = "sidecar_outbox"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    operation_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("mutation_commands.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    video_id: Mapped[int] = mapped_column(
+        ForeignKey("video_items.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    entity_stable_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    target_path: Mapped[Optional[str]] = mapped_column(String(1200), nullable=True)
+    entity_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    content_hash: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    error_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("video_id", "entity_revision", name="uq_sidecar_outbox_video_revision"),
+    )
+
+
+class FileOperation(Base):
+    """Recoverable journal for media and companion-file transitions."""
+
+    __tablename__ = "file_operations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    command_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("mutation_commands.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    entity_stable_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    operation_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="planned", server_default="planned", index=True)
+    expected_revision: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    plan_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    rollback_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    current_step: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class JobEvent(Base):
+    """Structured stage event used for diagnostics and resumability."""
+
+    __tablename__ = "job_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("processing_jobs.id", ondelete="CASCADE"), nullable=True, index=True,
+    )
+    operation_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    stage: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    input_hash: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    output_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    error_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
+# ---------------------------------------------------------------------------
+# Durable review cases and staged decisions
+# ---------------------------------------------------------------------------
+
+class ReviewCase(Base):
+    __tablename__ = "review_cases"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    stable_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open", server_default="open", index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    trigger_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    dismissed_evidence_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    evidence_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    items: Mapped[List["ReviewCaseItem"]] = relationship(
+        back_populates="review_case", cascade="all, delete-orphan",
+    )
+    edges: Mapped[List["ReviewCaseEdge"]] = relationship(
+        back_populates="review_case", cascade="all, delete-orphan",
+    )
+    plans: Mapped[List["ReviewActionPlan"]] = relationship(
+        back_populates="review_case", cascade="all, delete-orphan",
+    )
+
+
+class ReviewCaseItem(Base):
+    __tablename__ = "review_case_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    case_id: Mapped[int] = mapped_column(
+        ForeignKey("review_cases.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    video_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("video_items.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    video_stable_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(30), nullable=False, default="candidate")
+    evidence_summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    review_case: Mapped["ReviewCase"] = relationship(back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("case_id", "video_stable_id", name="uq_review_case_item_video"),
+    )
+
+
+class ReviewCaseEdge(Base):
+    __tablename__ = "review_case_edges"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    case_id: Mapped[int] = mapped_column(
+        ForeignKey("review_cases.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    left_video_stable_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    right_video_stable_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    evidence_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    evidence_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open", server_default="open")
+
+    review_case: Mapped["ReviewCase"] = relationship(back_populates="edges")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "case_id", "left_video_stable_id", "right_video_stable_id",
+            name="uq_review_case_edge_pair",
+        ),
+    )
+
+
+class ReviewActionPlan(Base):
+    __tablename__ = "review_action_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    case_id: Mapped[int] = mapped_column(
+        ForeignKey("review_cases.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    expected_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    actions_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    consequence_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft", server_default="draft", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    committed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    review_case: Mapped["ReviewCase"] = relationship(back_populates="plans")
+
+
+class ArtistConsolidation(Base):
+    """Display mask over raw artist target names and zero-or-more MBIDs."""
+    __tablename__ = "artist_consolidations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    stable_id: Mapped[str] = mapped_column(String(36), default=lambda: str(uuid4()), unique=True, nullable=False, index=True)
+    mask_name: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc), nullable=False,
+    )
+    targets: Mapped[List["ArtistConsolidationTarget"]] = relationship(
+        back_populates="consolidation", cascade="all, delete-orphan",
+    )
+    mbids: Mapped[List["ArtistConsolidationMbid"]] = relationship(
+        back_populates="consolidation", cascade="all, delete-orphan",
+    )
+
+
+class ArtistConsolidationTarget(Base):
+    __tablename__ = "artist_consolidation_targets"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    consolidation_id: Mapped[int] = mapped_column(
+        ForeignKey("artist_consolidations.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    raw_name: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    provenance: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    mb_artist_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    consolidation: Mapped["ArtistConsolidation"] = relationship(back_populates="targets")
+
+    __table_args__ = (UniqueConstraint("consolidation_id", "raw_name", name="uq_artist_consolidation_target"),)
+
+
+class ArtistConsolidationMbid(Base):
+    __tablename__ = "artist_consolidation_mbids"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    consolidation_id: Mapped[int] = mapped_column(
+        ForeignKey("artist_consolidations.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    mb_artist_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    consolidation: Mapped["ArtistConsolidation"] = relationship(back_populates="mbids")
+
+    __table_args__ = (UniqueConstraint("consolidation_id", "mb_artist_id", name="uq_artist_consolidation_mbid"),)
 
 
 # ---------------------------------------------------------------------------

@@ -1,29 +1,36 @@
+import { lazy, Suspense, type ReactNode } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ToastProvider } from "@/components/Toast";
 import { Layout } from "@/components/Layout";
-import { LibraryPage } from "@/pages/LibraryPage";
-import { ArtistsPage } from "@/pages/ArtistsPage";
-import { YearsPage } from "@/pages/YearsPage";
-import { GenresPage } from "@/pages/GenresPage";
-import { AlbumsPage } from "@/pages/AlbumsPage";
-import { RatingsPage } from "@/pages/RatingsPage";
-import { PlaylistsPage } from "@/pages/PlaylistsPage";
-import { VideoDetailPage } from "@/pages/VideoDetailPage";
-import { QueuePage } from "@/pages/QueuePage";
-import { SettingsPage } from "@/pages/SettingsPage";
-import ReviewQueuePage from "@/pages/ReviewQueuePage";
-import MatchDetailPage from "@/pages/MatchDetailPage";
-import { ImportLibraryPage } from "@/pages/ImportLibraryPage";
-import { NowPlayingPage } from "@/pages/NowPlayingPage";
-import { TvModePage } from "@/pages/TvModePage";
-import { CastModePage } from "@/pages/CastModePage";
-import { VideoEditorPage } from "@/pages/VideoEditorPage";
-import { ScraperTesterPage } from "@/pages/ScraperTesterPage";
-import { NewVideosPage } from "@/pages/NewVideosPage";
-import { QualityPage } from "@/pages/QualityPage";
-import { ArchivePage } from "@/pages/ArchivePage";
-import { MetadataManagerPage } from "@/pages/MetadataManagerPage";
+import { RouteErrorBoundary } from "@/components/RouteErrorBoundary";
+
+const LibraryPage = lazy(() => import("@/pages/LibraryPage").then(module => ({ default: module.LibraryPage })));
+const ArtistsPage = lazy(() => import("@/pages/ArtistsPage").then(module => ({ default: module.ArtistsPage })));
+const YearsPage = lazy(() => import("@/pages/YearsPage").then(module => ({ default: module.YearsPage })));
+const GenresPage = lazy(() => import("@/pages/GenresPage").then(module => ({ default: module.GenresPage })));
+const AlbumsPage = lazy(() => import("@/pages/AlbumsPage").then(module => ({ default: module.AlbumsPage })));
+const RatingsPage = lazy(() => import("@/pages/RatingsPage").then(module => ({ default: module.RatingsPage })));
+const PlaylistsPage = lazy(() => import("@/pages/PlaylistsPage").then(module => ({ default: module.PlaylistsPage })));
+const VideoDetailPage = lazy(() => import("@/pages/VideoDetailPage").then(module => ({ default: module.VideoDetailPage })));
+const QueuePage = lazy(() => import("@/pages/QueuePage").then(module => ({ default: module.QueuePage })));
+const SettingsPage = lazy(() => import("@/pages/SettingsPage").then(module => ({ default: module.SettingsPage })));
+const ReviewQueuePage = lazy(() => import("@/pages/ReviewQueuePage"));
+const MatchDetailPage = lazy(() => import("@/pages/MatchDetailPage"));
+const ImportLibraryPage = lazy(() => import("@/pages/ImportLibraryPage").then(module => ({ default: module.ImportLibraryPage })));
+const NowPlayingPage = lazy(() => import("@/pages/NowPlayingPage").then(module => ({ default: module.NowPlayingPage })));
+const TvModePage = lazy(() => import("@/pages/TvModePage").then(module => ({ default: module.TvModePage })));
+const CastModePage = lazy(() => import("@/pages/CastModePage").then(module => ({ default: module.CastModePage })));
+const VideoEditorPage = lazy(() => import("@/pages/VideoEditorPage").then(module => ({ default: module.VideoEditorPage })));
+const ScraperTesterPage = lazy(() => import("@/pages/ScraperTesterPage").then(module => ({ default: module.ScraperTesterPage })));
+const NewVideosPage = lazy(() => import("@/pages/NewVideosPage").then(module => ({ default: module.NewVideosPage })));
+const QualityPage = lazy(() => import("@/pages/QualityPage").then(module => ({ default: module.QualityPage })));
+const ArchivePage = lazy(() => import("@/pages/ArchivePage").then(module => ({ default: module.ArchivePage })));
+const MetadataManagerPage = lazy(() => import("@/pages/MetadataManagerPage").then(module => ({ default: module.MetadataManagerPage })));
+
+function page(element: ReactNode) {
+  return <RouteErrorBoundary><Suspense fallback={<div className="p-8 text-sm text-text-muted">Loading page…</div>}>{element}</Suspense></RouteErrorBoundary>;
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -43,28 +50,28 @@ function App() {
           <Routes>
             <Route element={<Layout />}>
               <Route index element={<Navigate to="/library" replace />} />
-              <Route path="library" element={<LibraryPage />} />
-              <Route path="artists" element={<ArtistsPage />} />
-              <Route path="years" element={<YearsPage />} />
-              <Route path="genres" element={<GenresPage />} />
-              <Route path="albums" element={<AlbumsPage />} />
-              <Route path="ratings" element={<RatingsPage />} />
-              <Route path="quality" element={<QualityPage />} />
-              <Route path="playlists" element={<PlaylistsPage />} />
-              <Route path="video/:videoId" element={<VideoDetailPage />} />
-              <Route path="queue" element={<QueuePage />} />
-              <Route path="review" element={<ReviewQueuePage />} />
-              <Route path="review/:videoId" element={<MatchDetailPage />} />
-              <Route path="settings" element={<SettingsPage />} />
-              <Route path="library-import" element={<ImportLibraryPage />} />
-              <Route path="now-playing" element={<NowPlayingPage />} />
-              <Route path="tv" element={<TvModePage />} />
-              <Route path="cast" element={<CastModePage />} />
-              <Route path="video-editor" element={<VideoEditorPage />} />
-              <Route path="metadata-manager" element={<MetadataManagerPage />} />
-              <Route path="archive" element={<ArchivePage />} />
-              <Route path="scraper-tester" element={<ScraperTesterPage />} />
-              <Route path="new-videos" element={<NewVideosPage />} />
+              <Route path="library" element={page(<LibraryPage />)} />
+              <Route path="artists" element={page(<ArtistsPage />)} />
+              <Route path="years" element={page(<YearsPage />)} />
+              <Route path="genres" element={page(<GenresPage />)} />
+              <Route path="albums" element={page(<AlbumsPage />)} />
+              <Route path="ratings" element={page(<RatingsPage />)} />
+              <Route path="quality" element={page(<QualityPage />)} />
+              <Route path="playlists" element={page(<PlaylistsPage />)} />
+              <Route path="video/:videoId" element={page(<VideoDetailPage />)} />
+              <Route path="queue" element={page(<QueuePage />)} />
+              <Route path="review" element={page(<ReviewQueuePage />)} />
+              <Route path="review/:videoId" element={page(<MatchDetailPage />)} />
+              <Route path="settings" element={page(<SettingsPage />)} />
+              <Route path="library-import" element={page(<ImportLibraryPage />)} />
+              <Route path="now-playing" element={page(<NowPlayingPage />)} />
+              <Route path="tv" element={page(<TvModePage />)} />
+              <Route path="cast" element={page(<CastModePage />)} />
+              <Route path="video-editor" element={page(<VideoEditorPage />)} />
+              <Route path="metadata-manager" element={page(<MetadataManagerPage />)} />
+              <Route path="archive" element={page(<ArchivePage />)} />
+              <Route path="scraper-tester" element={page(<ScraperTesterPage />)} />
+              <Route path="new-videos" element={page(<NewVideosPage />)} />
               <Route path="*" element={<Navigate to="/library" replace />} />
             </Route>
           </Routes>

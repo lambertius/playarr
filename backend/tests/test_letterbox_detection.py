@@ -36,6 +36,9 @@ def test_symmetric_letterbox_detected(monkeypatch):
     assert r["bar_top"] == 140 and r["bar_bottom"] == 140
     assert r["bar_left"] == 0 and r["bar_right"] == 0
     assert r["crop_y"] == 140 and r["crop_h"] == 800 and r["crop_w"] == 1920
+    assert r["confidence"] == 1.0
+    assert r["sample_count"] == 6
+    assert r["auto_apply"] is True
 
 
 def test_no_letterbox(monkeypatch):
@@ -83,6 +86,8 @@ def test_asymmetric_reading_rejected(monkeypatch):
     r = ve.detect_letterbox("x.mkv")
     assert r["detected"] is False
     assert r["crop_h"] == 1080
+    assert r["review_suggested"] is True
+    assert r["instability_reason"] == "asymmetric_bars"
 
 
 def test_tiny_bars_below_threshold(monkeypatch):
@@ -90,6 +95,17 @@ def test_tiny_bars_below_threshold(monkeypatch):
     _patch(monkeypatch, (1920, 1080), [(1920, 1068, 0, 6)])
     r = ve.detect_letterbox("x.mkv")
     assert r["detected"] is False
+    assert r["review_suggested"] is True
+    assert r["instability_reason"] == "crop_below_meaningful_threshold"
+
+
+def test_one_sample_never_auto_applies(monkeypatch):
+    _patch(monkeypatch, (1920, 1080), [(1920, 800, 0, 140)], duration=10.0)
+    r = ve.detect_letterbox("x.mkv")
+    assert r["detected"] is False
+    assert r["review_suggested"] is True
+    assert r["confidence"] <= 0.55
+    assert r["instability_reason"] == "insufficient_samples"
 
 
 def test_parse_filters_dark_and_out_of_bounds():

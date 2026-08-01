@@ -64,6 +64,18 @@ _HTTPX_ALLOWLIST = {
     str((_APP_DIR / "services" / "artist_album_scraper.py").resolve()),  # scrapes text metadata
     str((_APP_DIR / "metadata" / "providers" / "coverartarchive.py").resolve()),  # returns URLs
     str((_APP_DIR / "metadata" / "providers" / "wikipedia.py").resolve()),  # scrapes article text
+    # Runtime integrations that exchange JSON/text or resolve image URLs but
+    # never persist remote image bytes themselves.
+    str((_APP_DIR / "main.py").resolve()),  # GitHub release update check
+    str((_APP_DIR / "metadata" / "providers" / "tmvdb.py").resolve()),  # TMVDB JSON API
+    str((_APP_DIR / "pipeline_lib" / "metadata" / "providers" / "wikipedia.py").resolve()),
+    str((_APP_DIR / "pipeline_url" / "metadata" / "providers" / "wikipedia.py").resolve()),
+    str((_APP_DIR / "pipeline_lib" / "services" / "ai_summary.py").resolve()),
+    str((_APP_DIR / "pipeline_url" / "services" / "ai_summary.py").resolve()),
+    str((_APP_DIR / "scraper" / "artist_album_scraper.py").resolve()),
+    str((_APP_DIR / "scraper" / "metadata_resolver.py").resolve()),
+    str((_APP_DIR / "scraper" / "ai" / "source_resolution.py").resolve()),
+    str((_APP_DIR / "services" / "ytdlp_updater.py").resolve()),  # GitHub release binary check
 }
 
 _HTTPX_RE = re.compile(r"\bhttpx\.(get|post|Client|AsyncClient)\b", re.IGNORECASE)
@@ -98,6 +110,7 @@ class TestNoRawHttpxImageFetch:
 
 _PIL_SAVE_ALLOWLIST = {
     _ARTWORK_SERVICE,
+    str((_APP_DIR / "services" / "theatre_backdrop.py").resolve()),  # generated collage
     str((_APP_DIR / "ai" / "scene_analysis.py").resolve()),  # ffmpeg → PIL thumb extraction
 }
 

@@ -948,6 +948,21 @@ def _persist_candidate(db: Session, candidate: RecommendationCandidate,
     ).first()
 
     trust = candidate.trust_result
+    required_values = {
+        "title": candidate.title,
+        "artist": candidate.artist,
+        "thumbnail_url": candidate.thumbnail_url,
+        "channel": candidate.channel,
+        "duration_seconds": candidate.duration_seconds,
+        "url": candidate.url,
+    }
+    missing_fields = [key for key, value in required_values.items() if value in (None, "")]
+    completeness_score = (len(required_values) - len(missing_fields)) / len(required_values)
+    metadata = dict(candidate.metadata or {})
+    metadata["completeness_score"] = round(completeness_score, 3)
+    metadata["missing_fields"] = missing_fields
+    metadata.setdefault("provider_errors", [])
+
     data = {
         "url": candidate.url,
         "title": candidate.title,
@@ -965,7 +980,7 @@ def _persist_candidate(db: Session, candidate: RecommendationCandidate,
         "recommendation_score": score,
         "recommendation_reason_json": candidate.reasons or [],
         "trust_reasons_json": (trust.reasons + trust.penalties) if trust else [],
-        "metadata_json": candidate.metadata,
+        "metadata_json": metadata,
         "updated_at": datetime.now(timezone.utc),
     }
 
@@ -1067,6 +1082,10 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
             seen_ids.add(c.provider_video_id)
             deduped.append((c, s))
 
+    # Diversity-aware reranking: prefer no adjacent duplicate artist and cap
+    # each artist at 20% of the visible category where the pool permits.
+    deduped = _diversity_rerank(deduped, limit)
+
     # Persist ALL candidates (extras serve as backfill pool when
     # snapshot videos are dismissed), but only put top N in snapshot.
     sv_ids = []
@@ -1081,6 +1100,60 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
     logger.info(f"Category '{category}': generated {len(deduped)} suggestions "
                 f"({len(snapshot_ids)} in snapshot, {len(sv_ids) - len(snapshot_ids)} backfill pool)")
     return len(deduped)
+
+
+def _diversity_rerank(scored: list[tuple], limit: int) -> list[tuple]:
+    """Reorder scored candidates without discarding the backfill pool."""
+    if not scored or limit <= 1:
+        return scored
+    cap = max(1, int(limit * 0.20))
+    remaining = list(scored)
+    visible: list[tuple] = []
+    artist_counts: dict[str, int] = {}
+
+    def artist_key(item: tuple) -> str:
+        return (item[0].artist or "").strip().casefold()
+
+    while remaining and len(visible) < limit:
+        previous = artist_key(visible[-1]) if visible else ""
+
+        # Prefer a candidate satisfying both diversity rules. If that cannot
+        # fill the requested category, relax the cap before adjacency so an
+        # A/B/A/B pool still produces the best possible visible order.
+        selected_index = next(
+            (
+                index
+                for index, item in enumerate(remaining)
+                if not artist_key(item)
+                or (
+                    artist_key(item) != previous
+                    and artist_counts.get(artist_key(item), 0) < cap
+                )
+            ),
+            None,
+        )
+        if selected_index is None:
+            selected_index = next(
+                (
+                    index
+                    for index, item in enumerate(remaining)
+                    if not artist_key(item) or artist_key(item) != previous
+                ),
+                None,
+            )
+        if selected_index is None:
+            selected_index = 0
+
+        selected = remaining.pop(selected_index)
+        visible.append(selected)
+        artist = artist_key(selected)
+        if artist:
+            artist_counts[artist] = artist_counts.get(artist, 0) + 1
+
+    # Keep every non-visible candidate in original score order for backfill.
+    selected_ids = {id(item) for item in visible}
+    deferred = [item for item in scored if id(item) not in selected_ids]
+    return visible + deferred
 
 
 def _update_snapshot(db: Session, category: str, video_ids: list[int]):
@@ -1253,6 +1326,12 @@ def get_feed(db: Session) -> dict:
 
 def _serialize_video(v: SuggestedVideo, in_cart: bool = False) -> dict:
     """Serialize a SuggestedVideo to API response dict."""
+    metadata = v.metadata_json or {}
+    required = [v.title, v.artist, v.thumbnail_url, v.channel, v.duration_seconds, v.url]
+    completeness = metadata.get(
+        "completeness_score",
+        round(sum(value not in (None, "") for value in required) / len(required), 3),
+    )
     return {
         "id": v.id,
         "provider": v.provider,
@@ -1275,4 +1354,7 @@ def _serialize_video(v: SuggestedVideo, in_cart: bool = False) -> dict:
         "reasons": v.recommendation_reason_json or [],
         "trust_reasons": v.trust_reasons_json or [],
         "in_cart": in_cart,
+        "completeness_score": completeness,
+        "missing_fields": metadata.get("missing_fields", []),
+        "provider_errors": metadata.get("provider_errors", []),
     }

@@ -37,18 +37,20 @@ function patchArchivePrefs(patch: Partial<ArchivePrefs>): void {
 }
 
 // ── Reason config ───────────────────────────────────────
-type ArchiveReason = "all" | "redownload" | "trim" | "crop" | "both";
+type ArchiveReason = "all" | "edit" | "redownload" | "trim" | "crop" | "both" | "restore_conflict" | "orphaned";
 
 const REASON_CONFIG: Record<string, { label: string; icon: React.ReactNode; color: string; badgeColor: string }> = {
+  edit: { label: "Edit", icon: <Film size={12} />, color: "bg-cyan-500/10 text-cyan-400", badgeColor: "bg-cyan-500/15 text-cyan-400 border-cyan-500/20" },
   redownload: { label: "Redownload", icon: <Download size={12} />, color: "bg-blue-500/10 text-blue-400", badgeColor: "bg-blue-500/15 text-blue-400 border-blue-500/20" },
   trim: { label: "Trim", icon: <Scissors size={12} />, color: "bg-orange-500/10 text-orange-400", badgeColor: "bg-orange-500/15 text-orange-400 border-orange-500/20" },
   crop: { label: "Crop", icon: <Film size={12} />, color: "bg-purple-500/10 text-purple-400", badgeColor: "bg-purple-500/15 text-purple-400 border-purple-500/20" },
   both: { label: "Trim + Crop", icon: <Scissors size={12} />, color: "bg-pink-500/10 text-pink-400", badgeColor: "bg-pink-500/15 text-pink-400 border-pink-500/20" },
+  restore_conflict: { label: "Restore conflict", icon: <RotateCcw size={12} />, color: "bg-amber-500/10 text-amber-400", badgeColor: "bg-amber-500/15 text-amber-400 border-amber-500/20" },
+  orphaned: { label: "Orphaned", icon: <FolderOpen size={12} />, color: "bg-red-500/10 text-red-400", badgeColor: "bg-red-500/15 text-red-400 border-red-500/20" },
 };
 
-/** Normalize legacy "edit" reason to "crop" */
 function normalizeReason(reason: string): string {
-  return reason === "edit" ? "crop" : reason;
+  return reason || "edit";
 }
 
 function ReasonBadge({ reason }: { reason: string }) {
@@ -318,7 +320,9 @@ export function ArchivePage() {
     if (!items) return [];
     let result = items;
     if (reasonFilter !== "all") {
-      result = result.filter((i) => normalizeReason(i.reason) === reasonFilter);
+      result = reasonFilter === "orphaned"
+        ? result.filter((i) => !i.video_id || i.integrity_status === "orphaned_owner")
+        : result.filter((i) => normalizeReason(i.reason) === reasonFilter);
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -329,13 +333,16 @@ export function ArchivePage() {
     return result;
   }, [items, reasonFilter, searchQuery]);
 
-  // Reason counts — normalize "edit" → "crop"
+  // Reason and maintenance counts.
   const reasonCounts = useMemo(() => {
     if (!items) return {};
     const counts: Record<string, number> = {};
     for (const item of items) {
       const r = normalizeReason(item.reason);
       counts[r] = (counts[r] || 0) + 1;
+      if (!item.video_id || item.integrity_status === "orphaned_owner") {
+        counts.orphaned = (counts.orphaned || 0) + 1;
+      }
     }
     return counts;
   }, [items]);
@@ -390,14 +397,32 @@ export function ArchivePage() {
 
   // Actions
   const handleRestore = useCallback(async (item: ArchiveItem) => {
-    const ok = await confirm({
-      title: "Restore from archive?",
-      description: `This will restore "${item.artist} — ${item.title}" from the archive back to the library, replacing the current file if one exists.`,
-    });
-    if (!ok) return;
     try {
-      await restoreMutation.mutateAsync(item.folder);
-      toast({ type: "success", title: "Restored from archive" });
+      const plan = await settingsApi.archiveRestorePreview(item.folder);
+      if (!plan.restore_eligible) {
+        toast({ type: "error", title: "Archive integrity check failed; restore was not started" });
+        return;
+      }
+      const conflict = plan.current_exists
+        ? " The current file will first be archived as a recoverable restore conflict; it will not be discarded."
+        : "";
+      const companionSummary = plan.companion_files.length
+        ? ` Companion files reviewed: ${plan.companion_files.join(", ")}.`
+        : " No companion files are affected.";
+      const reviewSummary = plan.related_review_case_ids.length
+        ? ` Related review cases: ${plan.related_review_case_ids.join(", ")}.`
+        : "";
+      const ok = await confirm({
+        title: "Commit restore plan?",
+        description: `Restore "${item.artist} — ${item.title}" to ${plan.current_path || plan.original_path || "the library"}.${conflict}${companionSummary}${reviewSummary} Operation ${plan.operation_id}.`,
+      });
+      if (!ok) return;
+      const result = await restoreMutation.mutateAsync({
+        folder: item.folder,
+        operationId: plan.operation_id,
+        conflictChoice: plan.current_exists ? "archive_current" : undefined,
+      });
+      toast({ type: "success", title: `Restored from archive (${result.operation_id})` });
       setSelectedFolders((prev) => { const n = new Set(prev); n.delete(item.folder); return n; });
     } catch (e: any) {
       toast({ type: "error", title: e?.response?.data?.detail || "Restore failed" });
@@ -529,7 +554,7 @@ export function ArchivePage() {
           onClick={() => handleReasonChange("all")}
           selected={reasonFilter === "all"}
         />
-        {(["redownload", "trim", "crop", "both"] as const).map((reason) => {
+        {(["edit", "redownload", "trim", "crop", "both", "restore_conflict", "orphaned"] as const).map((reason) => {
           const config = REASON_CONFIG[reason];
           const count = reasonCounts[reason] ?? 0;
           return (

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -29,6 +29,7 @@ class PlaylistUpdate(BaseModel):
 
 class PlaylistEntryOut(BaseModel):
     id: int
+    occurrence_id: str
     video_id: int
     position: int
     artist: str
@@ -42,6 +43,8 @@ class PlaylistEntryOut(BaseModel):
 
 class PlaylistOut(BaseModel):
     id: int
+    stable_id: str
+    revision: int
     name: str
     description: Optional[str] = None
     entry_count: int = 0
@@ -53,6 +56,8 @@ class PlaylistOut(BaseModel):
 
 class PlaylistSummary(BaseModel):
     id: int
+    stable_id: str
+    revision: int
     name: str
     description: Optional[str] = None
     entry_count: int = 0
@@ -70,8 +75,13 @@ class AddMultipleRequest(BaseModel):
 class ReorderRequest(BaseModel):
     entry_ids: List[int]
 
+class PlaylistBatchEdit(BaseModel):
+    expected_revision: int
+    ordered_occurrence_ids: List[str]
+    removed_occurrence_ids: List[str] = Field(default_factory=list)
+
 class SortRequest(BaseModel):
-    field: Literal["artist", "title", "year"]
+    field: Literal["artist", "title", "album", "year"]
     direction: Literal["asc", "desc"] = "asc"
 
 class PlaylistMembership(BaseModel):
@@ -96,6 +106,7 @@ def _entry_out(entry: PlaylistEntry) -> PlaylistEntryOut:
     has_poster = any(a.asset_type == "poster" for a in vi.media_assets) if vi else False
     return PlaylistEntryOut(
         id=entry.id,
+        occurrence_id=entry.occurrence_id,
         video_id=entry.video_id,
         position=entry.position,
         artist=vi.artist if vi else "Unknown",
@@ -109,6 +120,8 @@ def _entry_out(entry: PlaylistEntry) -> PlaylistEntryOut:
 def _playlist_out(p: Playlist) -> PlaylistOut:
     return PlaylistOut(
         id=p.id,
+        stable_id=p.stable_id,
+        revision=p.revision,
         name=p.name,
         description=p.description,
         entry_count=len(p.entries),
@@ -120,6 +133,8 @@ def _playlist_out(p: Playlist) -> PlaylistOut:
 def _playlist_summary(p: Playlist, count: int) -> PlaylistSummary:
     return PlaylistSummary(
         id=p.id,
+        stable_id=p.stable_id,
+        revision=p.revision,
         name=p.name,
         description=p.description,
         entry_count=count,
@@ -164,6 +179,7 @@ def update_playlist(playlist_id: int, data: PlaylistUpdate, db: Session = Depend
         p.name = data.name
     if data.description is not None:
         p.description = data.description
+    p.revision += 1
     db.commit()
     db.refresh(p)
     return _playlist_out(p)
@@ -194,6 +210,7 @@ def add_entry(playlist_id: int, data: AddEntryRequest, db: Session = Depends(get
     max_pos = max((e.position for e in p.entries), default=-1)
     entry = PlaylistEntry(playlist_id=playlist_id, video_id=data.video_id, position=max_pos + 1)
     db.add(entry)
+    p.revision += 1
     p.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(entry)
@@ -221,6 +238,7 @@ def add_entries_batch(playlist_id: int, data: AddMultipleRequest, db: Session = 
         next_pos += 1
     if results:
         p.updated_at = datetime.now(timezone.utc)
+        p.revision += 1
     db.commit()
     for e in results:
         db.refresh(e)
@@ -238,6 +256,7 @@ def remove_entry(playlist_id: int, entry_id: int, db: Session = Depends(get_db))
     playlist = db.query(Playlist).get(playlist_id)
     if playlist:
         playlist.updated_at = datetime.now(timezone.utc)
+        playlist.revision += 1
     db.delete(entry)
     db.commit()
 
@@ -266,7 +285,56 @@ def reorder_entries(playlist_id: int, data: ReorderRequest, db: Session = Depend
         entry.position = pos
         pos += 1
     p.updated_at = datetime.now(timezone.utc)
+    p.revision += 1
     db.commit()
+    return _playlist_out(_playlist_or_404(db, playlist_id))
+
+
+@router.put("/{playlist_id}/entries:batch-edit", response_model=PlaylistOut)
+def batch_edit_entries(
+    playlist_id: int,
+    data: PlaylistBatchEdit,
+    db: Session = Depends(get_db),
+):
+    """Atomically apply a playlist draft with optimistic revision checking."""
+    p = _playlist_or_404(db, playlist_id)
+    if p.revision != data.expected_revision:
+        raise HTTPException(status_code=409, detail={
+            "code": "stale_revision",
+            "message": "The playlist changed in another browser. Reload before saving.",
+            "operation_id": None,
+            "retryable": True,
+            "field_errors": {"expected_revision": f"current revision is {p.revision}"},
+            "diagnostics_id": None,
+            "current": _playlist_out(p).model_dump(mode="json"),
+        })
+
+    entries = {entry.occurrence_id: entry for entry in p.entries}
+    removed = set(data.removed_occurrence_ids)
+    ordered = data.ordered_occurrence_ids
+    if len(ordered) != len(set(ordered)):
+        raise HTTPException(status_code=422, detail="ordered_occurrence_ids contains duplicates")
+    if not removed.issubset(entries):
+        raise HTTPException(status_code=422, detail="removed_occurrence_ids contains unknown entries")
+    expected_remaining = set(entries) - removed
+    if set(ordered) != expected_remaining:
+        missing = sorted(expected_remaining - set(ordered))
+        unknown = sorted(set(ordered) - expected_remaining)
+        raise HTTPException(status_code=422, detail={
+            "code": "incomplete_playlist_draft",
+            "message": "The final order must contain every non-removed occurrence exactly once.",
+            "missing": missing,
+            "unknown": unknown,
+        })
+
+    for occurrence_id in removed:
+        db.delete(entries[occurrence_id])
+    for position, occurrence_id in enumerate(ordered):
+        entries[occurrence_id].position = position
+    p.revision += 1
+    p.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.expire_all()
     return _playlist_out(_playlist_or_404(db, playlist_id))
 
 
@@ -293,6 +361,7 @@ def sort_entries(playlist_id: int, data: SortRequest, db: Session = Depends(get_
     for pos, entry in enumerate(ordered):
         entry.position = pos
     p.updated_at = datetime.now(timezone.utc)
+    p.revision += 1
     db.commit()
     return _playlist_out(_playlist_or_404(db, playlist_id))
 

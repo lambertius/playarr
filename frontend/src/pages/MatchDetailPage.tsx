@@ -9,7 +9,6 @@ import {
 
   useUnpinMatch,
   useUndoResolve,
-  useExportKodi,
 } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -40,7 +39,6 @@ export default function MatchDetailPage() {
   const triggerResolve = useTriggerResolve();
   const unpinMutation = useUnpinMatch();
   const undoMutation = useUndoResolve();
-  const exportMutation = useExportKodi();
 
   const isLoading = loadingVideo || loadingMatch;
 
@@ -107,14 +105,6 @@ export default function MatchDetailPage() {
     }
   };
 
-  const handleExport = async () => {
-    try {
-      await exportMutation.mutateAsync({ video_ids: [videoId] });
-      toast({ type: "success", title: "NFO exported" });
-    } catch {
-      toast({ type: "error", title: "Export failed" });
-    }
-  };
 
   const handleManualSelect = (_type: SearchEntityType, _result: ManualSearchResult) => {
     toast({ type: "info", title: `Selected "${_result.name}" — manual candidate injection not yet wired` });
@@ -183,9 +173,6 @@ export default function MatchDetailPage() {
           </Tooltip>
           {hasMatch && (
             <>
-              <button onClick={handleExport} className="btn-ghost btn-sm" disabled={exportMutation.isPending}>
-                Export NFO
-              </button>
               <button onClick={handleUndo} className="btn-danger btn-sm" disabled={undoMutation.isPending}>
                 Undo
               </button>

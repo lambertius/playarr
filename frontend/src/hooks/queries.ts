@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, exportApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi, metadataManagerApi, toolsApi } from "@/lib/api";
+import { libraryApi, jobsApi, settingsApi, statsApi, resolveApi, reviewApi, searchApi, exportApi, aiApi, libraryImportApi, playlistApi, videoEditorApi, scraperTestApi, newVideosApi, metadataManagerApi, toolsApi, operationsApi } from "@/lib/api";
 import type {
   LibraryParams, JobsParams, VideoItemUpdate, FacetFilterParams,
   ImportRequest, NormalizeRequest, BatchRescanRequest, SettingUpdate,
@@ -12,7 +12,7 @@ import type {
   LibraryImportScanRequest, LibraryImportStartRequest, RegexPreviewRequest,
   ExistingDetailsRequest,
   CropPreviewRequest, EncodeRequest,
-  ScraperTestRequest,
+  ScraperTestRequest, JobPageParams,
   PlaylistSortField, SortDirection,
 } from "@/types";
 
@@ -29,6 +29,8 @@ export const qk = {
   videoRatings: (params?: FacetFilterParams) => ["videoRatings", params] as const,
   qualityBuckets: (params?: FacetFilterParams) => ["qualityBuckets", params] as const,
   jobs: (params?: JobsParams) => ["jobs", params] as const,
+  jobPage: (params: JobPageParams) => ["jobPage", params] as const,
+  operationHealth: ["operationHealth"] as const,
   job: (id: number) => ["job", id] as const,
   jobLog: (id: number) => ["jobLog", id] as const,
   settings: ["settings"] as const,
@@ -461,7 +463,10 @@ export function useRetryJob() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => jobsApi.retry(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      qc.invalidateQueries({ queryKey: ["jobPage"] });
+    },
   });
 }
 
@@ -469,7 +474,10 @@ export function useCancelJob() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => jobsApi.cancel(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      qc.invalidateQueries({ queryKey: ["jobPage"] });
+    },
   });
 }
 
@@ -505,6 +513,24 @@ export function useJobs(params?: JobsParams) {
       );
       return hasActive ? 3_000 : 15_000;
     },
+  });
+}
+
+export function useJobPage(params: JobPageParams) {
+  return useQuery({
+    queryKey: qk.jobPage(params),
+    queryFn: () => jobsApi.page(params),
+    placeholderData: keepPreviousData,
+    refetchInterval: (query) =>
+      (query.state.data?.status_counts.active ?? 0) > 0 ? 3_000 : 15_000,
+  });
+}
+
+export function useOperationHealth() {
+  return useQuery({
+    queryKey: qk.operationHealth,
+    queryFn: operationsApi.health,
+    refetchInterval: 10_000,
   });
 }
 
@@ -1146,7 +1172,10 @@ export function useUpdateYtdlp() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => toolsApi.ytdlpUpdate(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.ytdlpStatus }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.ytdlpStatus });
+      qc.invalidateQueries({ queryKey: ["jobPage"] });
+    },
   });
 }
 
@@ -1244,7 +1273,13 @@ export function useArchiveItems() {
 export function useArchiveRestore() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (folder: string) => settingsApi.archiveRestore(folder),
+    mutationFn: (input: string | {
+      folder: string;
+      operationId: string;
+      conflictChoice?: "archive_current" | "replace_current";
+    }) => typeof input === "string"
+      ? settingsApi.archiveRestore(input)
+      : settingsApi.archiveRestoreCommit(input.folder, input.operationId, input.conflictChoice),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["archiveItems"] });
       qc.invalidateQueries({ queryKey: ["library"] });
@@ -1564,6 +1599,34 @@ export function useUpdateEntitySources() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["entitySources"] });
       qc.invalidateQueries({ queryKey: ["artworkEntities"] });
+    },
+  });
+}
+
+export function useBatchEditPlaylist() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      playlistId,
+      expectedRevision,
+      orderedOccurrenceIds,
+      removedOccurrenceIds,
+    }: {
+      playlistId: number;
+      expectedRevision: number;
+      orderedOccurrenceIds: string[];
+      removedOccurrenceIds: string[];
+    }) => playlistApi.batchEdit(
+      playlistId,
+      expectedRevision,
+      orderedOccurrenceIds,
+      removedOccurrenceIds,
+    ),
+    onSuccess: (res, { playlistId }) => {
+      qc.setQueryData(qk.playlist(playlistId), res);
+      qc.invalidateQueries({ queryKey: qk.playlist(playlistId) });
+      qc.invalidateQueries({ queryKey: qk.playlists });
+      qc.invalidateQueries({ queryKey: ["playlistsForVideo"] });
     },
   });
 }

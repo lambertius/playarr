@@ -9,6 +9,9 @@ Handles:
 - Bulk sync operations
 """
 import logging
+import hashlib
+import json
+from uuid import NAMESPACE_URL, uuid5
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -40,6 +43,74 @@ class TMVDBPushRequest(BaseModel):
 
 class TMVDBBulkPushRequest(BaseModel):
     video_ids: list[int]
+
+
+def _pull_candidates(video, result, db: Session) -> dict:
+    """Convert remote values to reviewed field candidates without applying."""
+    from app.models import ReviewCase, ReviewCaseItem
+
+    locked = set(video.locked_fields or [])
+    candidates = []
+    conflicts = []
+    for field, proposed in (result.fields or {}).items():
+        current = getattr(video, field, None)
+        conflict = current not in (None, "") and current != proposed
+        candidate = {
+            "field": field,
+            "current": current,
+            "proposed": proposed,
+            "provenance": (result.field_provenance or {}).get(field),
+            "confidence": result.confidence,
+            "locked": field in locked,
+            "conflict": conflict,
+            "auto_applicable": current in (None, "") and field not in locked,
+        }
+        candidates.append(candidate)
+        if conflict:
+            conflicts.append(candidate)
+    review_case_id = None
+    if conflicts:
+        material = {
+            "video_stable_id": video.stable_id,
+            "provider": "tmvdb",
+            "conflicts": conflicts,
+        }
+        encoded = json.dumps(material, sort_keys=True, default=str).encode("utf-8")
+        evidence_hash = hashlib.sha256(encoded).hexdigest()
+        stable_id = str(uuid5(NAMESPACE_URL, f"playarr:tmvdb-conflict:{video.stable_id}"))
+        case = db.query(ReviewCase).filter(ReviewCase.stable_id == stable_id).one_or_none()
+        if case is None:
+            case = ReviewCase(
+                stable_id=stable_id,
+                category="tmvdb_conflict",
+                trigger_code="tmvdb_pull_conflict",
+                evidence_hash=evidence_hash,
+                evidence_json=material,
+            )
+            db.add(case)
+            db.flush()
+            case.items.append(ReviewCaseItem(
+                video_id=video.id,
+                video_stable_id=video.stable_id,
+                role="current",
+                evidence_summary_json={"artist": video.artist, "title": video.title},
+            ))
+        elif case.evidence_hash != evidence_hash:
+            case.evidence_hash = evidence_hash
+            case.evidence_json = material
+            case.revision += 1
+            case.status = "open"
+            case.resolved_at = None
+        db.commit()
+        review_case_id = case.stable_id
+    return {
+        "status": "found",
+        "fields": result.fields,
+        "candidates": candidates,
+        "confidence": result.confidence,
+        "field_provenance": result.field_provenance,
+        "review_case_id": review_case_id,
+    }
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -128,12 +199,7 @@ def pull_metadata(req: TMVDBPullRequest, db: Session = Depends(get_db)):
     if not result:
         return {"status": "not_found", "message": "No match found in TMVDB"}
 
-    return {
-        "status": "found",
-        "fields": result.fields,
-        "confidence": result.confidence,
-        "field_provenance": result.field_provenance,
-    }
+    return _pull_candidates(video, result, db)
 
 
 @router.post("/pull/fingerprint")
@@ -156,69 +222,7 @@ def pull_by_fingerprint(req: TMVDBPullByFingerprintRequest, db: Session = Depend
     if not result:
         return {"status": "not_found", "message": "Fingerprint not recognised by TMVDB"}
 
-    return {
-        "status": "found",
-        "fields": result.fields,
-        "confidence": result.confidence,
-        "field_provenance": result.field_provenance,
-    }
-
-
-def _last_pushed_hash(db: Session, video_id: int) -> Optional[str]:
-    """Return the payload_hash of the most recent successful push for a video."""
-    from app.models import ContributionLog
-    row = (
-        db.query(ContributionLog)
-        .filter(
-            ContributionLog.video_id == video_id,
-            ContributionLog.status == "submitted",
-        )
-        .order_by(ContributionLog.created_at.desc())
-        .first()
-    )
-    return row.payload_hash if row else None
-
-
-def _push_one(db: Session, provider, video, instance_user_id: str,
-              operation: str, force: bool = False) -> dict:
-    """Build the envelope, push it, and record a ContributionLog entry.
-
-    Returns {"status": "submitted"|"skipped"|"failed", ...}.
-    Idempotent: skips when an identical payload was already accepted (unless force).
-    """
-    from app.models import ContributionLog
-    from app.provenance import build_contribution_envelope
-
-    envelope = build_contribution_envelope(video, instance_user_id)
-    payload_hash = envelope["payload_hash"]
-
-    if not force and _last_pushed_hash(db, video.id) == payload_hash:
-        return {"status": "skipped", "video_id": video.id, "reason": "unchanged"}
-
-    try:
-        result = provider.push_track(envelope)
-    except Exception as e:  # network/transport failure
-        logger.warning(f"TMVDB push failed for video {video.id}: {e}")
-        result = None
-
-    status = "submitted" if result else "failed"
-    remote_id = str(result.get("id")) if result and result.get("id") is not None else None
-
-    db.add(ContributionLog(
-        video_id=video.id,
-        instance_user_id=instance_user_id,
-        target="tmvdb",
-        operation=operation,
-        playarr_track_id=video.playarr_track_id,
-        playarr_video_id=video.playarr_video_id,
-        payload_hash=payload_hash,
-        status=status,
-        remote_id=remote_id,
-        response=result if isinstance(result, dict) else None,
-    ))
-    db.commit()
-
-    return {"status": status, "video_id": video.id, "tmvdb_id": remote_id}
+    return _pull_candidates(video, result, db)
 
 
 @router.post("/push")
@@ -226,25 +230,39 @@ def push_metadata(req: TMVDBPushRequest, force: bool = False, db: Session = Depe
     """
     Push local metadata for a video to TMVDB.
 
-    Packages the video's full provenance envelope (every field tagged with its
-    source, who set/verified it, trust level, and all identity keys) and submits
-    it to the community database, recording the contribution for idempotency.
+    Accepts an immutable, eligibility-gated snapshot into the durable outbox.
+    Network delivery happens after this request commits.
     """
     from app.models import VideoItem
     from app.user_identity import get_instance_user_id
-    provider = _require_provider(db)
+    if not _get_provider(db):
+        _require_provider(db)
 
     video = db.query(VideoItem).get(req.video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
     instance_user_id = get_instance_user_id(db)
-    res = _push_one(db, provider, video, instance_user_id, "push", force=force)
-    if res["status"] == "submitted":
-        return {"status": "submitted", "tmvdb_id": res.get("tmvdb_id"), "message": "Data submitted to TMVDB"}
-    if res["status"] == "skipped":
-        return {"status": "skipped", "message": "Already up to date in TMVDB (unchanged since last push)"}
-    return {"status": "error", "message": "Failed to submit data to TMVDB"}
+    from app.services.contribution_outbox import enqueue_contribution
+    row, eligibility, created = enqueue_contribution(
+        db, video, instance_user_id, force=force,
+    )
+    if row is None:
+        return {
+            "status": "ineligible",
+            "message": "No verified, edited, or locked fields are eligible for submission",
+            "eligibility": eligibility["eligibility"],
+        }
+    db.commit()
+    return {
+        "status": row.status,
+        "outbox_id": row.id,
+        "operation_id": row.operation_id,
+        "created": created,
+        "eligible_fields": eligibility["eligible_fields"],
+        "excluded_fields": eligibility["excluded_fields"],
+        "message": "Contribution queued for TMVDB" if created else f"Contribution already {row.status}",
+    }
 
 
 @router.post("/push/bulk")
@@ -252,31 +270,58 @@ def push_bulk(req: TMVDBBulkPushRequest, force: bool = False, db: Session = Depe
     """Push metadata for multiple videos to TMVDB."""
     from app.models import VideoItem
     from app.user_identity import get_instance_user_id
-    provider = _require_provider(db)
+    if not _get_provider(db):
+        _require_provider(db)
     instance_user_id = get_instance_user_id(db)
 
-    results = {"submitted": 0, "failed": 0, "skipped": 0, "not_found": 0}
+    from app.services.contribution_outbox import enqueue_contribution
+    results = {"queued": 0, "existing": 0, "ineligible": 0, "not_found": 0, "operations": []}
     for vid in req.video_ids:
         video = db.query(VideoItem).get(vid)
         if not video:
             results["not_found"] += 1
             continue
-        res = _push_one(db, provider, video, instance_user_id, "push_bulk", force=force)
-        if res["status"] == "submitted":
-            results["submitted"] += 1
-        elif res["status"] == "skipped":
-            results["skipped"] += 1
+        row, _eligibility, created = enqueue_contribution(db, video, instance_user_id, force=force)
+        if row is None:
+            results["ineligible"] += 1
+        elif created:
+            results["queued"] += 1
+            results["operations"].append(row.operation_id)
         else:
-            results["failed"] += 1
-
+            results["existing"] += 1
+            results["operations"].append(row.operation_id)
+    db.commit()
     return results
 
 
 @router.get("/contributions")
 def list_contributions(video_id: Optional[int] = None, limit: int = 100,
                        db: Session = Depends(get_db)):
-    """List outbound contribution-log entries (most recent first)."""
-    from app.models import ContributionLog
+    """List durable outbound attempts, falling back to legacy audit entries."""
+    from app.models import ContributionLog, ContributionOutbox
+    outbox_query = db.query(ContributionOutbox)
+    if video_id is not None:
+        outbox_query = outbox_query.filter(ContributionOutbox.video_id == video_id)
+    outbox_rows = outbox_query.order_by(ContributionOutbox.created_at.desc()).limit(min(limit, 500)).all()
+    if outbox_rows:
+        return [{
+            "id": row.id,
+            "video_id": row.video_id,
+            "operation": "push",
+            "payload_hash": row.payload_hash,
+            "status": row.status,
+            "remote_id": row.remote_id,
+            "operation_id": row.operation_id,
+            "request_id": row.request_id,
+            "eligibility": row.eligibility_json,
+            "response": row.response_json,
+            "error": row.error_json,
+            "attempts": row.attempts,
+            "max_attempts": row.max_attempts,
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        } for row in outbox_rows]
     q = db.query(ContributionLog)
     if video_id is not None:
         q = q.filter(ContributionLog.video_id == video_id)
@@ -308,9 +353,38 @@ def preview_contribution(video_id: int, db: Session = Depends(get_db)):
     """
     from app.models import VideoItem
     from app.user_identity import get_instance_user_id
-    from app.provenance import build_contribution_envelope
+    from app.provenance import build_eligible_contribution
 
     video = db.query(VideoItem).get(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    return build_contribution_envelope(video, get_instance_user_id(db))
+    return build_eligible_contribution(video, get_instance_user_id(db))
+
+
+@router.post("/contributions/{outbox_id}/cancel")
+def cancel_contribution(outbox_id: str, db: Session = Depends(get_db)):
+    from app.models import ContributionOutbox
+    row = db.get(ContributionOutbox, outbox_id)
+    if not row:
+        raise HTTPException(404, "Contribution not found")
+    if row.status not in ("pending", "retry"):
+        raise HTTPException(409, f"Cannot cancel a {row.status} contribution")
+    row.status = "cancelled"
+    db.commit()
+    return {"status": row.status, "operation_id": row.operation_id}
+
+
+@router.post("/contributions/{outbox_id}/retry")
+def retry_contribution(outbox_id: str, db: Session = Depends(get_db)):
+    from app.models import ContributionOutbox
+    row = db.get(ContributionOutbox, outbox_id)
+    if not row:
+        raise HTTPException(404, "Contribution not found")
+    if row.status != "failed":
+        raise HTTPException(409, f"Cannot retry a {row.status} contribution")
+    row.status = "pending"
+    row.attempts = 0
+    row.error_json = None
+    row.completed_at = None
+    db.commit()
+    return {"status": row.status, "operation_id": row.operation_id}

@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useLibrary, useRescanBatch, useRescan, useNormalize, useDeleteVideo, useDeleteBatch } from "@/hooks/queries";
 import { VideoCard } from "@/components/VideoCard";
-import { VideoRow } from "@/components/VideoRow";
+import { LIBRARY_LIST_GRID, VideoRow } from "@/components/VideoRow";
 import { FilterBar } from "@/components/FilterBar";
 import { LibrarySkeleton, EmptyState, ErrorState } from "@/components/Feedback";
 import { useToast } from "@/components/Toast";
@@ -22,7 +22,10 @@ import type { ViewMode, LibraryParams, FacetFilterParams } from "@/types";
 const SORT_OPTIONS = [
   { value: "artist", label: "Artist" },
   { value: "title", label: "Title" },
+  { value: "album", label: "Album" },
   { value: "year", label: "Year" },
+  { value: "quality", label: "Quality" },
+  { value: "enrichment", label: "AI status" },
   { value: "created_at", label: "Recently Added" },
   { value: "updated_at", label: "Recently Updated" },
 ];
@@ -68,16 +71,25 @@ function Pagination({ page, totalPages, total, onPageChange }: {
 export function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [view, setViewRaw] = useState<ViewMode>(() => getLibraryPrefs().view as ViewMode);
+  const view = (searchParams.get("view") as ViewMode | null) ?? getLibraryPrefs().view as ViewMode;
   const setView = useCallback((v: ViewMode) => {
-    setViewRaw(v);
     patchLibraryPrefs({ view: v });
-  }, []);
-  const [pageSize, setPageSizeRaw] = useState<number>(() => getLibraryPrefs().pageSize);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("view", v);
+      return next;
+    });
+  }, [setSearchParams]);
+  const pageSize = Number(searchParams.get("page_size")) || getLibraryPrefs().pageSize;
   const setPageSize = useCallback((n: number) => {
-    setPageSizeRaw(n);
     patchLibraryPrefs({ pageSize: n });
-  }, []);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("page_size", String(n));
+      next.delete("page");
+      return next;
+    });
+  }, [setSearchParams]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [rescanDialogOpen, setRescanDialogOpen] = useState(false);
   const [playlistPickerOpen, setPlaylistPickerOpen] = useState(false);
@@ -154,6 +166,18 @@ export function LibraryPage() {
     },
     [setSearchParams]
   );
+
+  const setSort = useCallback((column: string) => {
+    const direction = params.sort_by === column && params.sort_dir === "asc" ? "desc" : "asc";
+    patchLibraryPrefs({ sort: column, dir: direction });
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("sort", column);
+      next.set("dir", direction);
+      next.delete("page");
+      return next;
+    });
+  }, [params.sort_by, params.sort_dir, setSearchParams]);
 
   // Card/row action handler
   const handleAction = useCallback(
@@ -236,7 +260,6 @@ export function LibraryPage() {
     params.year && { key: "year", label: `Year: ${params.year}` },
     params.enrichment && { key: "enrichment", label: `AI: ${params.enrichment}` },
     params.import_method && { key: "import_method", label: `Source: ${params.import_method}` },
-    params.quality && { key: "quality", label: `Quality: ${params.quality}` },
   ].filter(Boolean) as { key: string; label: string }[];
 
   return (
@@ -268,86 +291,6 @@ export function LibraryPage() {
           </button>
         </Tooltip>
         <div className="ml-auto" />
-
-        {/* Sort */}
-        <select
-          value={params.enrichment ?? ""}
-          onChange={(e) => setParam("enrichment", e.target.value || null)}
-          className="input-field w-auto py-1.5 text-xs"
-          aria-label="Filter by enrichment"
-        >
-          <option value="">All AI</option>
-          <option value="enriched">AI Enriched</option>
-          <option value="partial">Partial AI</option>
-          <option value="pending">No AI</option>
-        </select>
-        <select
-          value={params.import_method ?? ""}
-          onChange={(e) => setParam("import_method", e.target.value || null)}
-          className="input-field w-auto py-1.5 text-xs"
-          aria-label="Filter by source"
-        >
-          <option value="">All Sources</option>
-          <option value="url">URL Import</option>
-          <option value="import">Library Import</option>
-          <option value="scanned">Scanned</option>
-        </select>
-        <select
-          value={params.sort_by}
-          onChange={(e) => setParam("sort", e.target.value)}
-          className="input-field w-auto py-1.5 text-xs"
-          aria-label="Sort by"
-        >
-          {SORT_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </select>
-        <Tooltip content={params.sort_dir === "asc" ? "Currently ascending — click to sort descending" : "Currently descending — click to sort ascending"}>
-          <button
-            onClick={() => setParam("dir", params.sort_dir === "asc" ? "desc" : "asc")}
-            className="btn-ghost btn-sm text-xs"
-            aria-label={`Sort ${params.sort_dir === "asc" ? "descending" : "ascending"}`}
-          >
-            {params.sort_dir === "asc" ? "A\u2192Z" : "Z\u2192A"}
-          </button>
-        </Tooltip>
-
-        {/* Per-page selector */}
-        <select
-          value={pageSize}
-          onChange={(e) => {
-            setPageSize(Number(e.target.value));
-            setParam("page", null);
-          }}
-          className="input-field w-auto py-1.5 text-xs"
-          aria-label="Items per page"
-        >
-          {PAGE_SIZE_OPTIONS.map((n) => (
-            <option key={n} value={n}>{n} per page</option>
-          ))}
-        </select>
-
-        {/* View toggle */}
-        <div className="flex border border-surface-border rounded-lg overflow-hidden">
-          <Tooltip content="Grid view">
-            <button
-              onClick={() => setView("grid")}
-              className={`p-1.5 ${view === "grid" ? "bg-accent/10 text-accent" : "text-text-muted hover:text-text-primary"}`}
-              aria-label="Grid view"
-            >
-              <LayoutGrid size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip content="List view">
-            <button
-              onClick={() => setView("list")}
-              className={`p-1.5 ${view === "list" ? "bg-accent/10 text-accent" : "text-text-muted hover:text-text-primary"}`}
-              aria-label="List view"
-            >
-              <List size={16} />
-            </button>
-          </Tooltip>
-        </div>
 
         {/* Library actions */}
         <Tooltip content={allPageSelected ? "Deselect all videos on this page" : "Select all videos on this page for bulk actions"}>
@@ -422,14 +365,43 @@ export function LibraryPage() {
         </Tooltip>
       </div>
 
-      {/* FilterBar */}
-      <FilterBar filters={facetFilters} onChange={handleFilterChange} />
-
-      {/* Active filter pills */}
-      {activeFilters.length > 0 && (
-        <div className="flex flex-wrap gap-2 mb-4">
+      <FilterBar filters={facetFilters} onChange={handleFilterChange}>
+        <label className="flex flex-col gap-1 text-xs text-text-muted">
+          AI status
+          <select value={params.enrichment ?? ""} onChange={(e) => setParam("enrichment", e.target.value || null)} className="input-field w-auto py-1 text-xs">
+            <option value="">All</option>
+            <option value="not_requested">Not requested</option><option value="queued">Queued</option><option value="running">Running</option>
+            <option value="partial">Partial</option><option value="complete">Complete</option><option value="failed">Failed</option><option value="stale">Stale</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-text-muted">
+          Source
+          <select value={params.import_method ?? ""} onChange={(e) => setParam("import_method", e.target.value || null)} className="input-field w-auto py-1 text-xs">
+            <option value="">All</option><option value="url">URL import</option><option value="import">Library import</option><option value="scanned">Scanned</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-text-muted">
+          Sort
+          <select value={params.sort_by} onChange={(e) => setParam("sort", e.target.value)} className="input-field w-auto py-1 text-xs">
+            {SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+        <button onClick={() => setParam("dir", params.sort_dir === "asc" ? "desc" : "asc")} className="btn-ghost btn-sm text-xs" aria-label={`Sort ${params.sort_dir === "asc" ? "descending" : "ascending"}`}>
+          {params.sort_dir === "asc" ? "Ascending" : "Descending"}
+        </button>
+        <label className="flex flex-col gap-1 text-xs text-text-muted">
+          Page size
+          <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))} className="input-field w-auto py-1 text-xs">
+            {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <div className="flex border border-surface-border rounded-lg overflow-hidden" aria-label="View mode">
+          <button onClick={() => setView("grid")} className={`p-1.5 ${view === "grid" ? "bg-accent/10 text-accent" : "text-text-muted hover:text-text-primary"}`} aria-label="Grid view"><LayoutGrid size={16} /></button>
+          <button onClick={() => setView("list")} className={`p-1.5 ${view === "list" ? "bg-accent/10 text-accent" : "text-text-muted hover:text-text-primary"}`} aria-label="List view"><List size={16} /></button>
+        </div>
+        {activeFilters.length > 0 && <div className="basis-full flex flex-wrap gap-2 pt-1">
           {activeFilters.map((f) => (
-            <span
+            <button
               key={f.key}
               className="inline-flex items-center gap-1 badge-blue cursor-pointer"
               onClick={() => {
@@ -449,7 +421,7 @@ export function LibraryPage() {
             >
               {f.label}
               <span className="text-blue-300 hover:text-white">&times;</span>
-            </span>
+            </button>
           ))}
           <button
             onClick={() => setSearchParams({})}
@@ -457,8 +429,8 @@ export function LibraryPage() {
           >
             Clear all
           </button>
-        </div>
-      )}
+        </div>}
+      </FilterBar>
 
       {/* Content */}
       {isLoading ? (
@@ -496,10 +468,9 @@ export function LibraryPage() {
               ))}
             </div>
           ) : (
-            <div className="card p-0 overflow-hidden">
-              {/* Header row */}
-              <div className="flex items-center gap-3 px-4 py-2 border-b border-surface-border text-xs text-text-muted font-medium">
-                <div className="flex-shrink-0">
+            <div className="card p-0 overflow-x-auto">
+              <div className={`grid ${LIBRARY_LIST_GRID} min-w-[1050px] items-center gap-3 px-4 py-2 border-b border-surface-border text-xs text-text-muted font-medium`}>
+                <div>
                   <input
                     type="checkbox"
                     checked={allPageSelected}
@@ -507,13 +478,23 @@ export function LibraryPage() {
                     className="h-4 w-4 rounded border-surface-border bg-surface-lighter text-accent focus:ring-accent cursor-pointer accent-[var(--color-accent)]"
                   />
                 </div>
-                <span className="w-16 flex-shrink-0" />
-                <span className="flex-1">Artist / Title</span>
-                <span className="hidden md:block w-16 text-center">Year</span>
-                <span className="hidden sm:block w-16 text-center">Quality</span>
-                <span className="hidden sm:block w-16 text-center">AI</span>
-                <span className="hidden lg:block w-24 text-right">Added</span>
-                <span className="w-8" />
+                <span aria-hidden="true" />
+                {[
+                  ["artist", "Artist"], ["title", "Title"], ["album", "Album"],
+                  ["year", "Year"], ["quality", "Quality"],
+                ].map(([key, label]) => (
+                  <button key={key} onClick={() => setSort(key)} className="text-left hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent rounded" aria-sort={params.sort_by === key ? (params.sort_dir === "asc" ? "ascending" : "descending") : "none"}>
+                    {label}{params.sort_by === key ? (params.sort_dir === "asc" ? " ↑" : " ↓") : ""}
+                  </button>
+                ))}
+                <span className="text-center">Version</span>
+                <button onClick={() => setSort("enrichment")} className="text-center hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent rounded" aria-sort={params.sort_by === "enrichment" ? (params.sort_dir === "asc" ? "ascending" : "descending") : "none"}>
+                  AI{params.sort_by === "enrichment" ? (params.sort_dir === "asc" ? " ↑" : " ↓") : ""}
+                </button>
+                <button onClick={() => setSort("created_at")} className="text-right hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent rounded" aria-sort={params.sort_by === "created_at" ? (params.sort_dir === "asc" ? "ascending" : "descending") : "none"}>
+                  Added{params.sort_by === "created_at" ? (params.sort_dir === "asc" ? " ↑" : " ↓") : ""}
+                </button>
+                <span aria-hidden="true" />
               </div>
               {data.items.map((v) => (
                 <VideoRow

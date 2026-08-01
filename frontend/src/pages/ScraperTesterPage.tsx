@@ -1648,6 +1648,49 @@ function ResultsView({ r }: { r: ScraperTestResult }) {
       </Collapsible>
 
       {/* ────────────── Collapsible: Pipeline Log ────────────── */}
+      {r.trace_events?.length > 0 && (
+        <Collapsible title="Structured Production Trace" count={r.trace_events.length} defaultOpen>
+          <div className="px-4 py-3 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-1 text-[10px]">
+                <span className="rounded bg-surface px-2 py-1 text-text-secondary">Policy: {r.import_policy?.metadata_mode}</span>
+                {(r.import_policy?.providers as string[] | undefined)?.map((provider) => (
+                  <span key={provider} className="rounded bg-blue-500/10 px-2 py-1 text-blue-300">{provider}</span>
+                ))}
+              </div>
+              {r.run_id && (
+                <a
+                  className="btn-secondary text-xs inline-flex items-center gap-1"
+                  href={`/api/scraper-test/traces/${encodeURIComponent(r.run_id)}/bundle`}
+                  download
+                >
+                  <Download size={12} /> Diagnostic bundle
+                </a>
+              )}
+            </div>
+            <div className="overflow-x-auto rounded border border-surface-border/40">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-surface/70 text-text-muted">
+                  <tr><th className="p-2">Step</th><th className="p-2">State</th><th className="p-2">Provider</th><th className="p-2">Output</th><th className="p-2 text-right">Time</th></tr>
+                </thead>
+                <tbody>
+                  {r.trace_events.map((event, index) => (
+                    <tr key={`${event.step}-${index}`} className="border-t border-surface-border/30">
+                      <td className="p-2 font-mono text-text-secondary">{event.step}</td>
+                      <td className={`p-2 ${event.status === "failed" ? "text-red-400" : event.status === "skipped" ? "text-text-muted" : "text-emerald-400"}`}>{event.status}</td>
+                      <td className="p-2 text-text-muted">{event.provider || "—"}</td>
+                      <td className="p-2 text-text-muted">{event.output_fields?.join(", ") || "—"}</td>
+                      <td className="p-2 text-right text-text-muted">{event.duration_ms != null ? `${event.duration_ms} ms` : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[10px] text-text-muted">Run {r.run_id}. Secrets and local paths are redacted; raw provider response bodies are not stored.</p>
+          </div>
+        </Collapsible>
+      )}
+
       <Collapsible title="Full Trace Log" count={r.pipeline_log.length} defaultOpen>
         <div className="px-4 py-3 max-h-[32rem] overflow-y-auto space-y-0">
           {r.pipeline_log.map((entry, i) => (

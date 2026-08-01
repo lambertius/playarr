@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Play, Sparkles, Tv, Maximize2, Loader2 } from "lucide-react";
-import { loadExclusions } from "@/hooks/usePartyMode";
+import {
+  loadExclusions, saveExclusions, savePartyPlaylist, saveEraSettings,
+} from "@/hooks/usePartyMode";
+import { playlistApi } from "@/lib/api";
+import type { PartyModeParams, PlaylistSummary } from "@/types";
 
 export interface PartyStartChoice {
   /** Chosen "party like it's…" year, or undefined for the whole library
@@ -8,6 +12,8 @@ export interface PartyStartChoice {
   partyYear?: number;
   /** "theater" = artwork grid + video; "video" = full-screen video only. */
   fullscreenMode: "theater" | "video";
+  playlistId: number | null;
+  filters: Partial<PartyModeParams>;
 }
 
 /**
@@ -31,6 +37,16 @@ export function PartyStartGate({
   const [year, setYear] = useState(currentYear);
   const [layout, setLayout] = useState<"theater" | "video">("theater");
   const [starting, setStarting] = useState(false);
+  const [playlists, setPlaylists] = useState<PlaylistSummary[]>([]);
+  const [playlistId, setPlaylistId] = useState<number | null>(null);
+  const [artist, setArtist] = useState("");
+  const [album, setAlbum] = useState("");
+  const [genre, setGenre] = useState("");
+  const [excludedVersions, setExcludedVersions] = useState<string[]>([]);
+  const [minSongRating, setMinSongRating] = useState<number | null>(null);
+  const [minVideoRating, setMinVideoRating] = useState<number | null>(null);
+  const [excludeAdult, setExcludeAdult] = useState(true);
+  const [saveAsDefault, setSaveAsDefault] = useState(false);
   const startRef = useRef<HTMLButtonElement>(null);
 
   // Read once on mount — reflects the server-cached partyExclusions preference.
@@ -39,6 +55,7 @@ export function PartyStartGate({
   // Focus Start so a TV remote's OK/Enter launches with the defaults.
   useEffect(() => {
     startRef.current?.focus();
+    void playlistApi.list().then(setPlaylists).catch(() => setPlaylists([]));
   }, []);
 
   const start = () => {
@@ -46,10 +63,37 @@ export function PartyStartGate({
     // Flip the button to a "starting" state immediately so the press is
     // acknowledged even before the surface swaps in its loading screen.
     setStarting(true);
+    const exclusionsForStart = [
+      ...exclusions.version_types,
+      ...excludedVersions,
+      ...(excludeAdult ? ["18+"] : []),
+    ].filter((value, index, all) => all.indexOf(value) === index);
+    const filters: Partial<PartyModeParams> = {
+      party_year: year < currentYear ? year : undefined,
+      artist: artist.trim() || undefined,
+      album: album.trim() || undefined,
+      genre: genre.trim() || undefined,
+      exclude_version_types: exclusionsForStart.join(",") || undefined,
+      min_song_rating: minSongRating ?? exclusions.min_song_rating ?? undefined,
+      min_video_rating: minVideoRating ?? exclusions.min_video_rating ?? undefined,
+    };
+    if (saveAsDefault) {
+      savePartyPlaylist({ playlistId });
+      saveEraSettings({ enabled: year < currentYear, year });
+      saveExclusions({
+        ...exclusions,
+        version_types: excludedVersions,
+        min_song_rating: minSongRating,
+        min_video_rating: minVideoRating,
+        exclude_adult: excludeAdult,
+      });
+    }
     onStart({
       // Current year (or later) = whole library, no era bias.
       partyYear: year < currentYear ? year : undefined,
       fullscreenMode: layout,
+      playlistId,
+      filters,
     });
   };
 
@@ -66,6 +110,7 @@ export function PartyStartGate({
     exclusionLines.push(`Min song rating: ${exclusions.min_song_rating}★`);
   if (exclusions.min_video_rating != null)
     exclusionLines.push(`Min video rating: ${exclusions.min_video_rating}★`);
+  if (exclusions.exclude_adult) exclusionLines.push("Adult content excluded");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center overflow-auto bg-black p-6 text-white">
@@ -76,6 +121,45 @@ export function PartyStartGate({
           <span className="ml-auto text-xs uppercase tracking-widest text-white/40">
             {surface === "tv" ? "TV mode" : "Cast mode"}
           </span>
+        </div>
+
+        <div className="grid gap-4 rounded-lg border border-white/10 bg-white/5 p-4 sm:grid-cols-2">
+          <label className="text-sm font-semibold text-white/80 sm:col-span-2">
+            Playlist
+            <select value={playlistId ?? ""} onChange={e => setPlaylistId(e.target.value ? Number(e.target.value) : null)} className="input-field mt-2 min-h-12 w-full text-base">
+              <option value="">All eligible library videos</option>
+              {playlists.map(playlist => <option key={playlist.id} value={playlist.id}>{playlist.name} ({playlist.entry_count})</option>)}
+            </select>
+          </label>
+          <label className="text-sm text-white/80">Artist<input value={artist} onChange={e => setArtist(e.target.value)} className="input-field mt-1 min-h-12 w-full" placeholder="Any artist" /></label>
+          <label className="text-sm text-white/80">Album<input value={album} onChange={e => setAlbum(e.target.value)} className="input-field mt-1 min-h-12 w-full" placeholder="Any album" /></label>
+          <label className="text-sm text-white/80">Genre<input value={genre} onChange={e => setGenre(e.target.value)} className="input-field mt-1 min-h-12 w-full" placeholder="Any genre" /></label>
+          <label className="text-sm text-white/80">Minimum song rating
+            <select value={minSongRating ?? ""} onChange={e => setMinSongRating(e.target.value ? Number(e.target.value) : null)} className="input-field mt-1 min-h-12 w-full">
+              <option value="">No minimum</option>{[1,2,3,4,5].map(value => <option key={value} value={value}>{value}★</option>)}
+            </select>
+          </label>
+          <label className="text-sm text-white/80">Minimum video rating
+            <select value={minVideoRating ?? ""} onChange={e => setMinVideoRating(e.target.value ? Number(e.target.value) : null)} className="input-field mt-1 min-h-12 w-full">
+              <option value="">No minimum</option>{[1,2,3,4,5].map(value => <option key={value} value={value}>{value}★</option>)}
+            </select>
+          </label>
+          <fieldset className="sm:col-span-2">
+            <legend className="mb-2 text-sm font-semibold text-white/80">Exclude versions</legend>
+            <div className="flex flex-wrap gap-2">
+              {["live", "cover", "alternate", "uncensored"].map(version => (
+                <label key={version} className="flex min-h-12 items-center gap-2 rounded border border-white/15 px-3 text-sm capitalize focus-within:ring-2 focus-within:ring-accent">
+                  <input type="checkbox" checked={excludedVersions.includes(version)} onChange={e => setExcludedVersions(values => e.target.checked ? [...values, version] : values.filter(value => value !== version))} /> {version}
+                </label>
+              ))}
+              <label className="flex min-h-12 items-center gap-2 rounded border border-white/15 px-3 text-sm focus-within:ring-2 focus-within:ring-accent">
+                <input type="checkbox" checked={excludeAdult} onChange={e => setExcludeAdult(e.target.checked)} /> Exclude 18+
+              </label>
+            </div>
+          </fieldset>
+          <label className="flex min-h-12 items-center gap-3 text-sm text-white/80 sm:col-span-2">
+            <input type="checkbox" checked={saveAsDefault} onChange={e => setSaveAsDefault(e.target.checked)} /> Save these choices as the default
+          </label>
         </div>
 
         {/* Party like it's… */}

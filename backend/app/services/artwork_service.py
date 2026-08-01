@@ -402,29 +402,13 @@ def download_and_validate(
         # Existing file — validate it
         vr = validate_file(dest_path)
         if vr.valid:
-            # Heuristic: if the file on disk is much smaller than the
-            # requested max_width, it is likely a stale/wrong image left
-            # over from a previous run.  Re-download so we pick up the
-            # correct (higher-resolution) artwork from the current URL.
-            stale = (
-                max_width >= 600
-                and vr.width is not None
-                and vr.width < max_width * 0.5
+            logger.debug(f"Artwork already exists and is valid: {dest_path}")
+            return ArtworkResult(
+                success=True, path=dest_path, source_url=url,
+                width=vr.width, height=vr.height, format=vr.format,
+                file_size_bytes=vr.file_size_bytes, file_hash=vr.file_hash,
+                checksum=vr.file_hash, provider=provider,
             )
-            if stale:
-                logger.warning(
-                    f"Existing artwork is undersized ({vr.width}x{vr.height} vs "
-                    f"max_width={max_width}), re-downloading: {dest_path}"
-                )
-                _safe_delete(dest_path)
-            else:
-                logger.debug(f"Artwork already exists and is valid: {dest_path}")
-                return ArtworkResult(
-                    success=True, path=dest_path, source_url=url,
-                    width=vr.width, height=vr.height, format=vr.format,
-                    file_size_bytes=vr.file_size_bytes, file_hash=vr.file_hash,
-                    checksum=vr.file_hash, provider=provider,
-                )
         else:
             # Existing file is corrupt — delete and re-download
             logger.warning(f"Existing artwork is invalid ({vr.error}), re-downloading: {dest_path}")

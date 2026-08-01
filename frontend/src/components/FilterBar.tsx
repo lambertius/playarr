@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Filter, X, ChevronDown, ChevronUp } from "lucide-react";
+import type { ReactNode } from "react";
+import { Filter, X } from "lucide-react";
 import type { FacetFilterParams } from "@/types";
 
 const VERSION_TYPES = [
@@ -34,6 +34,8 @@ interface FilterBarProps {
   hideGenre?: boolean;
   /** Hide quality filter (on quality page) */
   hideQuality?: boolean;
+  /** Page-specific controls that belong to the same canonical filter surface. */
+  children?: ReactNode;
 }
 
 function hasActiveFilters(f: FacetFilterParams): boolean {
@@ -54,9 +56,8 @@ function activeFilterCount(f: FacetFilterParams): number {
 }
 
 export function FilterBar({
-  filters, onChange, hideArtist, hideYearRange, hideRatings, hideGenre, hideQuality,
+  filters, onChange, hideArtist, hideYearRange, hideRatings, hideGenre, hideQuality, children,
 }: FilterBarProps) {
-  const [open, setOpen] = useState(false);
   const active = hasActiveFilters(filters);
   const count = activeFilterCount(filters);
 
@@ -65,30 +66,35 @@ export function FilterBar({
 
   const clear = () => onChange({});
 
+  const chips: Array<{ key: keyof FacetFilterParams; label: string }> = [];
+  if (filters.version_type) chips.push({ key: "version_type", label: `Type: ${filters.version_type}` });
+  if (filters.artist) chips.push({ key: "artist", label: `Artist: ${filters.artist}` });
+  if (filters.genre) chips.push({ key: "genre", label: `Genre: ${filters.genre}` });
+  if (filters.year_from || filters.year_to) chips.push({ key: "year_from", label: `Years: ${filters.year_from ?? "…"}–${filters.year_to ?? "…"}` });
+  if (filters.song_rating) chips.push({ key: "song_rating", label: `Song: ${filters.song_rating}★` });
+  if (filters.video_rating) chips.push({ key: "video_rating", label: `Video: ${filters.video_rating}★` });
+  if (filters.quality) chips.push({ key: "quality", label: `Quality: ${filters.quality}` });
+
+  const removeChip = (key: keyof FacetFilterParams) => {
+    if (key === "year_from") set({ year_from: undefined, year_to: undefined });
+    else set({ [key]: undefined });
+  };
+
   return (
-    <div className="w-full">
-      {/* Toggle row */}
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => setOpen((o) => !o)}
-          className={`btn-ghost btn-sm text-xs flex items-center gap-1.5 ${
-            active ? "text-accent" : ""
-          }`}
-        >
+    <div className="w-full mb-4 rounded-lg bg-surface-secondary/50 border border-border p-3">
+      <div className="flex items-center gap-2 mb-3">
+        <span className={`text-xs font-semibold flex items-center gap-1.5 ${active ? "text-accent" : "text-text-secondary"}`}>
           <Filter size={14} />
-          Filter{count > 0 && ` (${count})`}
-          {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-        </button>
+          Filters{count > 0 && ` (${count})`}
+        </span>
         {active && (
-          <button onClick={clear} className="btn-ghost btn-sm text-xs text-text-muted flex items-center gap-1">
-            <X size={12} /> Clear
+          <button onClick={clear} className="btn-ghost btn-sm text-xs text-text-muted flex items-center gap-1 ml-auto">
+            <X size={12} /> Clear all
           </button>
         )}
       </div>
 
-      {/* Filter controls */}
-      {open && (
-        <div className="mt-2 flex flex-wrap items-end gap-3 p-3 rounded-lg bg-surface-secondary/50 border border-border">
+      <div className="flex flex-wrap items-end gap-3">
           {/* Version type */}
           <label className="flex flex-col gap-1 text-xs text-text-muted">
             Type
@@ -218,6 +224,15 @@ export function FilterBar({
               </select>
             </label>
           )}
+          {children}
+      </div>
+      {chips.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-border">
+          {chips.map((chip) => (
+            <button key={chip.key} onClick={() => removeChip(chip.key)} className="badge-blue inline-flex items-center gap-1">
+              {chip.label} <X size={10} />
+            </button>
+          ))}
         </div>
       )}
     </div>

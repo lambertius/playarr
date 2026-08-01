@@ -14,6 +14,7 @@ export type JobStatus =
   | "writing_nfo"
   | "asset_fetch"
   | "finalizing"
+  | "cancelling"
   | "complete"
   | "failed"
   | "cancelled"
@@ -24,6 +25,7 @@ export type ViewMode = "grid" | "list";
 // ─── Library ──────────────────────────────────────────────
 export interface VideoItemSummary {
   id: number;
+  stable_id: string;
   artist: string;
   title: string;
   album?: string | null;
@@ -34,6 +36,7 @@ export interface VideoItemSummary {
   version_type?: string;
   review_status?: string;
   enrichment_status?: string;
+  enrichment_detail?: EnrichmentStatus;
   import_method?: string | null;
   duration_seconds?: number | null;
   playarr_video_id?: string | null;
@@ -84,6 +87,7 @@ export interface MediaAsset {
 
 export interface VideoItemDetail {
   id: number;
+  stable_id: string;
   artist: string;
   title: string;
   album?: string | null;
@@ -171,17 +175,46 @@ export interface ContributionEnvelope {
   sources: Record<string, unknown>[];
 }
 
+export interface ContributionFieldEligibility {
+  eligible: boolean;
+  reason: string;
+  trust: FieldProvenance["trust"];
+  locked: boolean;
+  source?: string | null;
+  set_at?: string | null;
+}
+
+export interface ContributionPreview {
+  preview: ContributionEnvelope;
+  submission: ContributionEnvelope;
+  eligibility: Record<string, ContributionFieldEligibility>;
+  eligible_fields: string[];
+  excluded_fields: string[];
+  can_submit: boolean;
+}
+
 export interface ContributionLogEntry {
-  id: number;
+  id: number | string;
   video_id?: number | null;
   instance_user_id?: string | null;
-  target: string;
+  target?: string;
   operation: string;
-  playarr_track_id?: string | null;
-  playarr_video_id?: string | null;
   payload_hash?: string | null;
   status: string;
   remote_id?: string | null;
+  operation_id?: string | null;
+  request_id?: string | null;
+  eligibility?: {
+    fields?: Record<string, ContributionFieldEligibility>;
+    eligible_fields?: string[];
+    excluded_fields?: string[];
+  } | null;
+  response?: Record<string, unknown> | null;
+  error?: { code?: string; message?: string; retryable?: boolean } | null;
+  attempts?: number;
+  max_attempts?: number;
+  started_at?: string | null;
+  completed_at?: string | null;
   created_at?: string | null;
 }
 
@@ -231,6 +264,66 @@ export interface JobSummary {
   started_at?: string | null;
   completed_at?: string | null;
   updated_at?: string | null;
+  status_group: JobStatusGroup;
+  job_category: JobCategory;
+  operation_id?: string | null;
+}
+
+export interface EnrichmentStatus {
+  state: "not_requested" | "queued" | "running" | "partial" | "complete" | "failed" | "stale";
+  completed_steps: string[];
+  failed_steps: Array<{ step: string; code: string; message: string }>;
+  provider?: string | null;
+  model?: string | null;
+  last_run_at?: string | null;
+  stale_reason?: string | null;
+}
+
+export type JobStatusGroup = "active" | "complete" | "failed" | "cancelled" | "skipped";
+export type JobCategory = "download" | "import" | "video_editor" | "scraper" | "system";
+
+export interface JobPageParams {
+  status_group: JobStatusGroup;
+  job_category?: JobCategory | "all";
+  search?: string;
+  date_from?: string;
+  date_to?: string;
+  sort_by?: "date_added" | "date_completed" | "name";
+  sort_dir?: "asc" | "desc";
+  page?: number;
+  page_size?: number;
+}
+
+export interface JobPageResponse {
+  items: JobSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  status_counts: Record<JobStatusGroup, number>;
+  category_counts: Record<JobCategory | "all", number>;
+}
+
+export interface ClearHistoryParams {
+  status_group?: Exclude<JobStatusGroup, "active">;
+  job_category?: JobCategory | "all";
+  search?: string;
+  date_from?: string;
+  date_to?: string;
+}
+
+export interface ClearHistoryPreview extends ClearHistoryParams {
+  count: number;
+  statuses: string[];
+}
+
+export interface OperationHealth {
+  deployment_profile: "single_process" | "redis";
+  mutation_queue_limit: number;
+  mutations: { pending: number; oldest_age_seconds: number };
+  sidecars: Record<string, number>;
+  files: Record<string, number>;
+  database_retry_count: number;
 }
 
 export interface PipelineStep {
@@ -436,6 +529,31 @@ export interface ArchiveItem {
   video_id: number | null;
   archived_at: string;
   file_size_bytes: number;
+  original_path?: string | null;
+  checksum_md5?: string | null;
+  manifest_schema_version?: number | null;
+  restore_eligible?: boolean;
+  integrity_status?: string;
+}
+
+export interface ArchiveRestorePlan {
+  operation_id: string;
+  folder: string;
+  archive_path: string;
+  original_path: string | null;
+  current_path: string | null;
+  current_exists: boolean;
+  archive_checksum_md5: string | null;
+  checksum_matches_manifest: boolean | null;
+  manifest_schema_version: number | null;
+  video_id: number | null;
+  video_stable_id: string | null;
+  expected_video_revision: number | null;
+  metadata_revision_consequence: string;
+  companion_files: string[];
+  related_review_case_ids: number[];
+  conflict_choices: Array<"archive_current" | "replace_current">;
+  restore_eligible: boolean;
 }
 
 export interface QualityBucket {
@@ -624,6 +742,15 @@ export interface PartyModeExclusions {
   albums: string[];
   min_song_rating: number | null;
   min_video_rating: number | null;
+  exclude_adult: boolean;
+}
+export interface ArtistConsolidationAggregate {
+  id: number;
+  stable_id: string;
+  mask_name: string;
+  revision: number;
+  targets: Array<{ id: number; raw_name: string; provenance?: string | null; mb_artist_id?: string | null }>;
+  mbids: string[];
 }
 
 export interface PartyModeParams {
@@ -645,10 +772,12 @@ export interface PartyModeParams {
   min_song_rating?: number;
   min_video_rating?: number;
   party_year?: number;
+  playlist_id?: number;
+  use_saved_playlist?: boolean;
 }
 
 export interface PartyModeResponse {
-  tracks: { videoId: number; artist: string; title: string; hasPoster: boolean; playCount: number; duration?: number | null }[];
+  tracks: { queueEntryId?: string; videoId: number; artist: string; title: string; hasPoster: boolean; playCount: number; duration?: number | null }[];
   total: number;
 }
 
@@ -1450,6 +1579,7 @@ export interface RegexPreviewResponse {
 
 export interface PlaylistEntry {
   id: number;
+  occurrence_id: string;
   video_id: number;
   position: number;
   artist: string;
@@ -1465,7 +1595,7 @@ export interface PlaylistMembership {
   entry_id: number;
 }
 
-export type PlaylistSortField = "artist" | "title" | "year";
+export type PlaylistSortField = "artist" | "title" | "album" | "year";
 export type SortDirection = "asc" | "desc";
 
 // ─── Tools (yt-dlp updater) ───────────────────────────────
@@ -1476,15 +1606,19 @@ export interface YtdlpStatus {
   managed: boolean;
   path: string | null;
   managed_path: string | null;
+  last_checked_at: string | null;
 }
 
-export interface YtdlpUpdateResult extends YtdlpStatus {
-  success: boolean;
+export interface YtdlpUpdateResult {
+  status: "queued";
+  job_id: number;
   message: string;
 }
 
 export interface PlaylistOut {
   id: number;
+  stable_id: string;
+  revision: number;
   name: string;
   description?: string | null;
   entry_count: number;
@@ -1495,6 +1629,8 @@ export interface PlaylistOut {
 
 export interface PlaylistSummary {
   id: number;
+  stable_id: string;
+  revision: number;
   name: string;
   description?: string | null;
   entry_count: number;
@@ -1530,6 +1666,12 @@ export interface EditorQueueItem {
   bar_bottom: number;
   bar_left: number;
   bar_right: number;
+  letterbox_confidence?: number | null;
+  letterbox_sample_count: number;
+  letterbox_samples_expected: number;
+  letterbox_review_suggested: boolean;
+  letterbox_instability_reason?: string | null;
+  letterbox_per_window_bars: Array<{ top: number; bottom: number; left: number; right: number }>;
   has_archive: boolean;
   exclude_from_scan: boolean;
   created_at?: string | null;
@@ -1559,6 +1701,7 @@ export interface CropPreviewResponse {
 
 export interface EncodeRequest {
   video_id: number;
+  profile: "source_fidelity" | "balanced" | "custom";
   crop_w?: number;
   crop_h?: number;
   crop_x?: number;
@@ -1571,6 +1714,47 @@ export interface EncodeRequest {
   trim_end?: number;
   audio_codec?: string;
   audio_bitrate?: string;
+}
+
+export interface EncodePlan {
+  profile: EncodeRequest["profile"];
+  source: {
+    codec?: string | null;
+    pixel_format: string;
+    bit_depth: number;
+    hdr: boolean;
+    frame_rate?: string | null;
+    audio_codec?: string | null;
+    audio_sample_rate?: string | null;
+    audio_channels?: number | null;
+  };
+  output: {
+    extension: string;
+    video_encoder: string;
+    pixel_format: string;
+    crf: number;
+    preset: string;
+    maxrate?: string | null;
+    frame_timing: string;
+    metadata: string;
+    chapters: string;
+    audio_codec?: string | null;
+    audio_bitrate?: string | null;
+  };
+  warnings: string[];
+  errors: string[];
+}
+
+export interface EditorQueueState {
+  entries: Array<{
+    video_id: number;
+    occurrence_id: string;
+    source: "manual" | "scan" | "legacy";
+    settings: Record<string, unknown>;
+    position: number;
+    revision: number;
+  }>;
+  active_jobs: Array<{ video_id: number; job_id: number; status: string }>;
 }
 
 export interface LetterboxDetectResult {
@@ -1586,6 +1770,13 @@ export interface LetterboxDetectResult {
   bar_bottom: number;
   bar_left: number;
   bar_right: number;
+  auto_apply: boolean;
+  review_suggested: boolean;
+  confidence: number;
+  sample_count: number;
+  samples_expected: number;
+  per_window_bars: Array<{ top: number; bottom: number; left: number; right: number }>;
+  instability_reason?: string | null;
 }
 
 export interface LetterboxScanItem {
@@ -1704,6 +1895,24 @@ export interface ScraperTestResult {
   import_youtube_match?: Record<string, any> | null;
   import_quality?: Record<string, any> | null;
   output_file?: string | null;
+  run_id?: string | null;
+  import_policy: {
+    metadata_mode?: string;
+    providers?: string[];
+    ai_role?: string;
+    schema_version?: number;
+    [key: string]: unknown;
+  };
+  trace_events: {
+    run_id: string;
+    step: string;
+    status: string;
+    provider?: string | null;
+    output_fields?: string[];
+    decisions?: { field?: string | null; action: string; reason: string }[];
+    duration_ms?: number | null;
+    exception?: unknown;
+  }[];
 }
 
 export interface ScraperTestProgress {
@@ -1740,6 +1949,9 @@ export interface SuggestedVideoItem {
   reasons: string[];
   trust_reasons: string[];
   in_cart: boolean;
+  completeness_score: number;
+  missing_fields: string[];
+  provider_errors: string[];
 }
 
 export interface NewVideosCategoryData {

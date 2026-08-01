@@ -16,6 +16,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 import httpx
@@ -26,6 +27,7 @@ from app.runtime_dirs import get_runtime_dirs
 logger = logging.getLogger(__name__)
 
 _GITHUB_API_LATEST = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+_last_checked_at: Optional[str] = None
 
 
 def _subprocess_kwargs() -> dict:
@@ -88,6 +90,7 @@ def get_installed_version() -> Optional[str]:
 
 def get_latest_version() -> Optional[str]:
     """Return the latest yt-dlp release tag from GitHub, or None on failure."""
+    global _last_checked_at
     try:
         resp = httpx.get(
             _GITHUB_API_LATEST,
@@ -102,6 +105,8 @@ def get_latest_version() -> Optional[str]:
     except Exception as e:
         logger.warning(f"Failed to check latest yt-dlp version: {e}")
         return None
+    finally:
+        _last_checked_at = datetime.now(timezone.utc).isoformat()
 
 
 def get_status() -> dict:
@@ -121,6 +126,7 @@ def get_status() -> dict:
         "managed": is_managed(),
         "path": resolved_path(),
         "managed_path": managed_ytdlp_path(),
+        "last_checked_at": _last_checked_at,
     }
 
 

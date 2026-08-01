@@ -11,16 +11,16 @@ import subprocess
 import sys
 import threading
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import AppSetting, NormalizationHistory
+from app.models import AppSetting, FileOperation, NormalizationHistory, ReviewCaseItem, VideoItem
 from app.schemas import SettingOut, SettingUpdate, NormalizationHistoryOut
 from app.version import APP_VERSION
 
@@ -65,6 +65,46 @@ DEFAULT_SETTINGS = {
     "startup_duplicate_scan": ("false", "bool"),
 }
 
+SECRET_SETTING_KEYS = {
+    "tmvdb_api_key", "openai_api_key", "gemini_api_key", "claude_api_key",
+}
+
+
+def _masked_setting_value(key: str, value: str) -> str:
+    if key not in SECRET_SETTING_KEYS or not value:
+        return value
+    return f"••••{value[-4:]}"
+
+
+def _setting_group(key: str) -> str:
+    if key.startswith("tmvdb_") or key == "import_scrape_tmvdb":
+        return "tmvdb"
+    if key.startswith("ai_") or key.endswith("_api_key"):
+        return "ai"
+    if key.startswith("import_") or key == "max_concurrent_downloads":
+        return "imports"
+    if key.startswith("library_") or key in {"library_dir", "library_source_dirs"}:
+        return "library_files"
+    if key.startswith("party_"):
+        return "tv_cast_party"
+    if key.startswith("startup_") or key in {"server.port", "auto_open_browser", "minimize_to_tray"}:
+        return "system"
+    return "video_editor" if key.startswith(("normalization_", "transcode_", "preferred_container")) else "playback"
+
+
+def _setting_consumers(key: str) -> list[str]:
+    if key.startswith("tmvdb_"):
+        return ["metadata.tmvdb.provider", "pipeline.tmvdb.policy"]
+    if key.startswith("import_"):
+        return ["pipeline.import_policy", "frontend.import_defaults"]
+    if key.startswith("library_") or key in {"library_dir", "library_source_dirs"}:
+        return ["file_organizer", "library_import", "archive_service"]
+    if key.startswith("normalization_") or key == "auto_normalize_on_import":
+        return ["pipeline.normalize"]
+    if key == "max_concurrent_downloads":
+        return ["pipeline.acquire.download_scheduler"]
+    return ["app.runtime"]
+
 
 @router.get("/", response_model=List[SettingOut])
 def list_settings(user_id: Optional[str] = None, db: Session = Depends(get_db)):
@@ -81,11 +121,11 @@ def list_settings(user_id: Optional[str] = None, db: Session = Depends(get_db)):
 
     # Merge defaults for any missing keys
     existing_keys = {s.key for s in settings}
-    result = [SettingOut(key=s.key, value=s.value, value_type=s.value_type) for s in settings]
+    result = [SettingOut(key=s.key, value=_masked_setting_value(s.key, s.value), value_type=s.value_type) for s in settings]
 
     for key, (default_val, val_type) in DEFAULT_SETTINGS.items():
         if key not in existing_keys:
-            result.append(SettingOut(key=key, value=default_val, value_type=val_type))
+            result.append(SettingOut(key=key, value=_masked_setting_value(key, default_val), value_type=val_type))
 
     return result
 
@@ -98,9 +138,36 @@ def update_setting(update: SettingUpdate, user_id: Optional[str] = None, db: Ses
         AppSetting.user_id == user_id,
     ).first()
 
+    if update.key in SECRET_SETTING_KEYS and update.value.startswith("••••"):
+        if setting:
+            return SettingOut(
+                key=setting.key,
+                value=_masked_setting_value(setting.key, setting.value),
+                value_type=setting.value_type,
+            )
+        raise HTTPException(422, "A masked value cannot be used as a new secret")
+    if update.key == "max_concurrent_downloads":
+        try:
+            if not 1 <= int(update.value) <= 16:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(422, "max_concurrent_downloads must be between 1 and 16")
+    if update.key == "server.port":
+        try:
+            if not 1 <= int(update.value) <= 65535:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(422, "server.port must be between 1 and 65535")
+    if update.key == "tmvdb_auto_push" and update.value == "true":
+        enabled = db.query(AppSetting).filter(AppSetting.key == "tmvdb_enabled", AppSetting.user_id == user_id).first()
+        api_key = db.query(AppSetting).filter(AppSetting.key == "tmvdb_api_key", AppSetting.user_id == user_id).first()
+        if not enabled or enabled.value != "true" or not api_key or not api_key.value:
+            raise HTTPException(422, "TMVDB auto-push requires TMVDB to be enabled with an API key")
+
     if setting:
         setting.value = update.value
         setting.value_type = update.value_type
+        setting.revision = (setting.revision or 1) + 1
     else:
         setting = AppSetting(
             user_id=user_id,
@@ -109,6 +176,23 @@ def update_setting(update: SettingUpdate, user_id: Optional[str] = None, db: Ses
             value_type=update.value_type,
         )
         db.add(setting)
+
+    # Keep mutually exclusive import modes valid for old and new clients.
+    exclusive_updates = {}
+    if update.key == "import_ai_auto" and update.value == "true":
+        exclusive_updates["import_ai_only"] = "false"
+    elif update.key == "import_ai_only" and update.value == "true":
+        exclusive_updates.update({
+            "import_ai_auto": "false", "import_scrape_wikipedia": "false",
+            "import_scrape_musicbrainz": "false",
+        })
+    elif update.key in {"import_scrape_wikipedia", "import_scrape_musicbrainz"} and update.value == "true":
+        exclusive_updates["import_ai_only"] = "false"
+    for key, value in exclusive_updates.items():
+        row = db.query(AppSetting).filter(AppSetting.key == key, AppSetting.user_id == user_id).first()
+        if row:
+            row.value = value
+            row.revision = (row.revision or 1) + 1
 
     db.commit()
     db.refresh(setting)
@@ -121,7 +205,42 @@ def update_setting(update: SettingUpdate, user_id: Optional[str] = None, db: Ses
         from app.config import ensure_library_subdirs
         ensure_library_subdirs(update.value)
 
-    return SettingOut(key=setting.key, value=setting.value, value_type=setting.value_type)
+    return SettingOut(
+        key=setting.key,
+        value=_masked_setting_value(setting.key, setting.value),
+        value_type=setting.value_type,
+    )
+
+
+@router.get("/catalogue")
+def settings_catalogue(db: Session = Depends(get_db)):
+    """Typed registry plus a consumer/orphan audit for Diagnostics."""
+    definitions = []
+    for key, (default, value_type) in sorted(DEFAULT_SETTINGS.items()):
+        definitions.append({
+            "key": key,
+            "value_type": value_type,
+            "default": None if key in SECRET_SETTING_KEYS else default,
+            "group": _setting_group(key),
+            "scope": "instance",
+            "restart_required": key in {"server.port", "startup_with_system"},
+            "secret": key in SECRET_SETTING_KEYS,
+            "dependencies": {
+                "tmvdb_auto_push": ["tmvdb_enabled", "tmvdb_api_key"],
+                "tmvdb_auto_pull": ["tmvdb_enabled"],
+            }.get(key, []),
+            "deprecated": False,
+            "consumers": _setting_consumers(key),
+        })
+    known = set(DEFAULT_SETTINGS)
+    database_keys = {key for (key,) in db.query(AppSetting.key).all()}
+    return {
+        "definitions": definitions,
+        "audit": {
+            "orphaned_database_keys": sorted(database_keys - known),
+            "visible_without_consumers": [row["key"] for row in definitions if not row["consumers"]],
+        },
+    }
 
 
 @router.get("/defaults")
@@ -716,10 +835,91 @@ class ArchiveItemOut(BaseModel):
     video_id: Optional[int] = None
     archived_at: str = ""
     file_size_bytes: int = 0
+    original_path: Optional[str] = None
+    checksum_md5: Optional[str] = None
+    manifest_schema_version: Optional[int] = None
+    restore_eligible: bool = True
+    integrity_status: str = "unchecked"
+
+
+def _archive_roots() -> list[tuple[str, str]]:
+    from app.config import get_settings as _get_settings
+    return [
+        (os.path.normpath(root), os.path.normpath(os.path.join(root, "_archive")))
+        for root in _get_settings().get_all_library_dirs()
+    ]
+
+
+def _validate_archive_folder(folder: str) -> tuple[str, str]:
+    candidate = os.path.normcase(os.path.normpath(folder))
+    for library_root, archive_root in _archive_roots():
+        allowed = os.path.normcase(archive_root)
+        if candidate == allowed or candidate.startswith(allowed + os.sep):
+            return library_root, archive_root
+    raise HTTPException(403, "Path is not inside archive directory")
+
+
+def _archive_plan(folder: str, db: Session) -> dict:
+    from app.routers.video_editor import (
+        _MANIFEST_NAME, _VIDEO_EXTS, _file_checksum,
+        _manifest_video_path, _read_folder_manifest,
+    )
+
+    library_root, _archive_root = _validate_archive_folder(folder)
+    if not os.path.isdir(folder):
+        raise HTTPException(404, "Archive folder not found")
+    manifest_path = os.path.join(folder, _MANIFEST_NAME)
+    manifest = _read_folder_manifest(folder) or {}
+    archive_file = _manifest_video_path(folder, manifest) if manifest else None
+    if archive_file is None:
+        candidates = [
+            os.path.join(folder, name) for name in os.listdir(folder)
+            if os.path.splitext(name)[1].lower() in _VIDEO_EXTS
+        ]
+        archive_file = candidates[0] if candidates else None
+    if archive_file is None:
+        raise HTTPException(404, "No video file found in archive folder")
+
+    video = db.get(VideoItem, manifest.get("video_id")) if manifest.get("video_id") else None
+    relative = manifest.get("original_relative_path")
+    original_path = os.path.join(library_root, relative) if relative else None
+    current_path = video.file_path if video and video.file_path else original_path
+    expected_checksum = manifest.get("checksum_md5")
+    actual_checksum = _file_checksum(archive_file) if expected_checksum else None
+    checksum_matches = actual_checksum == expected_checksum if expected_checksum else None
+    review_cases = []
+    if video:
+        review_cases = [
+            row.case_id for row in db.query(ReviewCaseItem).filter(
+                ReviewCaseItem.video_id == video.id,
+            ).all()
+        ]
+    companions = [
+        name for name in os.listdir(folder)
+        if os.path.join(folder, name) not in (archive_file, manifest_path)
+    ]
+    return {
+        "folder": folder,
+        "archive_path": archive_file,
+        "original_path": original_path,
+        "current_path": current_path,
+        "current_exists": bool(current_path and os.path.isfile(current_path)),
+        "archive_checksum_md5": actual_checksum or expected_checksum,
+        "checksum_matches_manifest": checksum_matches,
+        "manifest_schema_version": manifest.get("schema_version", 1 if manifest else None),
+        "video_id": video.id if video else manifest.get("video_id"),
+        "video_stable_id": video.stable_id if video else manifest.get("video_stable_id"),
+        "expected_video_revision": video.revision if video else None,
+        "metadata_revision_consequence": "video revision increments after restored media is re-analysed",
+        "companion_files": companions,
+        "related_review_case_ids": review_cases,
+        "conflict_choices": ["archive_current", "replace_current"] if current_path and os.path.isfile(current_path) else [],
+        "restore_eligible": checksum_matches is not False,
+    }
 
 
 @router.get("/archive-items", response_model=List[ArchiveItemOut])
-def list_archive_items():
+def list_archive_items(db: Session = Depends(get_db)):
     """List all items in the archive directory with manifest metadata."""
     from app.config import get_settings as _get_settings
     from app.routers.video_editor import (
@@ -746,6 +946,19 @@ def list_archive_items():
                         break
             if not video_file:
                 continue
+            video = db.get(VideoItem, meta.get("video_id")) if meta.get("video_id") else None
+            relative = meta.get("original_relative_path")
+            original_path = video.file_path if video else (
+                os.path.join(lib_root, relative) if relative else None
+            )
+            schema_version = meta.get("schema_version", 1 if meta else None)
+            stable_identity = bool((video and video.stable_id) or meta.get("video_stable_id"))
+            integrity_status = (
+                "orphaned_owner" if meta.get("video_id") and not video
+                else "ok" if meta and stable_identity
+                else "legacy_manifest" if meta
+                else "missing_manifest"
+            )
             results.append({
                 "path": video_file,
                 "folder": root,
@@ -756,6 +969,11 @@ def list_archive_items():
                 "archived_at": meta.get("archived_at", ""),
                 "file_size_bytes": meta.get("file_size_bytes", 0)
                                    or (os.path.getsize(video_file) if os.path.isfile(video_file) else 0),
+                "original_path": original_path,
+                "checksum_md5": meta.get("checksum_md5"),
+                "manifest_schema_version": schema_version,
+                "restore_eligible": bool(os.path.isfile(video_file)),
+                "integrity_status": integrity_status,
             })
     results.sort(key=lambda r: r.get("archived_at", ""), reverse=True)
     return results
@@ -865,10 +1083,67 @@ def clean_stale_archives(body: DeleteArchiveRequest):
 
 class RestoreArchiveRequest(BaseModel):
     folder: str
+    operation_id: Optional[str] = None
+    conflict_choice: Optional[Literal["archive_current", "replace_current"]] = None
 
 
-@router.post("/archive-restore")
-def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_db)):
+class ArchiveRestorePreviewRequest(BaseModel):
+    folder: str
+
+
+@router.post("/archive-restore-preview")
+def preview_archive_restore(body: ArchiveRestorePreviewRequest, db: Session = Depends(get_db)):
+    """Persist and return the exact restore plan before any file is changed."""
+    plan = _archive_plan(body.folder, db)
+    operation = FileOperation(
+        entity_stable_id=plan.get("video_stable_id") or f"archive:{os.path.basename(body.folder)}",
+        operation_type="archive_restore",
+        expected_revision=plan.get("expected_video_revision"),
+        plan_json=plan,
+        rollback_json={"current_path": plan.get("current_path")},
+        status="planned",
+    )
+    db.add(operation)
+    db.commit()
+    db.refresh(operation)
+    return {"operation_id": operation.id, **plan}
+
+
+def _archive_current_restore_conflict(video: VideoItem, current_path: str) -> str:
+    """Move the newer current file aside so restore remains reversible."""
+    from datetime import datetime, timezone
+    from app.routers.video_editor import write_archive_manifest
+
+    library_root, archive_root = next(
+        (pair for pair in _archive_roots()
+         if os.path.normcase(os.path.normpath(current_path)).startswith(
+             os.path.normcase(pair[0]) + os.sep)),
+        _archive_roots()[0],
+    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    conflict_folder = os.path.join(archive_root, "_restore_conflicts", video.stable_id, stamp)
+    os.makedirs(conflict_folder, exist_ok=False)
+    destination = os.path.join(conflict_folder, os.path.basename(current_path))
+    import shutil
+    shutil.move(current_path, destination)
+    write_archive_manifest(
+        destination,
+        current_path,
+        library_root,
+        video_id=video.id,
+        video_stable_id=video.stable_id,
+        artist=video.artist or "",
+        title=video.title or "",
+        archive_reason="restore_conflict",
+    )
+    if not os.path.isfile(os.path.join(conflict_folder, ".playarr-archive.json")):
+        import shutil
+        shutil.move(destination, current_path)
+        raise RuntimeError("Could not journal the current file before restore")
+    return destination
+
+
+def _execute_restore_archive_item(body: RestoreArchiveRequest, db: Session):
     """Restore an archived video back to its library location."""
     from app.config import get_settings as _get_settings
     from app.routers.video_editor import (
@@ -951,18 +1226,20 @@ def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_
             video.folder_path = os.path.dirname(restored_path)
 
         # Re-analyze quality
+        new_sig = None
         try:
             new_sig = extract_quality_signature(video.file_path)
             qs = db.query(QualitySigModel).filter(QualitySigModel.video_id == video_id).first()
             if qs:
                 for k, val in new_sig.items():
                     setattr(qs, k, val)
-            video.file_size_bytes = os.path.getsize(video.file_path)
-            if new_sig.get("height"):
-                video.resolution_label = f"{new_sig['height']}p"
-            db.commit()
         except Exception as e:
             logger.warning(f"Post-restore analysis failed: {e}")
+        video.file_size_bytes = os.path.getsize(video.file_path)
+        if new_sig and new_sig.get("height"):
+            video.resolution_label = f"{new_sig['height']}p"
+        video.revision = (video.revision or 1) + 1
+        db.commit()
     else:
         # No linked video — just move the file back to library root
         import shutil as _shutil
@@ -1008,6 +1285,120 @@ def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_
             pass
 
     return {"message": "Restored from archive", "video_id": video_id}
+
+
+@router.post("/archive-restore")
+def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_db)):
+    """Commit a previously previewed restore plan with an explicit conflict choice."""
+    if not body.operation_id:
+        raise HTTPException(409, "Restore preview is required before commit")
+    operation = db.get(FileOperation, body.operation_id)
+    if not operation or operation.operation_type != "archive_restore":
+        raise HTTPException(404, "Restore operation not found")
+    if operation.status != "planned":
+        raise HTTPException(409, f"Restore operation is {operation.status}, not planned")
+    plan = operation.plan_json or {}
+    if os.path.normcase(os.path.normpath(plan.get("folder", ""))) != os.path.normcase(os.path.normpath(body.folder)):
+        raise HTTPException(409, "Restore folder does not match the previewed operation")
+    video = db.get(VideoItem, plan.get("video_id")) if plan.get("video_id") else None
+    if video and operation.expected_revision is not None and video.revision != operation.expected_revision:
+        raise HTTPException(409, "Video changed after restore preview; preview again")
+    current_path = plan.get("current_path")
+    if current_path and os.path.isfile(current_path) and not body.conflict_choice:
+        raise HTTPException(409, {
+            "message": "A current file exists; choose archive_current or replace_current",
+            "operation_id": operation.id,
+            "choices": ["archive_current", "replace_current"],
+        })
+
+    operation.status = "running"
+    operation.started_at = datetime.now(timezone.utc)
+    db.commit()
+    conflict_archive = None
+    try:
+        if current_path and os.path.isfile(current_path) and body.conflict_choice == "archive_current":
+            if not video:
+                raise HTTPException(409, "Cannot safely archive the current file without a linked video")
+            conflict_archive = _archive_current_restore_conflict(video, current_path)
+            operation.rollback_json = {
+                "current_path": current_path,
+                "conflict_archive_path": conflict_archive,
+            }
+            db.commit()
+        result = _execute_restore_archive_item(body, db)
+        operation = db.get(FileOperation, body.operation_id)
+        operation.status = "succeeded"
+        operation.current_step = 1
+        operation.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        return {**result, "operation_id": operation.id}
+    except Exception as exc:
+        db.rollback()
+        # If the original restore never reached the current path, put the
+        # conflict copy back so a failed commit does not leave the library empty.
+        if conflict_archive and current_path and os.path.isfile(conflict_archive) and not os.path.isfile(current_path):
+            import shutil
+            os.makedirs(os.path.dirname(current_path), exist_ok=True)
+            shutil.move(conflict_archive, current_path)
+        operation = db.get(FileOperation, body.operation_id)
+        if operation:
+            operation.status = "failed"
+            operation.error_json = {
+                "code": "archive_restore_failed",
+                "message": str(exc),
+                "retryable": True,
+            }
+            operation.completed_at = datetime.now(timezone.utc)
+            db.commit()
+        raise
+
+
+@router.post("/archive-integrity")
+def archive_integrity_report(db: Session = Depends(get_db)):
+    """Verify manifests/checksums and report orphans without deleting anything."""
+    from app.routers.video_editor import _MANIFEST_NAME, _file_checksum, _manifest_video_path, _read_folder_manifest
+
+    records = []
+    for _library_root, archive_root in _archive_roots():
+        if not os.path.isdir(archive_root):
+            continue
+        for root, _dirs, names in os.walk(archive_root):
+            if _MANIFEST_NAME not in names:
+                continue
+            manifest = _read_folder_manifest(root)
+            problems = []
+            if not manifest:
+                problems.append("invalid_manifest")
+                records.append({"folder": root, "status": "invalid", "problems": problems})
+                continue
+            archive_file = _manifest_video_path(root, manifest)
+            if not archive_file:
+                problems.append("missing_archive_file")
+            expected = manifest.get("checksum_md5")
+            if archive_file and expected and _file_checksum(archive_file) != expected:
+                problems.append("checksum_mismatch")
+            video = db.get(VideoItem, manifest.get("video_id")) if manifest.get("video_id") else None
+            stable_id = manifest.get("video_stable_id")
+            if video and stable_id and video.stable_id != stable_id:
+                problems.append("stable_identity_mismatch")
+            if not video:
+                problems.append("orphaned_owner")
+            if manifest.get("schema_version") != 2:
+                problems.append("legacy_manifest")
+            records.append({
+                "folder": root,
+                "video_id": manifest.get("video_id"),
+                "video_stable_id": stable_id,
+                "status": "ok" if not problems else "attention",
+                "problems": problems,
+            })
+    return {
+        "checked": len(records),
+        "ok": sum(1 for row in records if row["status"] == "ok"),
+        "attention": sum(1 for row in records if row["status"] != "ok"),
+        "items": records,
+        "deleted": 0,
+    }
 
 
 
@@ -1093,8 +1484,8 @@ class GenreBlacklistUpdate(BaseModel):
 
 
 @router.get("/genre-blacklist", response_model=List[GenreBlacklistItem])
-def list_genre_blacklist(db: Session = Depends(get_db)):
-    """List all genres with their blacklist status and video count."""
+def list_genre_blacklist(include_unused: bool = False, db: Session = Depends(get_db)):
+    """List resolved mask genres; aliases and unused rows are maintenance data."""
     from app.models import Genre, video_genres
     from sqlalchemy import func
 
@@ -1112,21 +1503,28 @@ def list_genre_blacklist(db: Session = Depends(get_db)):
         .all()
     )
 
-    # Count aliases per master genre
+    by_id = {r[0]: r for r in results}
+    aggregate_counts: dict[int, int] = {}
     alias_counts: dict[int, int] = {}
     for r in results:
-        mid = r[4]
+        mid = r[4] or r[0]
+        aggregate_counts[mid] = aggregate_counts.get(mid, 0) + int(r[3] or 0)
         if mid is not None:
-            alias_counts[mid] = alias_counts.get(mid, 0) + 1
+            if r[4] is not None:
+                alias_counts[mid] = alias_counts.get(mid, 0) + 1
 
-    return [
-        GenreBlacklistItem(
-            id=r[0], name=r[1], blacklisted=bool(r[2]), video_count=r[3],
-            master_genre_id=r[4],
-            alias_count=alias_counts.get(r[0], 0),
-        )
-        for r in results
-    ]
+    output = []
+    for genre_id, count in aggregate_counts.items():
+        master = by_id.get(genre_id)
+        if master is None or master[4] is not None:
+            continue
+        if count == 0 and not include_unused:
+            continue
+        output.append(GenreBlacklistItem(
+            id=master[0], name=master[1], blacklisted=bool(master[2]), video_count=count,
+            master_genre_id=None, alias_count=alias_counts.get(master[0], 0),
+        ))
+    return sorted(output, key=lambda item: item.name.casefold())
 
 
 @router.put("/genre-blacklist")
@@ -1215,34 +1613,3 @@ def _build_kodi_zip(src: Path) -> bytes:
                 data = text.encode("utf-8")
             zf.writestr(arcname, data)
     return buf.getvalue()
-
-
-@router.get("/kodi-plugin/info")
-def kodi_plugin_info():
-    """Whether the Kodi add-on is bundled, and the matched download filename."""
-    src = _kodi_plugin_src_dir()
-    return {
-        "available": src is not None,
-        "version": APP_VERSION,
-        "addon_id": KODI_ADDON_ID,
-        "filename": f"{KODI_ADDON_ID}-{APP_VERSION}.zip",
-    }
-
-
-@router.get("/kodi-plugin")
-def download_kodi_plugin():
-    """Download the Kodi add-on zip, version-matched to this server."""
-    src = _kodi_plugin_src_dir()
-    if src is None:
-        raise HTTPException(status_code=404, detail="Kodi add-on is not bundled with this build")
-    try:
-        data = _build_kodi_zip(src)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Failed to build Kodi add-on zip")
-        raise HTTPException(status_code=500, detail=f"Failed to build Kodi add-on: {exc}")
-    filename = f"{KODI_ADDON_ID}-{APP_VERSION}.zip"
-    return Response(
-        content=data,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )

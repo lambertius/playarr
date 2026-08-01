@@ -16,7 +16,7 @@ import {
   useEntitySources, useUpdateEntitySources,
 } from "@/hooks/queries";
 import { metadataManagerApi } from "@/lib/api";
-import type { GenreSearchResult, ArtworkEntityRow } from "@/types";
+import type { GenreSearchResult, ArtworkEntityRow, ArtistConsolidationAggregate } from "@/types";
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
 import { Skeleton } from "@/components/Feedback";
@@ -334,7 +334,108 @@ function PieStatCard({ label, segments, centerValue, centerSub, alert }: {
 
 // ─── Artist Consolidation ────────────────────────────────
 
+type ArtistDraft = {
+  stableId?: string;
+  revision: number;
+  maskName: string;
+  targets: Array<{ rawName: string; mbid: string }>;
+  mbids: string[];
+};
+
 function ArtistConsolidation() {
+  const { toast } = useToast();
+  const [items, setItems] = useState<ArtistConsolidationAggregate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<ArtistDraft | null>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try { setItems(await metadataManagerApi.artistConsolidationsV2()); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { void reload(); }, [reload]);
+
+  const edit = (item: ArtistConsolidationAggregate) => setDraft({
+    stableId: item.stable_id,
+    revision: item.revision,
+    maskName: item.mask_name,
+    targets: item.targets.map(target => ({ rawName: target.raw_name, mbid: target.mb_artist_id ?? "" })),
+    mbids: [...item.mbids],
+  });
+
+  const save = async () => {
+    if (!draft?.maskName.trim()) return;
+    setSaving(true);
+    const body = {
+      mask_name: draft.maskName.trim(),
+      targets: draft.targets.filter(target => target.rawName.trim()).map(target => ({
+        raw_name: target.rawName.trim(), provenance: "user", mb_artist_id: target.mbid.trim() || undefined,
+      })),
+      mbids: draft.mbids.filter(Boolean),
+    };
+    try {
+      if (draft.stableId) {
+        await metadataManagerApi.updateArtistConsolidationV2(draft.stableId, { ...body, expected_revision: draft.revision });
+      } else {
+        await metadataManagerApi.createArtistConsolidationV2(body);
+      }
+      setDraft(null);
+      await reload();
+      toast({ type: "success", title: "Artist consolidation saved" });
+    } catch {
+      toast({ type: "error", title: "Could not save; reload if another device changed this consolidation" });
+    } finally { setSaving(false); }
+  };
+
+  const remove = async (item: ArtistConsolidationAggregate) => {
+    try {
+      await metadataManagerApi.deleteArtistConsolidationV2(item.stable_id, item.revision);
+      await reload();
+      toast({ type: "success", title: "Artist consolidation deleted; source names were retained" });
+    } catch { toast({ type: "error", title: "Could not delete artist consolidation" }); }
+  };
+
+  if (loading) return <Skeleton className="h-48 rounded-lg" />;
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-text-muted">Display masks group raw target names and zero or more MBIDs without rewriting source metadata.</p>
+        <button className="btn-primary btn-sm" onClick={() => setDraft({ revision: 0, maskName: "", targets: [], mbids: [] })}><Plus size={13} /> New consolidation</button>
+      </div>
+      <div className="overflow-hidden rounded-lg border border-surface-border">
+        <div className="grid grid-cols-[minmax(180px,1fr)_minmax(160px,1fr)_minmax(220px,2fr)_auto] gap-3 bg-surface-dark px-4 py-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+          <span>MBID</span><span>Mask name</span><span>Target names</span><span>Actions</span>
+        </div>
+        {items.length === 0 ? <p className="p-6 text-center text-xs text-text-muted">No artist consolidations yet. They can be created without an MBID.</p> : items.map(item => (
+          <div key={item.stable_id} className="grid grid-cols-[minmax(180px,1fr)_minmax(160px,1fr)_minmax(220px,2fr)_auto] gap-3 border-t border-surface-border px-4 py-3 text-xs items-start">
+            <div className="space-y-1 font-mono text-[10px] text-text-muted">{item.mbids.length ? item.mbids.map(mbid => <div key={mbid}>{mbid}</div>) : <span>None</span>}</div>
+            <span className="font-medium text-text-primary">{item.mask_name}</span>
+            <div className="flex flex-wrap gap-1">{item.targets.length ? item.targets.map(target => <span key={target.id} className="rounded bg-surface-light px-2 py-1 text-text-secondary">{target.raw_name}</span>) : <span className="text-text-muted">No targets</span>}</div>
+            <div className="flex gap-1"><button className="btn-ghost btn-xs" onClick={() => edit(item)}><Edit3 size={12} /> Edit</button><button className="btn-ghost btn-xs text-red-400" onClick={() => void remove(item)}><Trash2 size={12} /> Delete</button></div>
+          </div>
+        ))}
+      </div>
+
+      {draft && (
+        <div className="card space-y-4 p-4">
+          <h3 className="text-sm font-semibold">{draft.stableId ? "Edit" : "New"} artist consolidation</h3>
+          <label className="block text-xs text-text-secondary">Mask name<input className="input-field mt-1 w-full" value={draft.maskName} onChange={event => setDraft({ ...draft, maskName: event.target.value })} /></label>
+          <div className="space-y-2"><div className="flex justify-between"><span className="text-xs font-medium text-text-secondary">Target names</span><button className="btn-ghost btn-xs" onClick={() => setDraft({ ...draft, targets: [...draft.targets, { rawName: "", mbid: "" }] })}><Plus size={11} /> Add target</button></div>
+            {draft.targets.map((target, index) => <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2"><input aria-label={`Target name ${index + 1}`} className="input-field" placeholder="Raw target name" value={target.rawName} onChange={event => setDraft({ ...draft, targets: draft.targets.map((value, idx) => idx === index ? { ...value, rawName: event.target.value } : value) })} /><input aria-label={`Target MBID ${index + 1}`} className="input-field font-mono" placeholder="Optional MBID" value={target.mbid} onChange={event => setDraft({ ...draft, targets: draft.targets.map((value, idx) => idx === index ? { ...value, mbid: event.target.value } : value) })} /><button className="btn-ghost btn-xs text-red-400" onClick={() => setDraft({ ...draft, targets: draft.targets.filter((_, idx) => idx !== index) })}><X size={12} /> Remove</button></div>)}
+          </div>
+          <div className="space-y-2"><div className="flex justify-between"><span className="text-xs font-medium text-text-secondary">Additional MBIDs</span><button className="btn-ghost btn-xs" onClick={() => setDraft({ ...draft, mbids: [...draft.mbids, ""] })}><Plus size={11} /> Add MBID</button></div>
+            {draft.mbids.map((mbid, index) => <div key={index} className="flex gap-2"><input aria-label={`MBID ${index + 1}`} className="input-field flex-1 font-mono" value={mbid} onChange={event => setDraft({ ...draft, mbids: draft.mbids.map((value, idx) => idx === index ? event.target.value : value) })} /><button className="btn-ghost btn-xs text-red-400" onClick={() => setDraft({ ...draft, mbids: draft.mbids.filter((_, idx) => idx !== index) })}><X size={12} /> Remove</button></div>)}
+          </div>
+          <div className="flex justify-end gap-2"><button className="btn-ghost btn-sm" onClick={() => setDraft(null)}>Cancel</button><button className="btn-primary btn-sm" disabled={saving || !draft.maskName.trim()} onClick={() => void save()}>{saving && <Loader2 size={13} className="animate-spin" />} Save changes</button></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** @deprecated Compatibility renderer retained for one migration release. */
+export function ArtistConsolidationLegacy() {
   const { data: conflicts, isLoading, refetch } = useArtistConflicts();
   const consolidateMutation = useConsolidateArtist();
   const { toast } = useToast();

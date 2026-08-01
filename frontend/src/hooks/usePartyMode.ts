@@ -1,11 +1,10 @@
 import { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { libraryApi, playlistApi } from "@/lib/api";
-import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
+import { libraryApi } from "@/lib/api";
+import { usePlaybackStore } from "@/stores/playbackStore";
 import { useFireworksStore } from "@/stores/fireworksStore";
 import { useToast } from "@/components/Toast";
 import { getPref, setPref } from "@/lib/preferences";
-import { shuffle } from "@/lib/shuffle";
 import type { PartyModeParams, PartyModeExclusions } from "@/types";
 
 // Server-stored preference groups (shared with the Kodi add-on, which inherits
@@ -24,6 +23,7 @@ export const DEFAULT_EXCLUSIONS: PartyModeExclusions = {
   albums: [],
   min_song_rating: null,
   min_video_rating: null,
+  exclude_adult: true,
 };
 
 export interface PartyModeAnimationSettings {
@@ -117,6 +117,8 @@ interface LaunchOptions {
    *  is authoritative about the year, so when it chooses the whole library
    *  (no party_year) the saved era must not leak back in. */
   ignoreSavedEra?: boolean;
+  /** Explicit start-panel playlist. null explicitly means no playlist. */
+  playlistId?: number | null;
 }
 
 interface UsePartyModeResult {
@@ -147,41 +149,28 @@ export function usePartyMode(): UsePartyModeResult {
     };
 
     try {
-      // A configured Party playlist overrides the filter-based generation: play
-      // the playlist's videos (shuffled), as-is.  If the playlist is missing or
-      // empty we fall through to the default filter-based behaviour below.
-      const { playlistId } = loadPartyPlaylist();
-      if (playlistId != null) {
-        try {
-          const pl = await playlistApi.get(playlistId);
-          const tracks: PlaybackTrack[] = (pl.entries ?? []).map((e) => ({
-            videoId: e.video_id,
-            artist: e.artist,
-            title: e.title,
-            hasPoster: e.has_poster,
-            duration: e.duration_seconds ?? undefined,
-          }));
-          if (tracks.length > 0) {
-            replaceQueue(shuffle(tracks), 0);
-            celebrate(tracks.length);
-            return;
-          }
-          // empty playlist → fall through to filter-based generation
-        } catch {
-          // playlist was deleted or unreachable → fall through
-        }
-      }
-
       // Load exclusion settings
       const exclusions = loadExclusions();
 
       const params: PartyModeParams = {
         ...filterParams,
       };
+      if (opts && Object.prototype.hasOwnProperty.call(opts, "playlistId")) {
+        params.use_saved_playlist = false;
+        if (opts.playlistId != null) params.playlist_id = opts.playlistId;
+      } else {
+        const { playlistId } = loadPartyPlaylist();
+        if (playlistId != null) params.playlist_id = playlistId;
+      }
 
       // Apply exclusions
       if (exclusions.version_types.length > 0) {
-        params.exclude_version_types = exclusions.version_types.join(",");
+        params.exclude_version_types = [
+          ...exclusions.version_types,
+          ...(exclusions.exclude_adult ? ["18+"] : []),
+        ].filter((value, index, all) => all.indexOf(value) === index).join(",");
+      } else if (exclusions.exclude_adult) {
+        params.exclude_version_types = "18+";
       }
       if (exclusions.artists.length > 0) {
         params.exclude_artists = exclusions.artists.join(",");
@@ -221,6 +210,7 @@ export function usePartyMode(): UsePartyModeResult {
       // Replace the queue with shuffled tracks
       replaceQueue(
         result.tracks.map((t) => ({
+          queueEntryId: t.queueEntryId,
           videoId: t.videoId,
           artist: t.artist,
           title: t.title,

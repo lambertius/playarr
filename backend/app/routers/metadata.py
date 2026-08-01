@@ -19,11 +19,14 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File as FastAPIFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import VideoItem, ProcessingJob, JobStatus
+from app.models import (
+    VideoItem, ProcessingJob, JobStatus,
+    ArtistConsolidation, ArtistConsolidationTarget, ArtistConsolidationMbid,
+)
 from app.metadata.models import (
     ArtistEntity, AlbumEntity, TrackEntity, MetadataRevision, ExportManifest,
 )
@@ -529,6 +532,112 @@ def undo_refresh(entity_type: str, entity_id: int, db: Session = Depends(get_db)
 # Artist Consolidation — detect & fix conflicting artist names via MBID
 # ---------------------------------------------------------------------------
 
+class ArtistConsolidationTargetInput(BaseModel):
+    raw_name: str
+    provenance: Optional[str] = None
+    mb_artist_id: Optional[str] = None
+
+
+class ArtistConsolidationCreate(BaseModel):
+    mask_name: str
+    targets: List[ArtistConsolidationTargetInput] = Field(default_factory=list)
+    mbids: List[str] = Field(default_factory=list)
+
+
+class ArtistConsolidationUpdate(ArtistConsolidationCreate):
+    expected_revision: int
+
+
+def _replace_artist_consolidation_members(
+    item: ArtistConsolidation,
+    targets: List[ArtistConsolidationTargetInput],
+    mbids: List[str],
+) -> None:
+    item.targets.clear()
+    item.mbids.clear()
+    seen_names: set[str] = set()
+    carried_mbids: list[str] = []
+    for target in targets:
+        raw_name = target.raw_name.strip()
+        if not raw_name or raw_name.casefold() in seen_names:
+            continue
+        seen_names.add(raw_name.casefold())
+        item.targets.append(ArtistConsolidationTarget(
+            raw_name=raw_name,
+            provenance=target.provenance,
+            mb_artist_id=target.mb_artist_id.strip() if target.mb_artist_id else None,
+        ))
+        if target.mb_artist_id and target.mb_artist_id.strip():
+            carried_mbids.append(target.mb_artist_id.strip())
+    for mbid in dict.fromkeys([*(value.strip() for value in mbids if value.strip()), *carried_mbids]):
+        item.mbids.append(ArtistConsolidationMbid(mb_artist_id=mbid))
+
+
+@router.get("/artist-consolidations-v2")
+def get_artist_consolidations_v2(db: Session = Depends(get_db)):
+    from app.services.consolidations import list_artist_consolidations
+    return list_artist_consolidations(db)
+
+
+@router.post("/artist-consolidations-v2", status_code=201)
+def create_artist_consolidation_v2(body: ArtistConsolidationCreate, db: Session = Depends(get_db)):
+    from app.services.consolidations import serialize_artist_consolidation, write_library_consolidation_manifest
+    mask_name = body.mask_name.strip()
+    if not mask_name:
+        raise HTTPException(422, "Mask name is required")
+    item = ArtistConsolidation(mask_name=mask_name)
+    _replace_artist_consolidation_members(item, body.targets, body.mbids)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    write_library_consolidation_manifest(db)
+    return serialize_artist_consolidation(item)
+
+
+@router.put("/artist-consolidations-v2/{stable_id}")
+def update_artist_consolidation_v2(stable_id: str, body: ArtistConsolidationUpdate, db: Session = Depends(get_db)):
+    from app.services.consolidations import serialize_artist_consolidation, write_library_consolidation_manifest
+    item = db.query(ArtistConsolidation).filter(ArtistConsolidation.stable_id == stable_id).one_or_none()
+    if not item:
+        raise HTTPException(404, "Artist consolidation not found")
+    if item.revision != body.expected_revision:
+        raise HTTPException(409, {"code": "stale_revision", "current_revision": item.revision})
+    mask_name = body.mask_name.strip()
+    if not mask_name:
+        raise HTTPException(422, "Mask name is required")
+    item.mask_name = mask_name
+    _replace_artist_consolidation_members(item, body.targets, body.mbids)
+    item.revision += 1
+    db.commit()
+    write_library_consolidation_manifest(db)
+    return serialize_artist_consolidation(item)
+
+
+@router.delete("/artist-consolidations-v2/{stable_id}")
+def delete_artist_consolidation_v2(stable_id: str, expected_revision: int, db: Session = Depends(get_db)):
+    from app.services.consolidations import write_library_consolidation_manifest
+    item = db.query(ArtistConsolidation).filter(ArtistConsolidation.stable_id == stable_id).one_or_none()
+    if not item:
+        raise HTTPException(404, "Artist consolidation not found")
+    if item.revision != expected_revision:
+        raise HTTPException(409, {"code": "stale_revision", "current_revision": item.revision})
+    db.delete(item)
+    db.commit()
+    write_library_consolidation_manifest(db)
+    return {"deleted": True, "stable_id": stable_id}
+
+
+@router.get("/artist-consolidation-suggestions")
+def artist_consolidation_suggestions(db: Session = Depends(get_db)):
+    from app.services.consolidations import consolidation_conflicts
+    return consolidation_conflicts(db)
+
+
+@router.get("/consolidations/manifest")
+def get_consolidation_manifest(db: Session = Depends(get_db)):
+    from app.services.consolidations import library_consolidation_manifest
+    return library_consolidation_manifest(db)
+
 class ArtistConflict(BaseModel):
     mb_artist_id: str
     names: list  # list of {name, video_count}
@@ -698,16 +807,10 @@ def get_mbid_stats(db: Session = Depends(get_db)):
     with_pvid = db.query(func.count(VideoItem.id)).filter(VideoItem.playarr_video_id.isnot(None)).scalar() or 0
     with_ptid = db.query(func.count(VideoItem.id)).filter(VideoItem.playarr_track_id.isnot(None)).scalar() or 0
 
-    # Count conflicts
-    conflict_count = 0
-    groups = (
-        db.query(VideoItem.mb_artist_id, func.count(func.distinct(VideoItem.artist)))
-        .filter(VideoItem.mb_artist_id.isnot(None))
-        .group_by(VideoItem.mb_artist_id)
-        .having(func.count(func.distinct(VideoItem.artist)) > 1)
-        .all()
-    )
-    conflict_count = len(groups)
+    # The overview and list use the same diagnostics service, so a non-zero
+    # count can never lead to an unexplained empty screen.
+    from app.services.consolidations import consolidation_conflicts
+    conflict_count = len(consolidation_conflicts(db))
 
     return MbidStats(
         total_videos=total,

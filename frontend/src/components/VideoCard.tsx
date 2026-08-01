@@ -139,7 +139,7 @@ export function VideoCard({ video, onAction, selected, onSelect }: VideoCardProp
         <div className="absolute top-2 left-2 flex gap-1">
           <QualityBadge resolution={video.resolution_label} />
           <VersionBadge versionType={video.version_type} />
-          <EnrichmentBadge status={video.enrichment_status} />
+          <EnrichmentBadge status={video.enrichment_status} detail={video.enrichment_detail} />
         </div>
       </Link>
 

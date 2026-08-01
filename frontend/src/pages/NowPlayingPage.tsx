@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, memo } from "react";
 import ReactDOM from "react-dom";
-import { Play, Monitor, Maximize, X, ListPlus, Star, Film } from "lucide-react";
+import { Play, Monitor, Maximize, X, ListPlus, Star, Film, AlertTriangle } from "lucide-react";
 import { Tooltip } from "@/components/Tooltip";
 import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
@@ -415,6 +415,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
   // re-encode of the casting tab — disable it outside the browser profile.
   const allowBlur = profile === "browser";
   const videoRef = useRef<HTMLVideoElement>(null);
+  const pageRootRef = useRef<HTMLDivElement>(null);
   const outerRef = useRef<HTMLDivElement>(null);
   const queue = usePlaybackStore((s) => s.queue);
   const currentIndex = usePlaybackStore((s) => s.currentIndex);
@@ -443,27 +444,21 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
   const currentTime = usePlaybackStore((s) => s.currentTime);
   const fullscreenMode = usePlaybackStore((s) => s.fullscreenMode);
   const setFullscreenMode = usePlaybackStore((s) => s.setFullscreenMode);
-  const individualTrack = usePlaybackStore((s) => s.individualTrack);
-  const stopIndividual = usePlaybackStore((s) => s.stopIndividual);
+  const setNativeFullscreen = usePlaybackStore((s) => s.setNativeFullscreen);
 
   // TV/kiosk mode: the <video> plays a single combined stream (its own audio),
   // is its own master clock, and advances the queue itself.
-  const next = usePlaybackStore((s) => s.next);
-  const repeat = usePlaybackStore((s) => s.repeat);
   const setCurrentTime = usePlaybackStore((s) => s.setCurrentTime);
   const setDuration = usePlaybackStore((s) => s.setDuration);
   const [needsGesture, setNeedsGesture] = useState(false);
+  const [playbackState, setPlaybackState] = useState<"loading" | "playing" | "buffering" | "error">("loading");
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
 
   // Let a host surface (TV mode) know when a manual "Press OK" gesture is
   // required, so it can move its own "Starting…" overlay out of the way.
   useEffect(() => {
     onNeedsGesture?.(needsGesture);
   }, [needsGesture, onNeedsGesture]);
-
-  const videoSrc = (videoId: number) =>
-    tvMode
-      ? playbackApi.streamUrl(videoId, transcode)
-      : playbackApi.videoOnlyStreamUrl(videoId, transcode);
 
   // Playback-health diagnostics → server log (frame drops, stalls, buffer).
   usePlaybackDiagnostics(videoRef, { videoId: track?.videoId ?? null, mode: profile });
@@ -475,13 +470,17 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
     const el = videoRef.current;
     if (!el) return;
     el.play()
-      .then(() => setNeedsGesture(false))
+      .then(() => {
+        setNeedsGesture(false);
+        setPlaybackState("playing");
+      })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "NotAllowedError") setNeedsGesture(true);
       });
   }, []);
 
   const handleTvCanPlay = useCallback(() => {
+    setPlaybackState("playing");
     if (tvMode) tryTvPlay();
   }, [tvMode, tryTvPlay]);
 
@@ -490,60 +489,69 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
     if (el) setCurrentTime(el.currentTime);
   }, [setCurrentTime]);
 
-  const handleTvEnded = useCallback(() => {
-    // TV/cast owns the clock, so it must replicate AudioManager's repeat-one
-    // handling itself — store.next() always advances and would otherwise turn
-    // "repeat one" into "play next" (and stop a single-track queue entirely).
-    const el = videoRef.current;
-    if (repeat === "one" && el) {
-      el.currentTime = 0;
-      el.play().catch(() => {});
-      return;
-    }
-    const activeId = (s: ReturnType<typeof usePlaybackStore.getState>) =>
-      s.individualTrack?.videoId ??
-      (s.currentIndex >= 0 && s.currentIndex < s.queue.length
-        ? s.queue[s.currentIndex]?.videoId ?? null
-        : null);
-    const prevId = activeId(usePlaybackStore.getState());
-    next();
-    // If next() didn't change the media (single-track queue, a duplicate videoId,
-    // or a re-pick) the src effect — keyed on videoId — won't re-fire, so the
-    // video would freeze on its last frame. Replay imperatively. But only if
-    // next() chose to keep playing: when it stops at the end of a queue
-    // (isPlaying:false), respect that and let playback end.
-    const after = usePlaybackStore.getState();
-    if (el && after.isPlaying && activeId(after) === prevId) {
-      el.currentTime = 0;
-      el.play().catch(() => {});
-    }
-  }, [next, repeat]);
-
   const startTv = useCallback(() => { tryTvPlay(); }, [tryTvPlay]);
+  const retryPlayback = useCallback(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    setPlaybackState("loading");
+    setPlaybackError(null);
+    el.load();
+    el.play().then(() => setPlaybackState("playing")).catch(() => {
+      if (tvMode) setNeedsGesture(true);
+    });
+  }, [tvMode]);
 
-  // TV mode drives the persistent <video> imperatively so tracks advance
-  // continuously: kill the previous stream, load the next, and play — mirroring
-  // AudioManager's proven desktop transition.  The element is NOT keyed by
-  // track in TV mode, so it keeps its autoplay permission across tracks.
-  const prevTvVideoIdRef = useRef<number | null>(null);
+  // Every source assignment gets a session token. Event handlers close over
+  // that token, so a delayed ended/error from the previous stream cannot
+  // restart the current occurrence or advance twice.
+  const mediaSessionRef = useRef(0);
   useEffect(() => {
-    if (!tvMode) {
-      prevTvVideoIdRef.current = null;
-      return;
-    }
     const el = videoRef.current;
     if (!el || !track) return;
-    if (track.videoId === prevTvVideoIdRef.current) return;
-    // Changing src aborts the previous request, which the server cleans up on
-    // disconnect (the old track's FFmpeg is killed when its generator ends).
-    // We deliberately do NOT call killStreams() here: it kills *all* active
-    // streams and races with the stream we're about to start, killing the new
-    // track's FFmpeg and stalling playback (the next track re-requests).
-    prevTvVideoIdRef.current = track.videoId;
-    el.src = playbackApi.streamUrl(track.videoId, transcode);
+    const session = ++mediaSessionRef.current;
+    let transitioned = false;
+    setPlaybackState("loading");
+    setPlaybackError(null);
+
+    const onEnded = () => {
+      if (mediaSessionRef.current !== session || transitioned) return;
+      transitioned = true;
+      const state = usePlaybackStore.getState();
+      if (state.individualTrack) {
+        state.stopIndividual();
+        return;
+      }
+      // Desktop audio is the master clock and advances the queue itself.
+      if (!tvMode) return;
+      if (state.repeat === "one") {
+        transitioned = false;
+        el.currentTime = 0;
+        el.play().catch(() => {});
+        return;
+      }
+      state.next();
+    };
+    const onError = () => {
+      if (mediaSessionRef.current !== session) return;
+      setPlaybackState("error");
+      setPlaybackError("This stream could not be decoded. Retry keeps the current queue occurrence.");
+    };
+    el.addEventListener("ended", onEnded);
+    el.addEventListener("error", onError);
+    el.src = tvMode
+      ? playbackApi.streamUrl(track.videoId, transcode)
+      : playbackApi.videoOnlyStreamUrl(track.videoId, transcode);
     el.load();
-    tryTvPlay();
-  }, [tvMode, track?.videoId, tryTvPlay, transcode]);
+    if (usePlaybackStore.getState().isPlaying) {
+      el.play().then(() => setPlaybackState("playing")).catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === "NotAllowedError") setNeedsGesture(true);
+      });
+    }
+    return () => {
+      el.removeEventListener("ended", onEnded);
+      el.removeEventListener("error", onError);
+    };
+  }, [tvMode, track?.queueEntryId, track?.videoId, transcode]);
 
   const [videoHovered, setVideoHovered] = useState(false);
   const [_videoAspect, setVideoAspect] = useState("16 / 9");
@@ -555,9 +563,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [overlayDetail, setOverlayDetail] = useState<VideoItemDetail | null>(null);
   const [overlayFading, setOverlayFading] = useState(false);
-  const overlayTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const overlayFadeTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const lastOverlayTrackRef = useRef<number | null>(null);
+  const lastOverlayTrackRef = useRef<string | null>(null);
 
   const isFullscreen = fullscreenMode !== "off";
   const isVideoOnly = fullscreenMode === "video";
@@ -574,12 +580,19 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
   const scheduleQueueHide = useCallback(() => {
     if (!queueHideActive) {
       setQueueVisible(true);
+      setOverlayVisible(true);
       return;
     }
     setQueueVisible(true);
+    setOverlayVisible(true);
+    setOverlayFading(false);
     if (queueHideTimerRef.current) clearTimeout(queueHideTimerRef.current);
     queueHideTimerRef.current = setTimeout(
-      () => setQueueVisible(false),
+      () => {
+        setQueueVisible(false);
+        setOverlayFading(true);
+        setOverlayVisible(false);
+      },
       Math.max(1, queueHideDelay) * 1000,
     );
   }, [queueHideActive, queueHideDelay]);
@@ -600,10 +613,15 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       lastMousePosRef.current = { x: e.clientX, y: e.clientY };
       scheduleQueueHide();
     };
+    const onActivity = () => scheduleQueueHide();
     window.addEventListener("mousemove", onMove);
+    window.addEventListener("keydown", onActivity);
+    window.addEventListener("focusin", onActivity);
     scheduleQueueHide();
     return () => {
       window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("keydown", onActivity);
+      window.removeEventListener("focusin", onActivity);
       if (queueHideTimerRef.current) clearTimeout(queueHideTimerRef.current);
     };
   }, [queueHideActive, scheduleQueueHide]);
@@ -611,18 +629,26 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
   // Per-song mode: reveal again at the start of every new track.
   useEffect(() => {
     if (queueHideActive && queueHideMode === "per-song") scheduleQueueHide();
-  }, [track?.videoId, queueHideActive, queueHideMode, scheduleQueueHide]);
+  }, [track?.queueEntryId, queueHideActive, queueHideMode, scheduleQueueHide]);
 
   // ── Sync store when native fullscreen is exited via Escape / browser chrome ──
   useEffect(() => {
     const onFsChange = () => {
-      if (!document.fullscreenElement && usePlaybackStore.getState().fullscreenMode !== "off") {
-        setFullscreenMode("off");
-      }
+      setNativeFullscreen(Boolean(document.fullscreenElement));
     };
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, [setFullscreenMode]);
+  }, [setNativeFullscreen]);
+
+  // Presentation mode and browser-native fullscreen are separate states. Escape
+  // may leave native fullscreen without remounting or changing the video layout.
+  useEffect(() => {
+    if (fullscreenMode !== "off" && !document.fullscreenElement) {
+      pageRootRef.current?.requestFullscreen().catch(() => {});
+    } else if (fullscreenMode === "off" && document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, [fullscreenMode]);
 
   // ── Fetch full video detail for metadata overlay when track changes ──
   useEffect(() => {
@@ -632,12 +658,9 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       return;
     }
     // Only trigger on track change
-    if (lastOverlayTrackRef.current === track.videoId) return;
-    lastOverlayTrackRef.current = track.videoId;
-
-    // Clear any existing timers
-    if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
-    if (overlayFadeTimerRef.current) clearTimeout(overlayFadeTimerRef.current);
+    const occurrence = track.queueEntryId ?? `video-${track.videoId}`;
+    if (lastOverlayTrackRef.current === occurrence) return;
+    lastOverlayTrackRef.current = occurrence;
 
     // Fetch the full video detail — abort on rapid track changes
     let cancelled = false;
@@ -646,31 +669,16 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       setOverlayDetail(detail);
       setOverlayFading(false);
       setOverlayVisible(true);
-
-      // Start fade-out 2s before end
-      const fadeStart = Math.max(0, (overlayDuration - 2)) * 1000;
-      overlayFadeTimerRef.current = setTimeout(() => {
-        setOverlayFading(true);
-      }, fadeStart);
-
-      // Hide completely after duration
-      overlayTimerRef.current = setTimeout(() => {
-        setOverlayVisible(false);
-        setOverlayFading(false);
-      }, overlayDuration * 1000);
+      scheduleQueueHide();
     }).catch(() => {});
 
     return () => {
       cancelled = true;
-      if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
-      if (overlayFadeTimerRef.current) clearTimeout(overlayFadeTimerRef.current);
     };
-  }, [track?.videoId, overlayDuration]);
+  }, [track?.queueEntryId, track?.videoId, overlayDuration, scheduleQueueHide]);
 
-  // No manual video src cleanup needed — key={track.videoId} causes React
-  // to destroy the old <video> DOM node and create a fresh one on every
-  // track change. The browser closes HTTP connections when elements are
-  // destroyed, and the server's generator finally-block kills FFmpeg.
+  // The media node remains mounted across presentation-mode and occurrence
+  // changes; the guarded source effect above owns stream replacement.
 
   // Sync play/pause with store. Needed in both modes (browser: video follows the
   // audio master; tv/cast: remote/store pause must stop the self-clocked video).
@@ -703,6 +711,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
 
   // Immediate sync when video starts playing (desktop only)
   const handleVideoPlaying = useCallback(() => {
+    setPlaybackState("playing");
     if (tvMode) return;
     const el = videoRef.current;
     if (!el) return;
@@ -724,16 +733,6 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       setDuration(el.duration);
     }
   }, [tvMode, setDuration]);
-
-  // ── Playlist/individual track conflict: stop individual when it ends ──
-  useEffect(() => {
-    if (!individualTrack) return;
-    const el = videoRef.current;
-    if (!el) return;
-    const onEnded = () => stopIndividual();
-    el.addEventListener("ended", onEnded);
-    return () => el.removeEventListener("ended", onEnded);
-  }, [individualTrack, stopIndividual]);
 
   const QUEUE_WIDTH = 320;
 
@@ -784,61 +783,20 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
     </button>
   ) : null;
 
-  // ── Mode 2: Video-only fullscreen ──
-  if (isVideoOnly) {
-    return (
-      <div className="relative flex items-center justify-center h-screen w-screen bg-black">
-        {track ? (
-          <video
-            ref={videoRef}
-            key={tvMode ? "tv-video" : track.videoId}
-            src={tvMode ? undefined : videoSrc(track.videoId)}
-            className="h-full w-full object-contain"
-            autoPlay={isPlaying}
-            controls={false}
-            disablePictureInPicture
-            muted={!tvMode}
-            onPlaying={handleVideoPlaying}
-            onLoadedMetadata={handleLoadedMetadata}
-            onCanPlay={tvMode ? handleTvCanPlay : undefined}
-            onTimeUpdate={tvMode ? handleTvTimeUpdate : undefined}
-            onEnded={tvMode ? handleTvEnded : undefined}
-          />
-        ) : (
-          <div className="flex items-center justify-center text-white/50 text-lg">
-            Nothing playing
-          </div>
-        )}
-
-        {/* ── Metadata overlay ── */}
-        {overlayVisible && overlayDetail && track && (
-          <MetadataOverlay
-            detail={overlayDetail}
-            track={track}
-            fading={overlayFading}
-            opacity={queueOpacity}
-            overlaySize={overlaySize}
-            overlayDuration={overlayDuration}
-            allowBlur={allowBlur}
-          />
-        )}
-
-        {tvGate}
-
-        <FullscreenControls />
-      </div>
-    );
-  }
-
   // ── Mode 1: Theater fullscreen (artwork bg + video + queue, no chrome) ──
   // Also used for normal (non-fullscreen) layout
   return (
-    <div className="relative flex h-full overflow-hidden">
+    <div
+      ref={pageRootRef}
+      className={`relative flex overflow-hidden bg-black ${isVideoOnly ? "h-screen w-screen" : "h-full"}`}
+      onPointerMove={scheduleQueueHide}
+      onFocus={scheduleQueueHide}
+    >
       {/* Animated artwork grid behind everything */}
-      <ArtworkBackground profile={profile} />
+      {!isVideoOnly && <ArtworkBackground profile={profile} />}
 
       {/* Content layer — centres video + queue as a single block */}
-      <div className="relative z-10 flex items-center justify-center h-full w-full p-6">
+      <div className={`relative z-10 flex items-center justify-center h-full w-full ${isVideoOnly ? "p-0" : "p-6"}`}>
         {/* Outer wrapper: measured by ResizeObserver to compute 16:9 box size */}
         <div
           ref={outerRef}
@@ -847,20 +805,22 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
             // In TV mode the page lays out on a fixed canvas (then CSS-scaled),
             // so size relative to the canvas height — `vh` would point at the
             // smaller real viewport and collapse the video into a narrow band.
-            height: tvMode && tvCanvasHeight
+            height: isVideoOnly
+              ? "100vh"
+              : tvMode && tvCanvasHeight
               ? `calc(${tvCanvasHeight}px * ${playbackRatio / 100})`
               : `calc((${isFullscreen ? "100vh - 48px" : "100vh - 160px"}) * ${playbackRatio / 100})`,
           }}
         >
           {/* ── 16:9 bounding box — pixel-sized to always fit ── */}
           <div
-            className="relative flex items-center justify-center rounded-l-lg overflow-hidden flex-shrink-0 transition-transform duration-700 ease-in-out"
+            className={`relative flex items-center justify-center overflow-hidden flex-shrink-0 transition-all duration-700 ease-in-out ${isVideoOnly ? "rounded-none" : "rounded-l-lg"}`}
             style={{
-              width: boxSize.w,
-              height: boxSize.h,
+              width: isVideoOnly ? "100vw" : boxSize.w,
+              height: isVideoOnly ? "100vh" : boxSize.h,
               // When the queue hides, glide the video to screen centre (it sits
               // left-of-centre because the queue occupies half the block width).
-              transform: queueVisible ? undefined : `translateX(${QUEUE_WIDTH / 2}px)`,
+              transform: isVideoOnly || queueVisible ? undefined : `translateX(${QUEUE_WIDTH / 2}px)`,
             }}
             onMouseEnter={() => setVideoHovered(true)}
             onMouseLeave={() => setVideoHovered(false)}
@@ -868,8 +828,6 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
             {track ? (
               <video
                 ref={videoRef}
-                key={tvMode ? "tv-video" : track.videoId}
-                src={tvMode ? undefined : videoSrc(track.videoId)}
                 className="w-full h-full object-contain"
                 autoPlay={isPlaying}
                 controls={false}
@@ -879,7 +837,8 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
                 onLoadedMetadata={handleLoadedMetadata}
                 onCanPlay={tvMode ? handleTvCanPlay : undefined}
                 onTimeUpdate={tvMode ? handleTvTimeUpdate : undefined}
-                onEnded={tvMode ? handleTvEnded : undefined}
+                onWaiting={() => setPlaybackState("buffering")}
+                onStalled={() => setPlaybackState("buffering")}
               />
             ) : (
               <div className="flex items-center justify-center text-white/50 text-lg h-full w-full">
@@ -898,6 +857,23 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
                 overlayDuration={overlayDuration}
                 allowBlur={allowBlur}
               />
+            )}
+
+            {(playbackState === "loading" || playbackState === "buffering") && track && (
+              <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/35 text-white">
+                <div className="rounded-lg bg-black/70 px-5 py-3 text-sm">
+                  {playbackState === "buffering" ? "Buffering stream…" : "Starting stream…"}
+                </div>
+              </div>
+            )}
+            {playbackState === "error" && track && (
+              <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-black/85 text-white">
+                <AlertTriangle size={36} className="text-amber-400" />
+                <p className="max-w-md text-center text-sm">{playbackError}</p>
+                <button autoFocus onClick={retryPlayback} className="btn-primary min-h-12 px-8 focus:ring-4 focus:ring-white">
+                  Retry this track
+                </button>
+              </div>
             )}
 
             {/* Fullscreen buttons — visible on hover */}
@@ -926,7 +902,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
           </div>
 
           {/* ── Queue panel — attached to video edge, matches video height ── */}
-          <div
+          {!isVideoOnly && <div
             className="flex flex-col border-l border-white/10 rounded-r-lg overflow-hidden flex-shrink-0 ease-in-out"
             style={{
               width: QUEUE_WIDTH,
@@ -968,14 +944,16 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
               queueClock={queueClock}
               currentTime={currentTime}
             />
-          </div>
+          </div>}
         </div>
       </div>
 
       {tvGate}
 
       {/* Fullscreen hover controls (theater mode only) */}
-      {isFullscreen && <FullscreenControls />}
+      {(isFullscreen || tvMode) && (
+        <FullscreenControls visible={queueVisible} profile={profile} onActivity={scheduleQueueHide} />
+      )}
     </div>
   );
 }

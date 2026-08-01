@@ -5,6 +5,7 @@ import { useSongRatings, useVideoRatings, useRescanBatch, useNormalize, useDelet
 import { playbackApi } from "@/lib/api";
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
 import { RecordStack } from "@/components/RecordStack";
+import { DataView } from "@/components/DataView";
 import { FilterBar } from "@/components/FilterBar";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { RescanOptionsDialog } from "@/components/RescanOptionsDialog";
@@ -13,8 +14,6 @@ import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
 import type { RatingBucket, FacetFilterParams } from "@/types";
 import { usePartyMode } from "@/hooks/usePartyMode";
-
-type SortDir = "asc" | "desc";
 
 function StarsDisplay({ rating }: { rating: number }) {
   return (
@@ -39,7 +38,6 @@ function RatingColumn({
   isError,
   refetch,
   filterKey,
-  sortDir,
   selectedRatings,
   onToggleSelect,
   onContextAction,
@@ -51,20 +49,11 @@ function RatingColumn({
   isError: boolean;
   refetch: () => void;
   filterKey: "song_rating" | "video_rating";
-  sortDir: SortDir;
   selectedRatings: Set<string>;
   onToggleSelect: (key: string, sel: boolean) => void;
   onContextAction: (action: string, videoIds: number[]) => void;
 }) {
   const navigate = useNavigate();
-
-  const sorted = useMemo(
-    () =>
-      data?.slice().sort((a, b) =>
-        sortDir === "desc" ? b.rating - a.rating : a.rating - b.rating,
-      ),
-    [data, sortDir],
-  );
 
   return (
     <div className="flex-1 min-w-0">
@@ -80,13 +69,23 @@ function RatingColumn({
         </div>
       ) : isError ? (
         <ErrorState message={`Failed to load ${title.toLowerCase()}`} onRetry={refetch} />
-      ) : !sorted || sorted.length === 0 ? (
+      ) : !data || data.length === 0 ? (
         <EmptyState icon={<Star size={36} />} title={`No ${title.toLowerCase()} yet`} />
       ) : (
-        <div className="flex flex-col items-center gap-6">
-          {sorted.map((bucket) => {
+        <DataView
+          rows={data}
+          rowKey={(bucket) => bucket.rating}
+          preferenceKey={filterKey}
+          defaultSort="rating"
+          defaultDirection="desc"
+          empty={<EmptyState icon={<Star size={36} />} title={`No ${title.toLowerCase()} yet`} />}
+          columns={[
+            { id: "rating", label: "Rating", width: "minmax(10rem,1fr)", sortValue: (bucket) => bucket.rating, render: (bucket) => <button onClick={() => navigate(`/library?${filterKey}=${bucket.rating}`)} className="hover:text-accent"><StarsDisplay rating={bucket.rating} /></button> },
+            { id: "count", label: "Videos", width: "6rem", align: "right", sortValue: (bucket) => bucket.count, render: (bucket) => bucket.count },
+          ]}
+          renderCard={(bucket) => {
             const ratingKey = `${filterKey}-${bucket.rating}`;
-            return (
+            return <div className="flex flex-col items-center gap-1">
               <div key={bucket.rating} className="w-60 flex flex-col items-center gap-1">
                 <RecordStack
                   videoIds={bucket.video_ids}
@@ -99,9 +98,9 @@ function RatingColumn({
                 />
                 <StarsDisplay rating={bucket.rating} />
               </div>
-            );
-          })}
-        </div>
+            </div>;
+          }}
+        />
       )}
     </div>
   );
@@ -114,7 +113,6 @@ export function RatingsPage() {
   const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
   const songRatings = useSongRatings(mergedFilters);
   const videoRatings = useVideoRatings(mergedFilters);
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -201,13 +199,6 @@ export function RatingsPage() {
           <Star size={22} /> Ratings
         </h1>
         <button
-          onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}
-          className="btn-ghost btn-sm text-xs"
-          aria-label={`Sort ${sortDir === "desc" ? "low to high" : "high to low"}`}
-        >
-          {sortDir === "desc" ? "High→Low" : "Low→High"}
-        </button>
-        <button
           onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
           className="btn-sm text-xs font-semibold px-3 py-1.5 rounded-lg bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 text-white hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 transition-all shadow-lg shadow-purple-500/25 flex items-center gap-1.5"
@@ -255,7 +246,6 @@ export function RatingsPage() {
           isError={videoRatings.isError}
           refetch={videoRatings.refetch}
           filterKey="video_rating"
-          sortDir={sortDir}
           selectedRatings={selectedRatings}
           onToggleSelect={toggleSelect}
           onContextAction={handleContextAction}
@@ -273,7 +263,6 @@ export function RatingsPage() {
           isError={songRatings.isError}
           refetch={songRatings.refetch}
           filterKey="song_rating"
-          sortDir={sortDir}
           selectedRatings={selectedRatings}
           onToggleSelect={toggleSelect}
           onContextAction={handleContextAction}

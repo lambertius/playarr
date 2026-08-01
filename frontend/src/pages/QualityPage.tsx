@@ -4,7 +4,7 @@ import { MonitorPlay, PartyPopper, ListPlus, Trash2, RefreshCw } from "lucide-re
 import { useQualityBuckets, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks/queries";
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
 import { RecordStack } from "@/components/RecordStack";
-import { GroupedSection } from "@/components/GroupedSection";
+import { DataView } from "@/components/DataView";
 import { FilterBar } from "@/components/FilterBar";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { RescanOptionsDialog } from "@/components/RescanOptionsDialog";
@@ -143,6 +143,7 @@ export function QualityPage() {
   );
 
   const grouped = useMemo(() => (data ? groupByTier(data) : []), [data]);
+  const ordered = useMemo(() => grouped.flatMap((group) => group.items), [grouped]);
 
   return (
     <div className="p-4 md:p-6">
@@ -200,29 +201,20 @@ export function QualityPage() {
       ) : !data || data.length === 0 ? (
         <EmptyState icon={<MonitorPlay size={48} />} title="No quality data yet" />
       ) : (
-        grouped.map(({ label, items, allVideoIds, totalCount }) => (
-          <GroupedSection key={label} heading={label}>
-            {/* Tier tile — spans 2 columns × 2 rows */}
-            <div className="col-span-2 row-span-2 flex items-center justify-center">
+        <DataView
+          rows={ordered}
+          rowKey={(quality) => quality.quality}
+          preferenceKey="quality"
+          defaultSort="rank"
+          defaultDirection="desc"
+          empty={<EmptyState icon={<MonitorPlay size={48} />} title="No quality data yet" />}
+          columns={[
+            { id: "rank", label: "Quality", width: "minmax(10rem,1fr)", sortValue: (quality) => QUALITY_ORDER.indexOf(quality.quality), render: (quality) => <button className="hover:text-accent" onClick={() => navigate(`/library?quality=${quality.quality}`)}>{quality.quality}</button> },
+            { id: "tier", label: "Tier", width: "7rem", sortValue: (quality) => QUALITY_ORDER.indexOf(quality.quality) <= 1 ? "SD" : "HD", render: (quality) => QUALITY_ORDER.indexOf(quality.quality) <= 1 ? "SD" : "HD" },
+            { id: "count", label: "Videos", width: "6rem", align: "right", sortValue: (quality) => quality.count, render: (quality) => quality.count },
+          ]}
+          renderCard={(b) => (
               <RecordStack
-                videoIds={allVideoIds}
-                label={label}
-                subLabel={`${totalCount} video${totalCount !== 1 ? "s" : ""}`}
-                onClick={() =>
-                  navigate(
-                    label === "SD"
-                      ? `/library?quality=480p`
-                      : `/library?quality=1080p`,
-                  )
-                }
-                selected={selectedQualities.has(label)}
-                onSelect={(sel) => toggleSelect(label, sel)}
-                onContextAction={handleContextAction}
-              />
-            </div>
-            {items.map((b) => (
-              <RecordStack
-                key={b.quality}
                 videoIds={b.video_ids}
                 label={b.quality}
                 subLabel={`${b.count} video${b.count !== 1 ? "s" : ""}`}
@@ -231,9 +223,8 @@ export function QualityPage() {
                 onSelect={(sel) => toggleSelect(b.quality, sel)}
                 onContextAction={handleContextAction}
               />
-            ))}
-          </GroupedSection>
-        ))
+          )}
+        />
       )}
 
       {dialog}

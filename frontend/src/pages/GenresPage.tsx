@@ -5,7 +5,7 @@ import { useGenres, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks
 import { useUpdateGenreBlacklist } from "@/hooks/queries";
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
 import { RecordStack } from "@/components/RecordStack";
-import { GroupedSection } from "@/components/GroupedSection";
+import { DataView } from "@/components/DataView";
 import { FilterBar } from "@/components/FilterBar";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { RescanOptionsDialog } from "@/components/RescanOptionsDialog";
@@ -16,13 +16,9 @@ import type { FacetFilterParams } from "@/types";
 import { usePartyMode } from "@/hooks/usePartyMode";
 import { settingsApi } from "@/lib/api";
 
-type SortDir = "asc" | "desc";
-
 /** Group genres alphabetically by first letter. */
-function groupByLetter(genres: { genre: string; count: number; video_ids: number[] }[], dir: SortDir) {
-  const sorted = [...genres].sort((a, b) =>
-    dir === "asc" ? a.genre.localeCompare(b.genre) : b.genre.localeCompare(a.genre),
-  );
+function groupByLetter(genres: { genre: string; count: number; video_ids: number[] }[]) {
+  const sorted = [...genres].sort((a, b) => a.genre.localeCompare(b.genre));
   const groups: Record<string, typeof genres> = {};
   for (const g of sorted) {
     const first = (g.genre?.[0] ?? "").toUpperCase();
@@ -30,9 +26,9 @@ function groupByLetter(genres: { genre: string; count: number; video_ids: number
     (groups[key] ??= []).push(g);
   }
   const sortedKeys = Object.keys(groups).sort((a, b) => {
-    if (a === "#") return dir === "asc" ? -1 : 1;
-    if (b === "#") return dir === "asc" ? 1 : -1;
-    return dir === "asc" ? a.localeCompare(b) : b.localeCompare(a);
+    if (a === "#") return -1;
+    if (b === "#") return 1;
+    return a.localeCompare(b);
   });
   return sortedKeys.map((key) => ({ letter: key, items: groups[key] }));
 }
@@ -44,7 +40,6 @@ export function GenresPage() {
   const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
   const { data, isLoading, isError, refetch } = useGenres(mergedFilters);
   const navigate = useNavigate();
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
@@ -179,7 +174,8 @@ export function GenresPage() {
     return data.filter((g) => g.genre.toLowerCase().includes(term));
   }, [data, searchTerm]);
 
-  const grouped = useMemo(() => (filtered.length ? groupByLetter(filtered, sortDir) : []), [filtered, sortDir]);
+  const grouped = useMemo(() => (filtered.length ? groupByLetter(filtered) : []), [filtered]);
+  const ordered = useMemo(() => grouped.flatMap((group) => group.items), [grouped]);
 
   return (
     <div className="p-4 md:p-6">
@@ -187,13 +183,6 @@ export function GenresPage() {
         <h1 className="text-xl font-bold text-text-primary flex items-center gap-2">
           <Tags size={22} /> Genres
         </h1>
-        <button
-          onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
-          className="btn-ghost btn-sm text-xs"
-          aria-label={`Sort ${sortDir === "asc" ? "descending" : "ascending"}`}
-        >
-          {sortDir === "asc" ? "A→Z" : "Z→A"}
-        </button>
         <button
           onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
@@ -272,9 +261,18 @@ export function GenresPage() {
       ) : !filtered || filtered.length === 0 ? (
         <EmptyState icon={<Tags size={48} />} title={searchTerm ? "No matching genres" : "No genres yet"} />
       ) : (
-        grouped.map(({ letter, items }) => (
-          <GroupedSection key={letter} heading={letter}>
-            {items.map((g) => (
+        <DataView
+          rows={ordered}
+          rowKey={(genre) => genre.genre}
+          preferenceKey="genres"
+          defaultSort="name"
+          empty={<EmptyState icon={<Tags size={48} />} title="No genres yet" />}
+          columns={[
+            { id: "name", label: "Genre", width: "minmax(12rem,1fr)", sortValue: (genre) => genre.genre, render: (genre) => <button className="truncate hover:text-accent" onClick={() => selectMode ? toggleGenre(genre.genre) : navigate(`/library?genre=${encodeURIComponent(genre.genre)}`)}>{genre.genre}</button> },
+            { id: "count", label: "Videos", width: "6rem", align: "right", sortValue: (genre) => genre.count, render: (genre) => genre.count },
+            { id: "status", label: "Status", width: "8rem", render: (genre) => selectMode ? (selected.has(genre.genre) ? "Selected" : "Available") : "Visible" },
+          ]}
+          renderCard={(g) => (
               <div key={g.genre} className="relative">
                 {selectMode && (
                   <button
@@ -306,9 +304,8 @@ export function GenresPage() {
                   />
                 </div>
               </div>
-            ))}
-          </GroupedSection>
-        ))
+          )}
+        />
       )}
 
       {dialog}

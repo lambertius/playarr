@@ -30,6 +30,7 @@ from app.routers import video_editor as video_editor_router
 from app.routers import scraper_test as scraper_test_router
 from app.routers import tmvdb as tmvdb_router
 from app.routers import tools as tools_router
+from app.routers import operations as operations_router
 from app.new_videos import router as new_videos_router
 
 
@@ -52,6 +53,14 @@ def _apply_schema_upgrades(eng):
     if "video_items" in insp.get_table_names():
         vi_cols = {c["name"] for c in insp.get_columns("video_items")}
         with eng.begin() as conn:
+            if "stable_id" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN stable_id VARCHAR(36)"))
+                conn.execute(text("UPDATE video_items SET stable_id = lower(hex(randomblob(16))) WHERE stable_id IS NULL"))
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_video_items_stable_id ON video_items(stable_id)"))
+            if "revision" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN revision INTEGER DEFAULT 1 NOT NULL"))
+            if "sidecar_revision" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN sidecar_revision INTEGER DEFAULT 1 NOT NULL"))
             if "artist_entity_id" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN artist_entity_id INTEGER REFERENCES artists(id)"))
             if "album_entity_id" not in vi_cols:
@@ -83,6 +92,8 @@ def _apply_schema_upgrades(eng):
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN processing_state JSON"))
             if "exclude_from_editor_scan" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN exclude_from_editor_scan BOOLEAN DEFAULT 0 NOT NULL"))
+            if "editor_crop_dismissed_evidence_hash" not in vi_cols:
+                conn.execute(text("ALTER TABLE video_items ADD COLUMN editor_crop_dismissed_evidence_hash VARCHAR(64)"))
             if "rename_dismissed" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN rename_dismissed BOOLEAN DEFAULT 0 NOT NULL"))
             if "parent_video_id" not in vi_cols:
@@ -93,6 +104,30 @@ def _apply_schema_upgrades(eng):
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN canonical_provenance VARCHAR(50)"))
             if "editor_edit_type" not in vi_cols:
                 conn.execute(text("ALTER TABLE video_items ADD COLUMN editor_edit_type VARCHAR(10)"))
+
+    if "settings" in insp.get_table_names():
+        setting_cols = {c["name"] for c in insp.get_columns("settings")}
+        if "revision" not in setting_cols:
+            with eng.begin() as conn:
+                conn.execute(text("ALTER TABLE settings ADD COLUMN revision INTEGER DEFAULT 1 NOT NULL"))
+
+    if "playlists" in insp.get_table_names():
+        playlist_cols = {c["name"] for c in insp.get_columns("playlists")}
+        with eng.begin() as conn:
+            if "stable_id" not in playlist_cols:
+                conn.execute(text("ALTER TABLE playlists ADD COLUMN stable_id VARCHAR(36)"))
+                conn.execute(text("UPDATE playlists SET stable_id = lower(hex(randomblob(16))) WHERE stable_id IS NULL"))
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_playlists_stable_id ON playlists(stable_id)"))
+            if "revision" not in playlist_cols:
+                conn.execute(text("ALTER TABLE playlists ADD COLUMN revision INTEGER DEFAULT 1 NOT NULL"))
+
+    if "playlist_entries" in insp.get_table_names():
+        entry_cols = {c["name"] for c in insp.get_columns("playlist_entries")}
+        if "occurrence_id" not in entry_cols:
+            with eng.begin() as conn:
+                conn.execute(text("ALTER TABLE playlist_entries ADD COLUMN occurrence_id VARCHAR(36)"))
+                conn.execute(text("UPDATE playlist_entries SET occurrence_id = lower(hex(randomblob(16))) WHERE occurrence_id IS NULL"))
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_playlist_entries_occurrence_id ON playlist_entries(occurrence_id)"))
 
     # Matching subsystem tables — created by Base.metadata.create_all but
     # we need to ensure they exist for older DBs upgraded in-place.
@@ -244,6 +279,14 @@ def _apply_schema_upgrades(eng):
             "letterbox_bar_bottom": "INTEGER",
             "letterbox_bar_left": "INTEGER",
             "letterbox_bar_right": "INTEGER",
+            "letterbox_confidence": "FLOAT",
+            "letterbox_sample_count": "INTEGER DEFAULT 0 NOT NULL",
+            "letterbox_samples_expected": "INTEGER DEFAULT 0 NOT NULL",
+            "letterbox_review_suggested": "BOOLEAN DEFAULT 0 NOT NULL",
+            "letterbox_instability_reason": "VARCHAR(100)",
+            "letterbox_evidence_json": "JSON",
+            "letterbox_evidence_hash": "VARCHAR(64)",
+            "letterbox_source_checksum": "VARCHAR(64)",
         }
         with eng.begin() as conn:
             for col_name, col_type in _new_qs.items():
@@ -452,6 +495,16 @@ def _cleanup_stale_jobs():
     ]
 
     with SASession(engine) as db:
+        interrupted_cancellations = db.query(ProcessingJob).filter(
+            ProcessingJob.status == JobStatus.cancelling,
+        ).all()
+        for job in interrupted_cancellations:
+            job.status = JobStatus.cancelled
+            job.error_message = "Cancellation acknowledged during restart recovery"
+            job.completed_at = datetime.now(timezone.utc)
+        if interrupted_cancellations:
+            db.commit()
+
         stale = db.query(ProcessingJob).filter(
             ProcessingJob.status.in_(ACTIVE_STATUSES)
         ).all()
@@ -1265,12 +1318,26 @@ async def lifespan(app: FastAPI):
         logger.exception("Could not install asyncio exception handler")
     heartbeat_task = asyncio.create_task(_diagnostics_heartbeat())
 
+    # Reconcile committed database mutations to portable sidecars without
+    # delaying request acknowledgement. Failures remain visible in the outbox.
+    async def _sidecar_reconciler():
+        from app.database import SessionLocal
+        from app.services.sidecar_outbox import process_next_sidecar
+        from app.services.contribution_outbox import process_next_contribution
+        while True:
+            processed = await asyncio.to_thread(process_next_sidecar, SessionLocal)
+            contribution = await asyncio.to_thread(process_next_contribution, SessionLocal)
+            await asyncio.sleep(0.05 if processed or contribution else 1.0)
+
+    sidecar_task = asyncio.create_task(_sidecar_reconciler())
+
     yield
 
     # Shutdown
     watchdog_task.cancel()
     maintenance_task.cancel()
     heartbeat_task.cancel()
+    sidecar_task.cancel()
     logger.info("Playarr shutting down.")
 
 
@@ -1291,6 +1358,25 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    """Attach a safe request ID and make it available to durable job defaults."""
+    from app.services.request_context import new_request_id, reset_request_id, set_request_id
+
+    supplied = request.headers.get("X-Request-ID", "").strip()
+    request_id = supplied if supplied and len(supplied) <= 80 and all(
+        char.isalnum() or char in "-_.:" for char in supplied
+    ) else new_request_id()
+    request.state.request_id = request_id
+    token = set_request_id(request_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        reset_request_id(token)
+
+
 @app.exception_handler(Exception)
 async def _log_unhandled_exception(request: Request, exc: Exception):
     """Record the traceback for any unhandled request error to playarr.log (and
@@ -1309,7 +1395,10 @@ async def _log_unhandled_exception(request: Request, exc: Exception):
     except Exception:
         pass
     from fastapi.responses import JSONResponse
-    return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+    return JSONResponse({
+        "detail": "Internal Server Error",
+        "request_id": getattr(request.state, "request_id", None),
+    }, status_code=500)
 
 # Include routers
 app.include_router(library.router)
@@ -1321,7 +1410,6 @@ app.include_router(metadata_router.router)
 app.include_router(resolve_router.resolve_router)
 app.include_router(resolve_router.review_router)
 app.include_router(resolve_router.search_router)
-app.include_router(resolve_router.export_router)
 app.include_router(ai_router.router)
 app.include_router(artwork_router.router)
 app.include_router(library_import_router.router)
@@ -1331,6 +1419,7 @@ app.include_router(scraper_test_router.router)
 app.include_router(new_videos_router.router)
 app.include_router(tmvdb_router.router)
 app.include_router(tools_router.router)
+app.include_router(operations_router.router)
 
 
 @app.get("/api/health")

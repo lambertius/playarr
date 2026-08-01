@@ -37,6 +37,9 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
     ws = ImportWorkspace(job_id)
     try:
         ws.reset()  # clear stale artifacts from recycled job IDs
+        from app.services.import_policy import policy_from_pipeline_options
+        import_policy = policy_from_pipeline_options(opts)
+        opts = {**opts, "import_policy": import_policy.model_dump(mode="json")}
         _coarse_update(job_id, JobStatus.downloading, step="Starting import", progress=5)
         ws.write_artifact("input", {
             "import_type": "url",
@@ -45,6 +48,7 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
             **opts,
         })
         ws.log(f"URL import started: {url}")
+        ws.log(f"Import policy: {import_policy.model_dump_json()}")
 
         # Stage B
         _url_stage_b(ws, job_id, url, opts)
@@ -479,9 +483,11 @@ def _step_resolve_metadata_url(ws: ImportWorkspace, artist: str, title: str,
         return
     ws.update_stage("resolve_metadata", "running")
 
-    _skip_ai = not (opts.get("ai_auto_analyse", False) or opts.get("ai_auto_fallback", False))
-    _skip_wiki = not (opts.get("scrape", True) or opts.get("ai_auto_analyse", False))
-    _skip_mb = not (opts.get("scrape_musicbrainz", True) or opts.get("ai_auto_analyse", False))
+    from app.services.import_policy import policy_from_pipeline_options
+    policy = policy_from_pipeline_options(opts)
+    _skip_ai = policy.skip_ai
+    _skip_wiki = policy.skip_wikipedia
+    _skip_mb = policy.skip_musicbrainz
 
     from app.scraper.unified_metadata import resolve_metadata_unified
     from app.database import SessionLocal
@@ -701,8 +707,10 @@ def _step_resolve_entities(ws: ImportWorkspace, artist: str, title: str,
     ws.update_stage("resolve_entities", "running")
 
     opts = options.get("options", options)
-    _skip_mb = not (opts.get("scrape_musicbrainz", True) or opts.get("ai_auto_analyse", False))
-    _skip_wiki = not (opts.get("scrape", True) or opts.get("ai_auto_analyse", False))
+    from app.services.import_policy import policy_from_pipeline_options
+    policy = policy_from_pipeline_options(opts)
+    _skip_mb = policy.skip_musicbrainz
+    _skip_wiki = policy.skip_wikipedia
 
     from app.pipeline_url.metadata.resolver import resolve_artist, resolve_album, resolve_track
 
@@ -850,8 +858,10 @@ def _step_collect_source_links(ws: ImportWorkspace, artist: str, title: str,
     ws.update_stage("collect_sources", "running")
 
     opts = options.get("options", options)
-    _skip_wiki = not (opts.get("scrape", True) or opts.get("ai_auto_analyse", False))
-    _skip_mb = not (opts.get("scrape_musicbrainz", True) or opts.get("ai_auto_analyse", False))
+    from app.services.import_policy import policy_from_pipeline_options
+    policy = policy_from_pipeline_options(opts)
+    _skip_wiki = policy.skip_wikipedia
+    _skip_mb = policy.skip_musicbrainz
 
     import re as _re
     links = {}

@@ -34,18 +34,18 @@ def _should_use_celery() -> bool:
     """
     Determine whether to dispatch tasks to Celery.
 
-    Requires BOTH:
-      1. The env var CELERY_WORKER_ENABLED=1 (opt-in)
-      2. Redis to be reachable
-
-    Without an explicit opt-in, tasks always run in-process via threads.
-    This prevents tasks silently queuing in Redis when no Celery worker
-    is running to consume them.
+    The deployment profile is explicit. Redis mode must never silently fall
+    back to process-local threads because that would bypass the cross-process
+    mutation boundary.
     """
-    opt_in = os.environ.get("CELERY_WORKER_ENABLED", "").lower() in ("1", "true", "yes")
-    if not opt_in:
+    if settings.deployment_profile == "single_process":
         return False
-    return _redis_available()
+    if not _redis_available():
+        raise RuntimeError(
+            "DEPLOYMENT_PROFILE=redis requires a reachable REDIS_URL; "
+            "refusing unsafe in-process fallback"
+        )
+    return True
 
 
 _use_celery = _should_use_celery()
@@ -147,7 +147,25 @@ def dispatch_task(task, *args, **kwargs):
             try:
                 task.run(*args, **kwargs)
             except Exception as e:
-                logger.error(f"Background task {task.name} failed: {e}", exc_info=True)
+                if isinstance(e, JobCancelledError) and kwargs.get("job_id") is not None:
+                    from datetime import datetime, timezone
+                    from app.database import RequestSessionLocal
+                    from app.models import JobStatus, ProcessingJob
+
+                    cancel_db = RequestSessionLocal()
+                    try:
+                        job = cancel_db.get(ProcessingJob, kwargs["job_id"])
+                        if job and job.status == JobStatus.cancelling:
+                            job.status = JobStatus.cancelled
+                            job.current_step = "Cancelled at a safe checkpoint"
+                            job.error_message = "Cancelled by user"
+                            job.completed_at = datetime.now(timezone.utc)
+                            cancel_db.commit()
+                    finally:
+                        cancel_db.close()
+                    logger.info(f"Background task {task.name} acknowledged cancellation")
+                else:
+                    logger.error(f"Background task {task.name} failed: {e}", exc_info=True)
             finally:
                 if throttled:
                     _PIPELINE_SEMAPHORE.release()

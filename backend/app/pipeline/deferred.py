@@ -1095,13 +1095,12 @@ def _deferred_entity_artwork(video_id: int, ws: ImportWorkspace) -> None:
                     ).first()
                     _fallback_prov = "video_thumb_fallback"
                 if _thumb_asset and _thumb_asset.file_path and os.path.isfile(_thumb_asset.file_path):
-                    import shutil
-                    from app.services.artwork_service import validate_file
+                    from app.services.artwork_service import guarded_copy, validate_file
                     from app.services.file_organizer import build_folder_name
                     _folder_name = os.path.basename(item.folder_path)
                     _poster_dst = os.path.join(item.folder_path, f"{_folder_name}-poster.jpg")
-                    shutil.copy2(_thumb_asset.file_path, _poster_dst)
-                    _vr = validate_file(_poster_dst) if os.path.isfile(_poster_dst) else None
+                    _copied = guarded_copy(_thumb_asset.file_path, _poster_dst)
+                    _vr = validate_file(_poster_dst) if _copied else None
                     with _apply_lock:
                         db.add(MediaAsset(
                             video_id=video_id, asset_type="poster",

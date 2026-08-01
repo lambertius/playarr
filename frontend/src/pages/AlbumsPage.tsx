@@ -5,7 +5,7 @@ import { useAlbums, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks
 import { playbackApi } from "@/lib/api";
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
 import { RecordStack } from "@/components/RecordStack";
-import { GroupedSection } from "@/components/GroupedSection";
+import { DataView } from "@/components/DataView";
 import { FilterBar } from "@/components/FilterBar";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { RescanOptionsDialog } from "@/components/RescanOptionsDialog";
@@ -15,14 +15,10 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import type { FacetFilterParams, AlbumBucket } from "@/types";
 import { usePartyMode } from "@/hooks/usePartyMode";
 
-type SortDir = "asc" | "desc";
-
 /** Group albums alphabetically by first letter. */
-function groupByLetter(albums: AlbumBucket[], dir: SortDir) {
+function groupByLetter(albums: AlbumBucket[]) {
   const named = albums.filter((a) => a.album);
-  const sorted = [...named].sort((a, b) =>
-    dir === "asc" ? a.album!.localeCompare(b.album!) : b.album!.localeCompare(a.album!),
-  );
+  const sorted = [...named].sort((a, b) => a.album!.localeCompare(b.album!));
   const groups: Record<string, typeof named> = {};
   for (const a of sorted) {
     const first = (a.album?.[0] ?? "").toUpperCase();
@@ -30,9 +26,9 @@ function groupByLetter(albums: AlbumBucket[], dir: SortDir) {
     (groups[key] ??= []).push(a);
   }
   const sortedKeys = Object.keys(groups).sort((a, b) => {
-    if (a === "#") return dir === "asc" ? -1 : 1;
-    if (b === "#") return dir === "asc" ? 1 : -1;
-    return dir === "asc" ? a.localeCompare(b) : b.localeCompare(a);
+    if (a === "#") return -1;
+    if (b === "#") return 1;
+    return a.localeCompare(b);
   });
   return sortedKeys.map((key) => ({ letter: key, items: groups[key] }));
 }
@@ -44,7 +40,6 @@ export function AlbumsPage() {
   const mergedFilters = useMemo(() => (searchTerm ? { ...filters, search: searchTerm } : filters), [filters, searchTerm]);
   const { data, isLoading, isError, refetch } = useAlbums(mergedFilters);
   const navigate = useNavigate();
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
   const { launch: launchParty, isLoading: partyLoading } = usePartyMode();
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
@@ -133,7 +128,8 @@ export function AlbumsPage() {
     return data.filter((a) => a.album?.toLowerCase().includes(term) || a.artist?.toLowerCase().includes(term));
   }, [data, searchTerm]);
 
-  const grouped = useMemo(() => (filtered.length ? groupByLetter(filtered, sortDir) : []), [filtered, sortDir]);
+  const grouped = useMemo(() => (filtered.length ? groupByLetter(filtered) : []), [filtered]);
+  const ordered = useMemo(() => grouped.flatMap((group) => group.items), [grouped]);
 
   return (
     <div className="p-4 md:p-6">
@@ -141,13 +137,6 @@ export function AlbumsPage() {
         <h1 className="text-xl font-bold text-text-primary flex items-center gap-2">
           <Disc3 size={22} /> Albums
         </h1>
-        <button
-          onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
-          className="btn-ghost btn-sm text-xs"
-          aria-label={`Sort ${sortDir === "asc" ? "descending" : "ascending"}`}
-        >
-          {sortDir === "asc" ? "A→Z" : "Z→A"}
-        </button>
         <button
           onClick={() => launchParty(mergedFilters)}
           disabled={partyLoading}
@@ -199,9 +188,19 @@ export function AlbumsPage() {
       ) : !filtered || filtered.filter((a) => a.album).length === 0 ? (
         <EmptyState icon={<Disc3 size={48} />} title={searchTerm ? "No matching albums" : "No albums yet"} />
       ) : (
-        grouped.map(({ letter, items }) => (
-          <GroupedSection key={letter} heading={letter}>
-            {items.map((a) => (
+        <DataView
+          rows={ordered}
+          rowKey={albumKey}
+          preferenceKey="albums"
+          defaultSort="name"
+          empty={<EmptyState icon={<Disc3 size={48} />} title="No albums yet" />}
+          columns={[
+            { id: "name", label: "Album", width: "minmax(12rem,1fr)", sortValue: (album) => album.album ?? "", render: (album) => <button className="truncate hover:text-accent" onClick={() => navigate(album.album_entity_id ? `/library?album_entity_id=${album.album_entity_id}&album=${encodeURIComponent(album.album!)}` : `/library?album=${encodeURIComponent(album.album!)}`)}>{album.album}</button> },
+            { id: "artist", label: "Artist", width: "minmax(10rem,1fr)", sortValue: (album) => album.artist ?? "", render: (album) => album.artist || "—" },
+            { id: "count", label: "Videos", width: "6rem", align: "right", sortValue: (album) => album.count, render: (album) => album.count },
+            { id: "artwork", label: "Artwork", width: "7rem", render: (album) => <img src={playbackApi.artworkUrl(album.video_ids[0], "album_thumb")} alt="" className="h-9 w-16 rounded object-cover" /> },
+          ]}
+          renderCard={(a) => (
               <RecordStack
                 key={a.album_entity_id ? `entity-${a.album_entity_id}` : a.album!}
                 videoIds={a.video_ids}
@@ -219,9 +218,8 @@ export function AlbumsPage() {
                 onSelect={(sel) => toggleSelect(albumKey(a), sel)}
                 onContextAction={handleContextAction}
               />
-            ))}
-          </GroupedSection>
-        ))
+          )}
+        />
       )}
 
       {dialog}

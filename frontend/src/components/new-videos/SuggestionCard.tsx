@@ -6,7 +6,6 @@
  *
  * The card is 280px wide to fit several per row in a horizontal scroll.
  */
-import { useState } from "react";
 import {
   ExternalLink, Plus, ShoppingCart, X, XCircle,
   Shield, ShieldCheck, ShieldAlert,
@@ -17,6 +16,7 @@ import {
   useNewVideosAddToCart,
   useNewVideosRemoveFromCart,
   useNewVideosDismiss,
+  useNewVideosAddVideo,
   useNewVideosFeedback,
 } from "@/hooks/queries";
 import { useToast } from "@/components/Toast";
@@ -56,16 +56,13 @@ function TrustBadge({ score, sourceType }: { score: number; sourceType: string |
   return null;
 }
 
-export function SuggestionCard({ video, onAdd }: { video: SuggestedVideoItem; onAdd?: (url: string) => void }) {
+export function SuggestionCard({ video }: { video: SuggestedVideoItem }) {
   const addToCartMutation = useNewVideosAddToCart();
   const removeFromCartMutation = useNewVideosRemoveFromCart();
   const dismissMutation = useNewVideosDismiss();
+  const addVideoMutation = useNewVideosAddVideo();
   const feedbackMutation = useNewVideosFeedback();
   const { toast } = useToast();
-  const [dismissed, setDismissed] = useState(false);
-
-  if (dismissed) return null;
-
   const handleOpenSource = () => {
     feedbackMutation.mutate({
       suggested_video_id: video.id,
@@ -79,12 +76,10 @@ export function SuggestionCard({ video, onAdd }: { video: SuggestedVideoItem; on
   };
 
   const handleAdd = () => {
-    if (onAdd) {
-      onAdd(video.url);
-      // Auto-dismiss so the card disappears immediately
-      dismissMutation.mutate({ id: video.id, type: "permanent" });
-      setDismissed(true);
-    }
+    addVideoMutation.mutate(video.id, {
+      onSuccess: () => toast({ type: "success", title: "Added to Queue", description: "The import is running in the background." }),
+      onError: () => toast({ type: "error", title: "Could not add video", description: "The suggestion was kept so you can try again." }),
+    });
   };
 
   const handleCartToggle = () => {
@@ -100,14 +95,15 @@ export function SuggestionCard({ video, onAdd }: { video: SuggestedVideoItem; on
   };
 
   const handleDismiss = (type: "temporary" | "permanent") => {
-    dismissMutation.mutate({ id: video.id, type });
-    setDismissed(true);
+    dismissMutation.mutate({ id: video.id, type }, {
+      onError: () => toast({ type: "error", title: "Could not dismiss suggestion" }),
+    });
   };
 
   const primaryReason = video.reasons?.[0];
 
   return (
-    <div className="rounded-lg bg-surface-light border border-surface-border overflow-hidden group hover:border-accent/40 transition-colors">
+    <div className="h-full min-h-[390px] grid grid-rows-[auto_1fr] rounded-lg bg-surface-light border border-surface-border overflow-hidden group hover:border-accent/40 transition-colors">
       {/* Thumbnail */}
       <div className="relative aspect-video bg-surface cursor-pointer" onClick={handleOpenSource}>
         {video.thumbnail_url ? (
@@ -142,15 +138,13 @@ export function SuggestionCard({ video, onAdd }: { video: SuggestedVideoItem; on
       </div>
 
       {/* Metadata */}
-      <div className="p-3 space-y-2">
+      <div className="p-3 grid grid-rows-[3.5rem_2rem_3rem_auto] gap-2">
         {/* Title & artist */}
         <div>
           <h3 className="text-sm font-medium text-text-primary leading-tight line-clamp-2" title={video.title}>
             {video.title}
           </h3>
-          {video.artist && (
-            <p className="text-xs text-text-secondary mt-0.5 truncate">{video.artist}</p>
-          )}
+          <p className="text-xs text-text-secondary mt-0.5 truncate">{video.artist || "Unknown artist"}</p>
         </div>
 
         {/* Channel & badges */}
@@ -181,10 +175,11 @@ export function SuggestionCard({ video, onAdd }: { video: SuggestedVideoItem; on
           <Tooltip content="Import this video now">
           <button
             onClick={handleAdd}
+            disabled={addVideoMutation.isPending}
             className="btn-primary btn-sm text-[11px] px-2 py-1"
           >
             <Plus size={12} />
-            <span className="ml-0.5">Add</span>
+            <span className="ml-0.5">{addVideoMutation.isPending ? "Adding…" : "Add"}</span>
           </button>
           </Tooltip>
           <button

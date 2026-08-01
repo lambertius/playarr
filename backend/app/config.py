@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     # --- Database ---
     database_url: str = _rdirs.database_url
 
+    # --- Deployment profile ---
+    # single_process: one Uvicorn process plus bounded in-process workers.
+    # redis: web processes enqueue durable work for dedicated Redis workers.
+    deployment_profile: Literal["single_process", "redis"] = "single_process"
+    mutation_queue_max: int = 1000
+
     # --- Redis ---
     redis_url: str = "redis://localhost:6379/0"
 

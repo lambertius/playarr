@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState, useEffect } from "react";
+import { useRef, useCallback, useEffect } from "react";
 import {
   Play, Pause, SkipBack, SkipForward, Square, Shuffle,
   Repeat, Repeat1, Maximize, Minimize, Monitor,
@@ -26,7 +26,15 @@ const fullscreenLabels: Record<FullscreenMode, string> = {
   video: "Exit fullscreen",
 };
 
-export function FullscreenControls() {
+export function FullscreenControls({
+  visible = true,
+  profile = "browser",
+  onActivity,
+}: {
+  visible?: boolean;
+  profile?: "browser" | "tv" | "cast";
+  onActivity?: () => void;
+}) {
   const track = usePlaybackStore((s) => s.currentTrack)();
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
   const currentTime = usePlaybackStore((s) => s.currentTime);
@@ -38,6 +46,7 @@ export function FullscreenControls() {
   const togglePlay = usePlaybackStore((s) => s.togglePlay);
   const stop = usePlaybackStore((s) => s.stop);
   const next = usePlaybackStore((s) => s.next);
+  const random = usePlaybackStore((s) => s.random);
   const prev = usePlaybackStore((s) => s.prev);
   const seekTo = usePlaybackStore((s) => s.seekTo);
   const toggleShuffle = usePlaybackStore((s) => s.toggleShuffle);
@@ -46,38 +55,12 @@ export function FullscreenControls() {
   const exitFullscreen = usePlaybackStore((s) => s.exitFullscreen);
 
   const progressRef = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(true);
-  const hideTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  // Auto-hide after 3 seconds of no mouse movement
-  const resetHideTimer = useCallback(() => {
-    setVisible(true);
-    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-    hideTimerRef.current = setTimeout(() => setVisible(false), 3000);
-  }, []);
-
-  // Show on mouse move anywhere in the viewport
-  useEffect(() => {
-    const onMove = () => resetHideTimer();
-    window.addEventListener("mousemove", onMove);
-    resetHideTimer();
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-    };
-  }, [resetHideTimer]);
-
-  // Keep controls visible while hovering over them
-  const onEnter = () => {
-    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-    setVisible(true);
-  };
-  const onLeave = () => resetHideTimer();
 
   // Keyboard: Escape exits fullscreen, Space toggles play
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      onActivity?.();
       if (e.key === "Escape") {
         exitFullscreen();
       } else if (e.key === " " && !e.repeat) {
@@ -87,7 +70,7 @@ export function FullscreenControls() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [exitFullscreen, togglePlay]);
+  }, [exitFullscreen, onActivity, togglePlay]);
 
   // Seek via progress bar
   const seekFromEvent = useCallback(
@@ -126,8 +109,8 @@ export function FullscreenControls() {
       className={`absolute bottom-0 left-0 right-0 z-50 transition-all duration-300 ${
         visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"
       }`}
-      onMouseEnter={onEnter}
-      onMouseLeave={onLeave}
+      onMouseEnter={onActivity}
+      onFocusCapture={onActivity}
     >
       {/* Gradient backdrop */}
       <div className="bg-gradient-to-t from-black/90 via-black/50 to-transparent pt-12 pb-4 px-6">
@@ -172,7 +155,20 @@ export function FullscreenControls() {
           </span>
         </div>
 
-        {/* Controls */}
+        {/* TV/cast transport is deliberately three large remote targets. */}
+        {profile !== "browser" ? (
+          <div className="flex items-center justify-center gap-8" role="group" aria-label="TV playback transport">
+            <button onClick={prev} className="h-[72px] w-[72px] rounded-full bg-white/10 text-white flex items-center justify-center focus:outline-none focus:ring-4 focus:ring-accent" aria-label="Previous track">
+              <SkipBack size={32} />
+            </button>
+            <button onClick={random} className="h-[72px] w-[72px] rounded-full bg-accent text-white flex items-center justify-center focus:outline-none focus:ring-4 focus:ring-white" aria-label="Random track">
+              <Shuffle size={32} />
+            </button>
+            <button onClick={next} className="h-[72px] w-[72px] rounded-full bg-white/10 text-white flex items-center justify-center focus:outline-none focus:ring-4 focus:ring-accent" aria-label="Next track">
+              <SkipForward size={32} />
+            </button>
+          </div>
+        ) : (
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ControlBtn onClick={toggleShuffle} active={shuffle} title="Shuffle">
@@ -206,6 +202,7 @@ export function FullscreenControls() {
             </ControlBtn>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

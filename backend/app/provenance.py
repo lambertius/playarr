@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -221,6 +222,65 @@ def build_contribution_envelope(video, instance_user_id: str) -> Dict[str, Any]:
     }
     envelope["payload_hash"] = compute_payload_hash(envelope)
     return envelope
+
+
+def build_eligible_contribution(video, instance_user_id: str) -> Dict[str, Any]:
+    """Return a field-gated snapshot suitable for durable TMVDB submission.
+
+    Automated/AI values remain visible in the preview but are excluded until a
+    person verifies, edits, or explicitly locks them. This prevents pipeline
+    completion from being mistaken for human confirmation.
+    """
+    preview = build_contribution_envelope(video, instance_user_id)
+    eligibility: dict[str, dict[str, Any]] = {}
+    for field, value in preview["fields"].items():
+        populated = value.get("value") not in (None, "")
+        trust = value.get("trust")
+        locked = bool(value.get("locked"))
+        conflict = video.review_status not in (None, "none", "reviewed")
+        if not populated:
+            eligible, reason = False, "empty"
+        elif conflict and trust not in (TRUST_HUMAN_EDITED, TRUST_HUMAN_VERIFIED):
+            eligible, reason = False, "unresolved_conflict"
+        elif trust in (TRUST_HUMAN_EDITED, TRUST_HUMAN_VERIFIED):
+            eligible, reason = True, trust
+        elif locked:
+            eligible, reason = True, "user_locked"
+        elif str(value.get("source") or "").lower() in {"ai", "openai", "gemini", "claude", "local"}:
+            eligible, reason = False, "ai_unverified"
+        else:
+            eligible, reason = False, "automated_unverified"
+        eligibility[field] = {
+            "eligible": eligible,
+            "reason": reason,
+            "trust": trust,
+            "locked": locked,
+            "source": value.get("source"),
+            "set_at": value.get("set_at"),
+        }
+
+    submission = deepcopy(preview)
+    submission["fields"] = {
+        field: value for field, value in submission["fields"].items()
+        if eligibility[field]["eligible"]
+    }
+    submission["genres"] = [
+        genre for genre in submission.get("genres", [])
+        if genre.get("trust") in (TRUST_HUMAN_EDITED, TRUST_HUMAN_VERIFIED)
+    ]
+    submission["ratings"] = {
+        name: rating for name, rating in submission.get("ratings", {}).items()
+        if rating.get("set") and rating.get("by")
+    }
+    submission["payload_hash"] = compute_payload_hash(submission)
+    return {
+        "preview": preview,
+        "submission": submission,
+        "eligibility": eligibility,
+        "eligible_fields": sorted(submission["fields"]),
+        "excluded_fields": sorted(field for field, state in eligibility.items() if not state["eligible"]),
+        "can_submit": bool(submission["fields"]),
+    }
 
 
 def compute_payload_hash(envelope: Dict[str, Any]) -> str:

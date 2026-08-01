@@ -5,7 +5,7 @@ import { useArtists, useRescanBatch, useNormalize, useDeleteBatch } from "@/hook
 import { playbackApi } from "@/lib/api";
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
 import { RecordStack } from "@/components/RecordStack";
-import { GroupedSection } from "@/components/GroupedSection";
+import { DataView } from "@/components/DataView";
 import { FilterBar } from "@/components/FilterBar";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { RescanOptionsDialog } from "@/components/RescanOptionsDialog";
@@ -125,6 +125,7 @@ export function ArtistsPage() {
   }, [data, searchTerm]);
 
   const grouped = useMemo(() => (filtered.length ? groupByLetter(filtered) : []), [filtered]);
+  const ordered = useMemo(() => grouped.flatMap((group) => group.items), [grouped]);
 
   return (
     <div className="p-4 md:p-6">
@@ -183,9 +184,18 @@ export function ArtistsPage() {
       ) : !filtered || filtered.length === 0 ? (
         <EmptyState icon={<Users size={48} />} title={searchTerm ? "No matching artists" : "No artists yet"} />
       ) : (
-        grouped.map(({ letter, items }) => (
-          <GroupedSection key={letter} heading={letter}>
-            {items.map((a) => (
+        <DataView
+          rows={ordered}
+          rowKey={(artist) => artist.artist}
+          preferenceKey="artists"
+          defaultSort="name"
+          empty={<EmptyState icon={<Users size={48} />} title="No artists yet" />}
+          columns={[
+            { id: "name", label: "Artist", width: "minmax(12rem,1fr)", sortValue: (artist) => artist.artist, render: (artist) => <button className="truncate hover:text-accent" onClick={() => navigate(`/library?artist=${encodeURIComponent(artist.artist)}`)}>{artist.artist}</button> },
+            { id: "count", label: "Videos", width: "6rem", align: "right", sortValue: (artist) => artist.count, render: (artist) => artist.count },
+            { id: "artwork", label: "Representative artwork", width: "10rem", render: (artist) => <img src={playbackApi.artworkUrl(artist.video_ids[0], "artist_thumb")} alt="" className="h-9 w-16 rounded object-cover" /> },
+          ]}
+          renderCard={(a) => (
               <RecordStack
                 key={a.artist}
                 videoIds={a.video_ids}
@@ -197,9 +207,8 @@ export function ArtistsPage() {
                 onSelect={(sel) => toggleSelect(a.artist, sel)}
                 onContextAction={handleContextAction}
               />
-            ))}
-          </GroupedSection>
-        ))
+          )}
+        />
       )}
 
       {dialog}
