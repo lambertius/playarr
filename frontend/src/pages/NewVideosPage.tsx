@@ -24,6 +24,7 @@ import { SuggestionCard } from "@/components/new-videos/SuggestionCard";
 import { CartPanel } from "@/components/new-videos/CartPanel";
 import { ImportOptionsModal } from "@/components/new-videos/ImportOptionsModal";
 import type { ImportOptions } from "@/components/new-videos/ImportOptionsModal";
+import { FailedAdditionsPanel } from "@/components/new-videos/FailedAdditionsPanel";
 
 const CATEGORY_META: Record<NewVideoCategory, { label: string; icon: React.ElementType; description: string }> = {
   new:       { label: "New",                  icon: Sparkles,    description: "Recently released music videos" },
@@ -66,6 +67,9 @@ export function NewVideosPage() {
           <h1 className="text-2xl font-bold text-text-primary">New Videos</h1>
           <p className="text-sm text-text-muted mt-1">
             Discover music videos you don&apos;t have yet
+            {!isRefreshing && !!feed?.genuinely_new_count && (
+              <span className="ml-2 text-accent">{feed.genuinely_new_count} genuinely new in this snapshot</span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -98,6 +102,8 @@ export function NewVideosPage() {
           </Tooltip>
         </div>
       </div>
+
+      <FailedAdditionsPanel items={feed?.failed_additions ?? []} />
 
       {/* Cart panel */}
       {showCart && (
@@ -140,6 +146,7 @@ export function NewVideosPage() {
             description={meta.description}
             icon={meta.icon}
             videos={videos}
+            genuinelyNew={catData?.genuinely_new ?? 0}
           />
         );
       })}
@@ -180,12 +187,14 @@ function CategorySection({
   description,
   icon: Icon,
   videos,
+  genuinelyNew,
 }: {
   category: NewVideoCategory;
   label: string;
   description: string;
   icon: React.ElementType;
   videos: SuggestedVideoItem[];
+  genuinelyNew: number;
 }) {
   return (
     <section className="pt-5 border-t-2 border-surface-border first:border-t-0 first:pt-0">
@@ -194,6 +203,7 @@ function CategorySection({
         <h2 className="text-lg font-semibold text-text-primary">{label}</h2>
         <span className="text-xs text-text-muted ml-1">— {description}</span>
         <span className="text-xs text-text-muted ml-auto">{videos.length} suggestions</span>
+        {genuinelyNew > 0 && <span className="text-xs text-accent">{genuinelyNew} new</span>}
       </div>
 
       {/* Responsive column grid */}

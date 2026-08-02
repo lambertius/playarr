@@ -494,8 +494,8 @@ export const settingsApi = {
   openDirectory: (path: string) =>
     api.post<{ ok: boolean; path: string }>("/settings/open-directory", { path }).then(r => r.data),
 
-  archiveItems: () =>
-    api.get<ArchiveItem[]>("/settings/archive-items").then(r => r.data),
+  archiveItems: (params?: { reason?: string; search?: string; page?: number; page_size?: number }) =>
+    api.get<{ items: ArchiveItem[]; total: number; page: number; page_size: number; total_pages: number; reason_counts: Record<string, number> }>("/settings/archive-items/page", { params }).then(r => r.data),
 
   archiveDelete: (folders: string[]) =>
     api.post<{ deleted: number; errors: string[] }>("/settings/archive-delete", { folders }).then(r => r.data),
@@ -567,6 +567,14 @@ export const resolveApi = {
 
 // ─── Review Queue ────────────────────────────────────────
 export const reviewApi = {
+  cases: (params?: { status?: string; category?: string; page?: number; page_size?: number }) =>
+    api.get<import("@/components/review/ReviewCasesPanel").ReviewCasePage>("/review/cases", { params }).then(r => r.data),
+  dismissCase: (stableId: string, expected_revision: number) =>
+    api.post(`/review/cases/${stableId}/dismiss`, { expected_revision }).then(r => r.data),
+  stageCasePlan: (stableId: string, expected_revision: number, actions: Record<string, unknown>[]) =>
+    api.post<{ plan_id: string; consequences: Record<string, unknown[]> }>(`/review/cases/${stableId}/plans`, { expected_revision, actions }).then(r => r.data),
+  commitCasePlan: (stableId: string, planId: string) =>
+    api.post(`/review/cases/${stableId}/plans/${planId}/commit`).then(r => r.data),
   list: (params?: ReviewParams) =>
     api.get<ReviewListResponse>("/review", { params }).then(r => r.data),
   approve: (videoId: number) =>
@@ -945,13 +953,13 @@ export const newVideosApi = {
     api.get<import("@/types").NewVideosFeed>("/new-videos/").then(r => r.data),
 
   refresh: (categories?: string[], force = false) =>
-    api.post<{ status: string; refreshing: boolean }>("/new-videos/refresh", {
+    api.post<{ status: string; refreshing: boolean; job_id: number; operation_id: string }>("/new-videos/refresh", {
       categories: categories ?? null,
       force,
     }).then(r => r.data),
 
   refreshStatus: () =>
-    api.get<{ status: string; refreshing: boolean; refreshed: Record<string, number>; error: string | null }>(
+    api.get<{ status: string; refreshing: boolean; job_id: number | null; operation_id?: string; refreshed: Record<string, number>; error: string | null }>(
       "/new-videos/refresh/status",
     ).then(r => r.data),
 
@@ -977,6 +985,9 @@ export const newVideosApi = {
       status: string; job_id: number; category: string;
       replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean;
     }>(r.data.operation_id)),
+
+  restoreFailed: (job_id: number) =>
+    api.post<{ status: string; suggested_video_id: number; removed: number }>(`/new-videos/failed/${job_id}/restore`).then(r => r.data),
 
   dismiss: (suggested_video_id: number, dismissal_type: "temporary" | "permanent" = "temporary", reason?: string) =>
     api.post<OperationAccepted>("/new-videos/dismiss", {
@@ -1023,6 +1034,18 @@ export const metadataManagerApi = {
 
   deleteArtistConsolidationV2: (stableId: string, expectedRevision: number) =>
     api.delete<{ deleted: boolean }>(`/metadata/artist-consolidations-v2/${stableId}`, { params: { expected_revision: expectedRevision } }).then(r => r.data),
+
+  genreConsolidationsV2: () =>
+    api.get<import("@/types").GenreConsolidationAggregate[]>("/metadata/genre-consolidations-v2").then(r => r.data),
+
+  createGenreConsolidationV2: (data: { mask_name: string; target_genres: Array<{ raw_name: string; provenance_json?: Record<string, unknown> }> }) =>
+    api.post<import("@/types").GenreConsolidationAggregate>("/metadata/genre-consolidations-v2", data).then(r => r.data),
+
+  updateGenreConsolidationV2: (stableId: string, data: { expected_revision: number; mask_name: string; target_genres: Array<{ raw_name: string; provenance_json?: Record<string, unknown> }> }) =>
+    api.put<import("@/types").GenreConsolidationAggregate>(`/metadata/genre-consolidations-v2/${stableId}`, data).then(r => r.data),
+
+  deleteGenreConsolidationV2: (stableId: string, expectedRevision: number) =>
+    api.delete<{ deleted: boolean }>(`/metadata/genre-consolidations-v2/${stableId}`, { params: { expected_revision: expectedRevision } }).then(r => r.data),
 
   genreConsolidations: () =>
     api.get<GenreConflict[]>("/metadata/genre-consolidations").then(r => r.data),

@@ -14,7 +14,15 @@ from app.routers.metadata import (
     create_artist_consolidation_v2,
     update_artist_consolidation_v2,
 )
-from app.services.consolidations import consolidation_conflicts, library_consolidation_manifest
+from app.routers.genre_consolidations import (
+    GenreConsolidationCreate, GenreConsolidationMemberInput,
+    GenreConsolidationUpdate, create_genre_consolidation_v2,
+    update_genre_consolidation_v2,
+    delete_genre_consolidation_v2,
+)
+from app.services.consolidations import (
+    consolidation_conflicts, genre_display_map, library_consolidation_manifest,
+)
 
 
 def _db():
@@ -89,3 +97,28 @@ def test_conflict_service_covers_same_mbid_and_multi_mbid_identity():
     kinds = {item["type"] for item in consolidation_conflicts(db)}
     assert "same_mbid_different_name" in kinds
     assert "multiple_mbid_identity" in kinds
+
+
+def test_genre_aggregate_masks_without_rewriting_source_tags(monkeypatch):
+    db = _db()
+    monkeypatch.setattr("app.routers.genre_consolidations.write_library_consolidation_manifest", lambda _db: None)
+    created = create_genre_consolidation_v2(GenreConsolidationCreate(
+        mask_name="Hip Hop",
+        target_genres=[
+            GenreConsolidationMemberInput(raw_name="Hip-Hop", provenance_json={"provider": "nfo"}),
+            GenreConsolidationMemberInput(raw_name="hiphop", provenance_json={"provider": "tmvdb"}),
+        ],
+    ), db)
+    assert genre_display_map(db)["Hip-Hop"] == "Hip Hop"
+    assert created["target_genres"][0]["provenance_json"]["provider"] == "nfo"
+
+    updated = update_genre_consolidation_v2(
+        created["stable_id"], GenreConsolidationUpdate(
+            expected_revision=created["revision"], mask_name="Hip Hop / Rap",
+            target_genres=[GenreConsolidationMemberInput(raw_name="Hip-Hop")],
+        ), db,
+    )
+    assert updated["revision"] == created["revision"] + 1
+    assert library_consolidation_manifest(db)["genre_consolidations"][0]["stable_id"] == created["stable_id"]
+    delete_genre_consolidation_v2(created["stable_id"], updated["revision"], db)
+    assert "Hip-Hop" not in genre_display_map(db)

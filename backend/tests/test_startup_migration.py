@@ -58,7 +58,10 @@ def test_successful_startup_creates_backup_and_report(tmp_path):
     assert report["status"] == "complete"
     assert path.is_file()
     assert report["database_backup_path"]
-    assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "complete"
+    persisted = json.loads(report_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "complete"
+    assert persisted["sidecar_transition_policy"]["read_versions"] == [1, 2]
+    assert "Playarr 3.0" in persisted["sidecar_transition_policy"]["v1_write_exit"]
 
 
 def test_failed_upgrade_restores_original_database(tmp_path):
@@ -153,3 +156,5 @@ def test_reconciliation_reports_exact_file_sidecar_playlist_and_archive_repairs(
     } <= kinds
     assert "review_changed_media" in report["retry_actions"]
     assert "relink_archive_by_identity" in report["retry_actions"]
+    assert report["migration_metrics"]["sidecars_read_by_schema"] == {"2": 1}
+    assert report["migration_metrics"]["v1_read_supported"] is True

@@ -7,6 +7,7 @@ import { usePlaylists, usePlaylist, useCreatePlaylist, useUpdatePlaylist, useDel
 import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { playbackApi } from "@/lib/api";
 import { shuffle } from "@/lib/shuffle";
+import { movePlaylistEntry, sortPlaylistDraft } from "@/lib/playlistDraft";
 import type { PlaylistEntry, PlaylistSortField } from "@/types";
 
 type SortDir = "asc" | "desc";
@@ -190,6 +191,8 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
   const [pendingRemovals, setPendingRemovals] = useState<Set<string>>(() => new Set());
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [reorderAnnouncement, setReorderAnnouncement] = useState("");
+  const [saveConflict, setSaveConflict] = useState(false);
 
   if (!playlist) return null;
 
@@ -230,12 +233,11 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
 
   // Manual reorder: swap the entry with its neighbour in the local draft.
   // Nothing is persisted until "Save order" is clicked.
-  const moveEntry = (index: number, delta: number) => {
-    const target = index + delta;
+  const moveEntry = (index: number, delta: number, boundary?: "start" | "end") => {
+    const target = boundary === "start" ? 0 : boundary === "end" ? entries.length - 1 : index + delta;
     if (target < 0 || target >= entries.length) return;
-    const next = [...entries];
-    [next[index], next[target]] = [next[target], next[index]];
-    setDraft(next);
+    setDraft(movePlaylistEntry(entries, index, target));
+    setReorderAnnouncement(`${entries[index].artist} — ${entries[index].title} moved to position ${target + 1}`);
   };
 
   // Native HTML5 drag-and-drop over the draft order.
@@ -252,10 +254,8 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
   const handleDrop = (index: number) => (e: React.DragEvent) => {
     e.preventDefault();
     if (dragIndex !== null && dragIndex !== index) {
-      const next = [...entries];
-      const [moved] = next.splice(dragIndex, 1);
-      next.splice(index, 0, moved);
-      setDraft(next);
+      setDraft(movePlaylistEntry(entries, dragIndex, index));
+      setReorderAnnouncement(`${entries[dragIndex].artist} — ${entries[dragIndex].title} moved to position ${index + 1}`);
     }
     setDragIndex(null);
     setDragOverIndex(null);
@@ -275,16 +275,21 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
       },
       {
         onSuccess: () => {
+          setSaveConflict(false);
           setDraft(null);
           setPendingRemovals(new Set());
           setSelected(new Set());
           toast({ type: "success", title: "Playlist changes saved" });
         },
-        onError: () => toast({ type: "error", title: "Could not save changes", description: "The playlist may have changed elsewhere. Reload and try again." }),
+        onError: () => {
+          setSaveConflict(true);
+          toast({ type: "error", title: "Playlist changed on another device", description: "Choose the server version or reapply this draft." });
+        },
       },
     );
   };
   const undoChanges = () => {
+    setSaveConflict(false);
     setDraft(null);
     setPendingRemovals(new Set());
     setSelected(new Set());
@@ -301,30 +306,8 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
   };
 
   const applySort = () => {
-    const reverse = sortDir === "desc";
-    const valueFor = (entry: PlaylistEntry) => {
-      if (sortField === "year") return entry.year ?? (reverse ? Number.MIN_SAFE_INTEGER : Number.MAX_SAFE_INTEGER);
-      return (entry[sortField] ?? "").toLocaleLowerCase();
-    };
-    const compare = (a: PlaylistEntry, b: PlaylistEntry) => {
-      const av = valueFor(a);
-      const bv = valueFor(b);
-      const result = typeof av === "number" && typeof bv === "number"
-        ? av - bv
-        : String(av).localeCompare(String(bv));
-      return reverse ? -result : result;
-    };
-    const next = [...entries];
-    if (selected.size > 0) {
-      const positions = next
-        .map((entry, index) => selected.has(entry.occurrence_id) ? index : -1)
-        .filter((index) => index >= 0);
-      const sorted = positions.map((index) => next[index]).sort(compare);
-      positions.forEach((position, index) => { next[position] = sorted[index]; });
-    } else {
-      next.sort(compare);
-    }
-    setDraft(next);
+    setDraft(sortPlaylistDraft(entries, selected, sortField, sortDir));
+    setReorderAnnouncement(selected.size ? `${selected.size} selected tracks sorted` : "Playlist sorted");
   };
 
   const toggleSelected = (occurrenceId: string) => {
@@ -457,10 +440,19 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
         </div>
       )}
 
+      {saveConflict && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10">
+          <span className="text-xs flex-1">The server playlist changed. Your draft is still intact.</span>
+          <button className="btn-ghost btn-sm" onClick={undoChanges}>Reload server version</button>
+          <button className="btn-primary btn-sm" onClick={saveChanges}>Reapply my draft</button>
+        </div>
+      )}
+
       {entries.length === 0 ? (
         <p className="text-sm text-text-muted py-4 text-center">No tracks in this playlist yet.</p>
       ) : (
         <div className="overflow-x-auto">
+          <p className="sr-only" aria-live="polite">{reorderAnnouncement}</p>
           <div className="grid grid-cols-[1.5rem_1.5rem_2rem_minmax(9rem,1fr)_minmax(10rem,1.4fr)_minmax(8rem,1fr)_4rem_4.5rem] gap-2 items-center min-w-[760px] px-2 py-2 text-[10px] uppercase tracking-wide text-text-muted border-b border-surface-border">
             <input
               type="checkbox"
@@ -498,6 +490,15 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
                 onDragOver={handleDragOver(idx)}
                 onDrop={handleDrop(idx)}
                 onDragEnd={handleDragEnd}
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (!event.altKey) return;
+                  if (event.key === "ArrowUp") { event.preventDefault(); moveEntry(idx, -1); }
+                  if (event.key === "ArrowDown") { event.preventDefault(); moveEntry(idx, 1); }
+                  if (event.key === "Home") { event.preventDefault(); moveEntry(idx, 0, "start"); }
+                  if (event.key === "End") { event.preventDefault(); moveEntry(idx, 0, "end"); }
+                }}
+                aria-label={`${entry.artist} — ${entry.title}. Hold Alt and use arrows, Home, or End to reorder.`}
                 className={`grid grid-cols-[1.5rem_1.5rem_2rem_minmax(9rem,1fr)_minmax(10rem,1.4fr)_minmax(8rem,1fr)_4rem_4.5rem] gap-2 items-center min-w-[760px] px-2 py-1.5 rounded hover:bg-surface-lighter group border-y-2 border-transparent ${indicator} ${
                   isDragging ? "opacity-40" : ""
                 } ${isDropTarget ? "bg-surface-lighter" : ""}`}

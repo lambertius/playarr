@@ -1051,23 +1051,8 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
                 f"'{os.path.basename(archive_path)}'"
             )
 
-        # Kill any active streaming processes holding the file
-        from app.routers.playback import kill_streams_for_file
-        kill_streams_for_file(input_path)
-
-        # Retry move in case of transient file lock
-        for _attempt in range(5):
-            try:
-                shutil.move(input_path, archive_path)
-                break
-            except PermissionError:
-                if _attempt < 4:
-                    _time.sleep(0.5)
-                else:
-                    raise RuntimeError(
-                        "Cannot archive original file — it is still in use. "
-                        "Stop playback and try again."
-                    )
+        # The validated output and original remain untouched until one durable
+        # file-set plan has been journalled below.
 
         # Read artist/title for manifest before moving into the lock
         _v_artist = ""
@@ -1098,23 +1083,55 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
         else:
             reason = "edit"
 
+        # Archive original + install validated staging as one recoverable file
+        # Database paths and sidecar intent transition after both moves.
+        from app.services.file_operations import create_file_set_operation, execute_file_operation
+        _op_db = SessionLocal()
+        try:
+            _op_video = _op_db.get(VideoItem, video_id)
+            if not _op_video:
+                raise RuntimeError("Video disappeared before replacement")
+            _file_op = create_file_set_operation(
+                _op_db, _op_video, "replace", [
+                    {"source": input_path, "destination": archive_path, "role": "video"},
+                    {"source": temp_output, "destination": final_path, "role": "video"},
+                ],
+                database_updates={
+                    "file_path": final_path,
+                    "file_size_bytes": os.path.getsize(temp_output),
+                    "editor_edit_type": reason,
+                },
+                metadata={
+                    "reason": reason,
+                    "archive_relative_path": os.path.relpath(archive_path, _archive_dir),
+                    "checksum": getattr(_op_video, "file_checksum", None),
+                },
+            )
+            for _attempt in range(5):
+                _file_op = execute_file_operation(_op_db, _file_op.id)
+                if _file_op.status == "succeeded":
+                    break
+                if _file_op.status != "waiting_for_release":
+                    raise RuntimeError(f"File replacement stopped in {_file_op.status}")
+                _time.sleep(0.5)
+            if _file_op.status != "succeeded":
+                raise RuntimeError("Original is still in use; replacement is waiting for playback to release it")
+            _file_operation_id = _file_op.id
+        finally:
+            _op_db.close()
+
         write_archive_manifest(
             archive_video_path=archive_path,
             original_library_path=norm_input,
-            # Use the library root that actually contains this file (which may
-            # be a source directory, not the main library dir) so the manifest
-            # records the TRUE relative path — otherwise find_archive_file
-            # stores/compares a bare basename and can't re-link source-dir files.
             library_dir=_lib_root,
             video_id=video_id,
             playarr_video_id=_v_stable_id,
-            operation_id=f"editor:{job_id}",
+            operation_id=_file_operation_id,
             artist=_v_artist,
             title=_v_title,
             archive_reason=reason,
         )
-
-        shutil.move(temp_output, final_path)
+        temp_output = None
 
         # Re-analyze quality signature (CPU-bound, outside lock)
         new_sig = None
@@ -1204,15 +1221,10 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
                     j.progress_percent = 100
                     j.current_step = "Encode complete"
                     j.log_text = _summary
-                sdb2.commit()
-
-                # Update sidecar XML to reflect cleared letterbox data
                 if v:
-                    try:
-                        from app.services.playarr_xml import write_playarr_xml
-                        write_playarr_xml(v, sdb2)
-                    except Exception:
-                        pass
+                    from app.services.sidecar_outbox import schedule_sidecar_write
+                    schedule_sidecar_write(sdb2, v, operation_id=_file_operation_id)
+                sdb2.commit()
             finally:
                 sdb2.close()
 
@@ -1335,27 +1347,6 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
     if not archive_file:
         raise HTTPException(404, "Archived original not found")
 
-    # Kill any active streaming processes (ffmpeg remux/transcode) holding the file
-    from app.routers.playback import kill_streams_for_file
-    kill_streams_for_file(video.file_path)
-
-    # Delete the encoded file at the library location
-    if os.path.isfile(video.file_path):
-        import time
-        for attempt in range(5):
-            try:
-                os.remove(video.file_path)
-                break
-            except PermissionError:
-                if attempt < 4:
-                    time.sleep(0.5)
-                else:
-                    raise HTTPException(
-                        409,
-                        "Cannot delete encoded file — it is currently in use. "
-                        "Stop playback and try again."
-                    )
-
     # Determine restored file path — extension may differ from current
     archive_ext = os.path.splitext(archive_file)[1]
     current_ext = os.path.splitext(video.file_path)[1]
@@ -1365,9 +1356,36 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
     else:
         restored_path = video.file_path
 
-    # Restore original from archive
-    os.makedirs(os.path.dirname(restored_path), exist_ok=True)
-    shutil.move(archive_file, restored_path)
+    # Preserve the current edit and restore through one recoverable journal.
+    from app.services.file_operations import create_file_set_operation, execute_file_operation
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    replaced_path = os.path.join(
+        _settings.archive_dir, "_restore_replaced", video.stable_id, stamp,
+        os.path.basename(video.file_path),
+    )
+    transitions = []
+    if os.path.isfile(video.file_path):
+        transitions.append({"source": video.file_path, "destination": replaced_path, "role": "video"})
+    transitions.append({"source": archive_file, "destination": restored_path, "role": "video"})
+    operation = create_file_set_operation(
+        db, video, "restore", transitions,
+        database_updates={
+            "file_path": restored_path,
+            "folder_path": os.path.dirname(restored_path),
+            "file_size_bytes": os.path.getsize(archive_file),
+            "editor_edit_type": None,
+        },
+        metadata={
+            "reason": "editor_restore", "archive_relative_path": os.path.relpath(archive_file, _settings.archive_dir),
+        },
+    )
+    operation = execute_file_operation(db, operation.id)
+    if operation.status != "succeeded":
+        raise HTTPException(409, detail={
+            "code": "waiting_for_release", "message": "Restore is waiting for playback to release the file",
+            "operation_id": operation.id, "retryable": True,
+        })
+    db.refresh(video)
 
     # Clean up archive manifest if it exists
     archive_subdir = os.path.dirname(archive_file)
@@ -1443,13 +1461,6 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
         except OSError:
             pass
 
-    # Update DB file_path if extension changed
-    if restored_path != video.file_path:
-        video.file_path = restored_path
-        # Also update folder name if the extension is in the folder name
-        folder_name = os.path.basename(os.path.dirname(restored_path))
-        video.folder_path = os.path.dirname(restored_path)
-
     # The restored file is the unedited original — clear the edit-type flag
     # so the library no longer reports the video as cropped/trimmed.
     video.editor_edit_type = None
@@ -1469,13 +1480,9 @@ def restore_from_archive(video_id: int = Query(...), db: Session = Depends(get_d
     except Exception as e:
         logger.warning(f"Post-restore analysis failed: {e}")
 
-    # Persist the cleared edit flag to the sidecar XML so a future DB rebuild
-    # doesn't resurrect the stale "edited" state.
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        write_playarr_xml(video, db)
-    except Exception:
-        pass
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    schedule_sidecar_write(db, video, operation_id=operation.id)
+    db.commit()
 
     logger.info(f"Restored video {video_id} from archive: {archive_file} -> {video.file_path}")
     return {"message": "Original restored from archive", "archive_path": archive_file}
@@ -1492,15 +1499,12 @@ def set_exclude_from_scan(req: ExcludeFromScanRequest, db: Session = Depends(get
     video.editor_crop_dismissed_evidence_hash = (
         signature.letterbox_evidence_hash if req.exclude and signature else None
     )
+    video.revision = int(video.revision or 1) + 1
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    schedule_sidecar_write(db, video)
     db.commit()
     action = "excluded from" if req.exclude else "re-included in"
     logger.info(f"Video {req.video_id} {action} editor scans")
-    # Persist to sidecar XML so flag survives DB changes
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        write_playarr_xml(video, db)
-    except Exception:
-        pass
     return {"video_id": req.video_id, "exclude_from_scan": req.exclude}
 
 

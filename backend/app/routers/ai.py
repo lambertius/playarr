@@ -309,11 +309,14 @@ def run_scene_analysis(
 
     db.commit()
 
-    # Persist to disk: update XML sidecar + copy thumb files to video folder
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        write_playarr_xml(video, db)
+    # Persist the authoritative sidecar intent before best-effort thumbnail
+    # materialisation. A scheduling failure is surfaced to the caller.
+    from app.services.playarr_xml import write_playarr_xml
+    write_playarr_xml(video, db)
+    db.commit()
 
+    # Copy generated thumbnail derivatives to the video folder.
+    try:
         import shutil as _shutil
         thumbs = db.query(AIThumbnail).filter(AIThumbnail.video_id == video_id).all()
         for t in thumbs:
@@ -959,13 +962,14 @@ def _batch_scenes_task(video_ids: List[int], force: bool):
                 except Exception:
                     pass
 
-                # Persist to disk: update XML + copy thumbs to video folder
-                try:
-                    video = db.query(VideoItem).get(vid)
-                    if video and video.folder_path and os.path.isdir(video.folder_path):
-                        from app.services.playarr_xml import write_playarr_xml
-                        write_playarr_xml(video, db)
-
+                # Persist sidecar intent transactionally; derivative copy
+                # failures remain isolated to this batch item.
+                video = db.query(VideoItem).get(vid)
+                if video and video.folder_path and os.path.isdir(video.folder_path):
+                    from app.services.playarr_xml import write_playarr_xml
+                    write_playarr_xml(video, db)
+                    db.commit()
+                    try:
                         import shutil as _shutil
                         thumbs = db.query(AIThumbnail).filter(AIThumbnail.video_id == vid).all()
                         for t in thumbs:
@@ -973,8 +977,8 @@ def _batch_scenes_task(video_ids: List[int], force: bool):
                                 dest = os.path.join(video.folder_path, os.path.basename(t.file_path))
                                 if not os.path.isfile(dest):
                                     _shutil.copy2(t.file_path, dest)
-                except Exception:
-                    pass
+                    except OSError as exc:
+                        logger.warning("Thumbnail materialisation failed for video %s: %s", vid, exc)
             except Exception as e:
                 logger.error(f"Batch scene analysis failed for video {vid}: {e}")
                 db.rollback()

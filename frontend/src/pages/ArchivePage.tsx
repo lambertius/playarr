@@ -4,6 +4,7 @@ import {
   Archive, Trash2, RotateCcw, Search, ChevronLeft, ChevronRight,
   Scissors, Film, Download, RefreshCw, Play, Pause, Volume2, VolumeX,
   X, Maximize2, ArrowRight, FolderOpen,
+  LayoutGrid, List,
 } from "lucide-react";
 import { useArchiveItems, useArchiveRestore, useArchiveDelete, useArchiveClear } from "@/hooks/queries";
 import { settingsApi, playbackApi } from "@/lib/api";
@@ -17,6 +18,7 @@ import type { ArchiveItem } from "@/types";
 // ── Archive page preferences (server-backed) ─────────────
 interface ArchivePrefs {
   pageSize: number;
+  view: "list" | "grid";
 }
 
 const K_ARCHIVE_PAGE_SIZE = "archive_page_size";
@@ -24,7 +26,7 @@ const K_ARCHIVE_PAGE_SIZE = "archive_page_size";
 function archiveLegacy(): ArchivePrefs {
   let pageSize = 25;
   try { const n = Number(localStorage.getItem(K_ARCHIVE_PAGE_SIZE)); if (n) pageSize = n; } catch { /* ignore */ }
-  return { pageSize };
+  return { pageSize, view: "list" };
 }
 
 function getArchivePrefs(): ArchivePrefs {
@@ -303,7 +305,6 @@ export function ArchivePage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
-  const { data: items, isLoading, refetch } = useArchiveItems();
   const restoreMutation = useArchiveRestore();
   const deleteMutation = useArchiveDelete();
   const clearMutation = useArchiveClear();
@@ -314,38 +315,20 @@ export function ArchivePage() {
   const [comparisonItem, setComparisonItem] = useState<ArchiveItem | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(() => getArchivePrefs().pageSize);
+  const [viewMode, setViewMode] = useState<"list" | "grid">(() => getArchivePrefs().view);
+  const { data: archivePage, isLoading, refetch } = useArchiveItems({
+    reason: reasonFilter === "all" ? undefined : reasonFilter,
+    search: searchQuery.trim() || undefined, page, page_size: pageSize,
+  });
+  const items = archivePage?.items;
 
   // Filtered items
-  const filtered = useMemo(() => {
-    if (!items) return [];
-    let result = items;
-    if (reasonFilter !== "all") {
-      result = reasonFilter === "orphaned"
-        ? result.filter((i) => !i.video_id || i.integrity_status === "orphaned_owner")
-        : result.filter((i) => normalizeReason(i.reason) === reasonFilter);
-    }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter((i) =>
-        i.artist.toLowerCase().includes(q) || i.title.toLowerCase().includes(q)
-      );
-    }
-    return result;
-  }, [items, reasonFilter, searchQuery]);
+  const filtered = items ?? [];
 
   // Reason and maintenance counts.
   const reasonCounts = useMemo(() => {
-    if (!items) return {};
-    const counts: Record<string, number> = {};
-    for (const item of items) {
-      const r = normalizeReason(item.reason);
-      counts[r] = (counts[r] || 0) + 1;
-      if (!item.video_id || item.integrity_status === "orphaned_owner") {
-        counts.orphaned = (counts.orphaned || 0) + 1;
-      }
-    }
-    return counts;
-  }, [items]);
+    return archivePage?.reason_counts ?? {};
+  }, [archivePage?.reason_counts]);
 
   // Group filtered items by video_id (or artist+title for orphans)
   type ArchiveGroup = { key: string; video_id: number | null; artist: string; title: string; items: ArchiveItem[] };
@@ -367,12 +350,9 @@ export function ArchivePage() {
     return Array.from(map.values());
   }, [filtered]);
 
-  const allCount = items?.length ?? 0;
-  const totalPages = Math.max(1, Math.ceil(grouped.length / pageSize));
-  const pagedGroups = useMemo(() => {
-    const start = (page - 1) * pageSize;
-    return grouped.slice(start, start + pageSize);
-  }, [grouped, page, pageSize]);
+  const allCount = archivePage?.total ?? 0;
+  const totalPages = archivePage?.total_pages ?? 1;
+  const pagedGroups = grouped;
 
   // Selection helpers
   const pagedFolders = useMemo(() => pagedGroups.flatMap(g => g.items.map(i => i.folder)), [pagedGroups]);
@@ -532,6 +512,10 @@ export function ArchivePage() {
           <button onClick={() => refetch()} className="btn-ghost btn-sm gap-1.5">
             <RefreshCw size={14} /> Refresh
           </button>
+          <div className="flex rounded border border-surface-border" aria-label="Archive view">
+            <button aria-pressed={viewMode === "list"} className={cn("btn-ghost p-1.5", viewMode === "list" && "text-accent")} onClick={() => { setViewMode("list"); patchArchivePrefs({ view: "list" }); }}><List size={14} /></button>
+            <button aria-pressed={viewMode === "grid"} className={cn("btn-ghost p-1.5", viewMode === "grid" && "text-accent")} onClick={() => { setViewMode("grid"); patchArchivePrefs({ view: "grid" }); }}><LayoutGrid size={14} /></button>
+          </div>
           {allCount > 0 && (
             <Tooltip content="Permanently delete all items in the archive">
               <button onClick={handleClearAll} disabled={clearMutation.isPending}
@@ -634,7 +618,7 @@ export function ArchivePage() {
         </div>
       ) : (
         <>
-          <div className="space-y-3">
+          <div className={cn(viewMode === "grid" ? "grid gap-3 xl:grid-cols-2" : "space-y-3")}>
             {pagedGroups.map((group) => (
               <div key={group.key} className="card p-0 overflow-hidden">
                 <div className="flex">
@@ -715,6 +699,10 @@ export function ArchivePage() {
                           <div className="flex items-center gap-2 text-[11px] text-text-muted flex-1 min-w-0">
                             {item.file_size_bytes > 0 && <span>{formatBytes(item.file_size_bytes)}</span>}
                             {item.archived_at && <span className="text-text-muted/70">{timeAgo(item.archived_at)}</span>}
+                            {item.operation_id && <span title={item.operation_id}>Op {item.operation_id.slice(0, 8)}</span>}
+                            {item.original_path && <span className="truncate" title={`Original/current path: ${item.original_path}`}>{item.original_path}</span>}
+                            {(item.checksum_sha256 || item.checksum_md5) && <span title={item.checksum_sha256 || item.checksum_md5 || ""}>Checksum verified</span>}
+                            {item.restore_eligible === false && <span className="text-red-300">Not restorable</span>}
                           </div>
 
                           {/* Actions */}
@@ -767,7 +755,7 @@ export function ArchivePage() {
             page={page}
             totalPages={totalPages}
             pageSize={pageSize}
-            total={grouped.length}
+            total={allCount}
             onPageChange={setPage}
             onPageSizeChange={handlePageSizeChange}
           />

@@ -51,12 +51,16 @@ def test_url_and_disk_sources_share_plan_builder_and_logical_output():
     assert url["import_type"] == "url" and disk["import_type"] == "library"
 
     app_root = Path(__file__).resolve().parents[1] / "app"
+    canonical = (app_root / "pipeline" / "stages.py").read_text("utf-8")
     url_source = (app_root / "pipeline_url" / "stages.py").read_text("utf-8")
     disk_source = (app_root / "pipeline_lib" / "stages.py").read_text("utf-8")
-    for source in (url_source, disk_source):
-        assert "from app.pipeline_lib.mutation_plan import build_plan_from_workspace" in source
-        assert "from app.pipeline_lib.db_apply import apply_mutation_plan" in source
-        assert "from app.pipeline_url.deferred import dispatch_deferred" in source
+    tasks_source = (app_root / "tasks.py").read_text("utf-8")
+    assert "def run_url_import_pipeline" in canonical
+    assert "def run_library_import_pipeline" in canonical
+    assert "from app.pipeline.stages import run_url_import_pipeline" in url_source
+    assert "from app.pipeline.stages import run_library_import_pipeline" in disk_source
+    assert "from app.pipeline_url.stages import" not in tasks_source
+    assert "from app.pipeline_lib.stages import" not in tasks_source
 
 
 def test_unchanged_input_resumes_checkpoint_and_changed_policy_resets(tmp_path, monkeypatch):

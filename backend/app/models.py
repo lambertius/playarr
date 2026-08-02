@@ -1104,6 +1104,8 @@ class ArtistConsolidation(Base):
     stable_id: Mapped[str] = mapped_column(String(36), default=lambda: str(uuid4()), unique=True, nullable=False, index=True)
     mask_name: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
     revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    created_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc),
@@ -1126,6 +1128,7 @@ class ArtistConsolidationTarget(Base):
     )
     raw_name: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
     provenance: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    provenance_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     mb_artist_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     consolidation: Mapped["ArtistConsolidation"] = relationship(back_populates="targets")
 
@@ -1168,4 +1171,8 @@ from app.matching.models import (  # noqa: E402, F401
 # ---------------------------------------------------------------------------
 from app.ai.models import (  # noqa: E402, F401
     AIMetadataResult, AISceneAnalysis, AIThumbnail,
+)
+
+from app.durability_models import (  # noqa: E402, F401
+    FieldProvenanceEvent, GenreConsolidation, GenreConsolidationMember, ArchiveCatalogEntry,
 )

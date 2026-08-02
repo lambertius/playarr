@@ -1637,6 +1637,18 @@
             ],
             "title": "Provenance"
           },
+          "provenance_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provenance Json"
+          },
           "raw_name": {
             "title": "Raw Name",
             "type": "string"
@@ -5205,6 +5217,76 @@
           "master_genre_id"
         ],
         "title": "GenreConsolidateRequest",
+        "type": "object"
+      },
+      "GenreConsolidationCreate": {
+        "properties": {
+          "mask_name": {
+            "title": "Mask Name",
+            "type": "string"
+          },
+          "target_genres": {
+            "items": {
+              "$ref": "#/components/schemas/GenreConsolidationMemberInput"
+            },
+            "title": "Target Genres",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mask_name"
+        ],
+        "title": "GenreConsolidationCreate",
+        "type": "object"
+      },
+      "GenreConsolidationMemberInput": {
+        "properties": {
+          "provenance_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provenance Json"
+          },
+          "raw_name": {
+            "title": "Raw Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "raw_name"
+        ],
+        "title": "GenreConsolidationMemberInput",
+        "type": "object"
+      },
+      "GenreConsolidationUpdate": {
+        "properties": {
+          "expected_revision": {
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "mask_name": {
+            "title": "Mask Name",
+            "type": "string"
+          },
+          "target_genres": {
+            "items": {
+              "$ref": "#/components/schemas/GenreConsolidationMemberInput"
+            },
+            "title": "Target Genres",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mask_name",
+          "expected_revision"
+        ],
+        "title": "GenreConsolidationUpdate",
         "type": "object"
       },
       "GenreCreateRequest": {
@@ -18422,6 +18504,159 @@
         ]
       }
     },
+    "/api/metadata/genre-consolidations-v2": {
+      "get": {
+        "operationId": "get_genre_consolidations_v2_api_metadata_genre_consolidations_v2_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Genre Consolidations V2",
+        "tags": [
+          "Metadata"
+        ]
+      },
+      "post": {
+        "operationId": "create_genre_consolidation_v2_api_metadata_genre_consolidations_v2_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenreConsolidationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Genre Consolidation V2",
+        "tags": [
+          "Metadata"
+        ]
+      }
+    },
+    "/api/metadata/genre-consolidations-v2/{stable_id}": {
+      "delete": {
+        "operationId": "delete_genre_consolidation_v2_api_metadata_genre_consolidations_v2__stable_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "stable_id",
+            "required": true,
+            "schema": {
+              "title": "Stable Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_revision",
+            "required": true,
+            "schema": {
+              "title": "Expected Revision",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Genre Consolidation V2",
+        "tags": [
+          "Metadata"
+        ]
+      },
+      "put": {
+        "operationId": "update_genre_consolidation_v2_api_metadata_genre_consolidations_v2__stable_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "stable_id",
+            "required": true,
+            "schema": {
+              "title": "Stable Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenreConsolidationUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Genre Consolidation V2",
+        "tags": [
+          "Metadata"
+        ]
+      }
+    },
     "/api/metadata/genre-create-tile": {
       "post": {
         "description": "Create a new consolidation tile with a master name and optional aliases.",
@@ -19302,6 +19537,47 @@
           }
         },
         "summary": "List Dismissed",
+        "tags": [
+          "New Videos"
+        ]
+      }
+    },
+    "/api/new-videos/failed/{job_id}/restore": {
+      "post": {
+        "description": "Put an auto-dismissed failed addition back into recommendation results.",
+        "operationId": "restore_failed_addition_api_new_videos_failed__job_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Failed Addition",
         "tags": [
           "New Videos"
         ]
@@ -21973,6 +22249,29 @@
               ],
               "title": "Category"
             }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -23566,6 +23865,104 @@
           }
         },
         "summary": "List Archive Items",
+        "tags": [
+          "Settings"
+        ]
+      }
+    },
+    "/api/settings/archive-items/page": {
+      "get": {
+        "description": "Return an indexed, bounded archive page with server-owned filters.",
+        "operationId": "list_archive_items_page_api_settings_archive_items_page_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "reason",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reason"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Archive Items Page",
         "tags": [
           "Settings"
         ]

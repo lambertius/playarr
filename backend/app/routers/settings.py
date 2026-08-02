@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -159,6 +159,10 @@ def update_setting(update: SettingUpdate, user_id: Optional[str] = None, db: Ses
         api_key = db.query(AppSetting).filter(AppSetting.key == "tmvdb_api_key", AppSetting.user_id == user_id).first()
         if not enabled or enabled.value != "true" or not api_key or not api_key.value:
             raise HTTPException(422, "TMVDB auto-push requires TMVDB to be enabled with an API key")
+    if update.key == "tmvdb_auto_pull" and update.value == "true":
+        enabled = db.query(AppSetting).filter(AppSetting.key == "tmvdb_enabled", AppSetting.user_id == user_id).first()
+        if not enabled or enabled.value != "true":
+            raise HTTPException(422, "TMVDB auto-pull requires TMVDB to be enabled")
 
     if setting:
         setting.value = update.value
@@ -219,6 +223,10 @@ def settings_catalogue(db: Session = Depends(get_db)):
             "default": None if key in SECRET_SETTING_KEYS else default,
             "group": _setting_group(key),
             "scope": "instance",
+            "constraints": {
+                "max_concurrent_downloads": {"minimum": 1, "maximum": 16},
+                "server.port": {"minimum": 1, "maximum": 65535},
+            }.get(key, {}),
             "restart_required": key in {"server.port", "startup_with_system"},
             "secret": key in SECRET_SETTING_KEYS,
             "dependencies": {
@@ -981,6 +989,23 @@ def list_archive_items(db: Session = Depends(get_db)):
     results.sort(key=lambda r: r.get("archived_at", ""), reverse=True)
     return results
 
+
+@router.get("/archive-items/page")
+def list_archive_items_page(
+    reason: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, max_length=200),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    refresh: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """Return an indexed, bounded archive page with server-owned filters."""
+    from app.services.archive_catalog import query_archive_catalog, sync_archive_catalog
+    sync_archive_catalog(db)
+    return query_archive_catalog(
+        db, reason=reason, search=search, page=page, page_size=page_size,
+    )
+
 class DeleteArchiveRequest(BaseModel):
     folders: List[str]
 
@@ -1187,27 +1212,7 @@ def _execute_restore_archive_item(body: RestoreArchiveRequest, db: Session):
     video_id = video.id if video else meta.get("video_id")
 
     if video and video.file_path:
-        # Kill any active streaming processes holding the file
-        from app.routers.playback import kill_streams_for_file
-        kill_streams_for_file(video.file_path)
-
-        # Delete the current encoded file
-        if os.path.isfile(video.file_path):
-            import time
-            for attempt in range(5):
-                try:
-                    os.remove(video.file_path)
-                    break
-                except PermissionError:
-                    if attempt < 4:
-                        time.sleep(0.5)
-                    else:
-                        raise HTTPException(
-                            409,
-                            "Cannot delete current file — it is currently in use. "
-                            "Stop playback and try again."
-                        )
-
+        current_library_path = video.file_path
         # Determine restored file path
         archive_ext = os.path.splitext(archive_file)[1]
         current_ext = os.path.splitext(video.file_path)[1]
@@ -1216,14 +1221,35 @@ def _execute_restore_archive_item(body: RestoreArchiveRequest, db: Session):
         else:
             restored_path = video.file_path
 
-        import shutil as _shutil
-        os.makedirs(os.path.dirname(restored_path), exist_ok=True)
-        _shutil.move(archive_file, restored_path)
-
-        # Update DB
-        if restored_path != video.file_path:
-            video.file_path = restored_path
-            video.folder_path = os.path.dirname(restored_path)
+        from app.services.file_operations import create_file_set_operation, execute_file_operation
+        transitions = []
+        conflict_archive = None
+        if os.path.isfile(video.file_path):
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            conflict_archive = os.path.join(
+                _settings.archive_dir, "_restore_conflicts", video.stable_id, stamp,
+                os.path.basename(video.file_path),
+            )
+            transitions.append({"source": video.file_path, "destination": conflict_archive, "role": "video"})
+        transitions.append({"source": archive_file, "destination": restored_path, "role": "video"})
+        file_operation = create_file_set_operation(
+            db, video, "restore", transitions,
+            database_updates={
+                "file_path": restored_path, "folder_path": os.path.dirname(restored_path),
+                "file_size_bytes": os.path.getsize(archive_file), "editor_edit_type": None,
+            },
+            metadata={
+                "reason": "archive_restore", "archive_relative_path": os.path.relpath(archive_file, _settings.archive_dir),
+                "preview_operation_id": body.operation_id,
+            },
+        )
+        file_operation = execute_file_operation(db, file_operation.id)
+        if file_operation.status != "succeeded":
+            raise HTTPException(409, detail={
+                "code": "waiting_for_release", "message": "Restore is waiting for the current file to be released",
+                "operation_id": file_operation.id, "retryable": True,
+            })
+        db.refresh(video)
 
         # Re-analyze quality
         new_sig = None
@@ -1238,8 +1264,17 @@ def _execute_restore_archive_item(body: RestoreArchiveRequest, db: Session):
         video.file_size_bytes = os.path.getsize(video.file_path)
         if new_sig and new_sig.get("height"):
             video.resolution_label = f"{new_sig['height']}p"
-        video.revision = (video.revision or 1) + 1
+        from app.services.sidecar_outbox import schedule_sidecar_write
+        schedule_sidecar_write(db, video, operation_id=file_operation.id)
         db.commit()
+        if conflict_archive:
+            from app.routers.video_editor import write_archive_manifest
+            write_archive_manifest(
+                conflict_archive, current_library_path,
+                _settings.library_dir, video_id=video.id,
+                playarr_video_id=video.playarr_video_id, operation_id=file_operation.id,
+                artist=video.artist or "", title=video.title or "", archive_reason="restore_conflict",
+            )
     else:
         # No linked video — just move the file back to library root
         import shutil as _shutil
@@ -1316,15 +1351,6 @@ def restore_archive_item(body: RestoreArchiveRequest, db: Session = Depends(get_
     db.commit()
     conflict_archive = None
     try:
-        if current_path and os.path.isfile(current_path) and body.conflict_choice == "archive_current":
-            if not video:
-                raise HTTPException(409, "Cannot safely archive the current file without a linked video")
-            conflict_archive = _archive_current_restore_conflict(video, current_path, operation.id)
-            operation.rollback_json = {
-                "current_path": current_path,
-                "conflict_archive_path": conflict_archive,
-            }
-            db.commit()
         result = _execute_restore_archive_item(body, db)
         operation = db.get(FileOperation, body.operation_id)
         operation.status = "succeeded"

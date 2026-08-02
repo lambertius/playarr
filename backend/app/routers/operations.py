@@ -46,6 +46,7 @@ def operation_health(db: Session = Depends(get_db)) -> dict:
     settings = get_settings()
     from app.version import APP_VERSION
     from app.pipeline_url.write_queue import stats as cosmetic_write_stats
+    from app.services.transaction_telemetry import stats as transaction_stats
     file_counts = {
         status: count
         for status, count in db.query(
@@ -88,6 +89,7 @@ def operation_health(db: Session = Depends(get_db)) -> dict:
         "tmvdb_contributions": contribution_counts,
         "files": file_counts,
         "database_retry_count": database_retries,
+        "write_transactions": transaction_stats(),
         "last_reconciliation": {
             "sidecar": {
                 "status": latest_sidecar.status if latest_sidecar else "never",

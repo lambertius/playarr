@@ -11,6 +11,7 @@ import { Tooltip } from "@/components/Tooltip";
 export interface ScrapeOptions {
   scrape_wikipedia: boolean;
   scrape_musicbrainz: boolean;
+  scrape_tmvdb: boolean;
   ai_auto: boolean;
   ai_only: boolean;
   scene_analysis: boolean;
@@ -34,7 +35,7 @@ function getBoolSetting(settings: { key: string; value: string }[] | undefined, 
 export function ScrapeOptionsModal({ open, onClose, onScrape, itemCount, isPending }: ScrapeOptionsModalProps) {
   const [scrapeWiki, setScrapeWiki] = useState(true);
   const [scrapeMusicbrainz, setScrapeMusicbrainz] = useState(true);
-  const [, setScrapeTmvdb] = useState(false);
+  const [scrapeTmvdb, setScrapeTmvdb] = useState(false);
   const [aiAuto, setAiAuto] = useState(false);
   const [aiOnly, setAiOnly] = useState(false);
   const [sceneAnalysis, setSceneAnalysis] = useState(true);
@@ -56,6 +57,7 @@ export function ScrapeOptionsModal({ open, onClose, onScrape, itemCount, isPendi
     onScrape({
       scrape_wikipedia: scrapeWiki,
       scrape_musicbrainz: scrapeMusicbrainz,
+      scrape_tmvdb: scrapeTmvdb,
       ai_auto: aiAuto,
       ai_only: aiOnly,
       scene_analysis: sceneAnalysis,
@@ -92,7 +94,7 @@ export function ScrapeOptionsModal({ open, onClose, onScrape, itemCount, isPendi
             </div>
             <ToggleRow label="Scrape Wikipedia" description="Search for a Wikipedia article to extract plot, genre, and background info." checked={scrapeWiki} onChange={(v) => { setScrapeWiki(v); if (v) { setAiAuto(false); setAiOnly(false); } }} />
             <ToggleRow label="Scrape MusicBrainz" description="Query MusicBrainz for structured metadata: album, release year, and genre tags." checked={scrapeMusicbrainz} onChange={(v) => { setScrapeMusicbrainz(v); if (v) { setAiAuto(false); setAiOnly(false); } }} />
-            <ToggleRow label="Retrieve from TMVDB" description="Look up metadata from The Music Video DB community database. (Coming soon)" checked={false} onChange={() => {}} disabled />
+            <ToggleRow label="Retrieve from TMVDB" description="Retrieve reviewed metadata candidates from The Music Video DB." checked={scrapeTmvdb} onChange={(v) => { setScrapeTmvdb(v); if (v) { setAiAuto(false); setAiOnly(false); } }} />
             <ToggleRow label="AI Auto" description="Full AI-guided enrichment after scraping. Falls back to AI when scrapers miss data." checked={aiAuto} onChange={(v) => { setAiAuto(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setScrapeTmvdb(false); setAiOnly(false); } }} />
             <ToggleRow label="AI Only" description="Skip all external scrapers — rely solely on AI for metadata." checked={aiOnly} onChange={(v) => { setAiOnly(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setScrapeTmvdb(false); setAiAuto(false); } }} />
           </div>

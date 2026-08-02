@@ -36,6 +36,7 @@ from app.new_videos.recommendation_ranker import (
     RecommendationCandidate, RecommendationRanker, FeedbackAdjuster,
 )
 from app.new_videos import feedback_service
+from app.new_videos.feed_policy import diversity_rerank as _diversity_rerank
 
 logger = logging.getLogger(__name__)
 
@@ -1014,6 +1015,14 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
     snapshot = db.query(RecommendationSnapshot).filter(
         RecommendationSnapshot.category == category
     ).first()
+    previous_provider_ids: set[str] = set()
+    if snapshot and snapshot.payload_json:
+        previous_provider_ids = {
+            provider_id
+            for (provider_id,) in db.query(SuggestedVideo.provider_video_id)
+            .filter(SuggestedVideo.id.in_(snapshot.payload_json)).all()
+            if provider_id
+        }
 
     if snapshot and not force:
         if snapshot.expires_at and datetime.now(timezone.utc) < snapshot.expires_at:
@@ -1082,9 +1091,24 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
             seen_ids.add(c.provider_video_id)
             deduped.append((c, s))
 
-    # Diversity-aware reranking: prefer no adjacent duplicate artist and cap
-    # each artist at 20% of the visible category where the pool permits.
-    deduped = _diversity_rerank(deduped, limit)
+    # A forced "Fresh list" prioritises candidates absent from the preceding
+    # snapshot. Repeated candidates are used only when the pool cannot fill the
+    # category, and both partitions retain the diversity constraints.
+    if force and previous_provider_ids:
+        new_candidates = [
+            item for item in deduped
+            if item[0].provider_video_id not in previous_provider_ids
+        ]
+        repeated_candidates = [
+            item for item in deduped
+            if item[0].provider_video_id in previous_provider_ids
+        ]
+        deduped = (
+            _diversity_rerank(new_candidates, limit)
+            + _diversity_rerank(repeated_candidates, limit)
+        )
+    else:
+        deduped = _diversity_rerank(deduped, limit)
 
     # Persist ALL candidates (extras serve as backfill pool when
     # snapshot videos are dismissed), but only put top N in snapshot.
@@ -1094,7 +1118,16 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
         sv_ids.append(sv.id)
 
     snapshot_ids = sv_ids[:limit]
-    _update_snapshot(db, category, snapshot_ids)
+    genuinely_new = sum(
+        1 for candidate, _score in deduped[:limit]
+        if candidate.provider_video_id not in previous_provider_ids
+    )
+    _update_snapshot(db, category, snapshot_ids, source_summary={
+        "genuinely_new": genuinely_new,
+        "visible_count": len(snapshot_ids),
+        "previous_count": len(previous_provider_ids),
+        "fresh_requested": force,
+    })
     db.commit()
 
     logger.info(f"Category '{category}': generated {len(deduped)} suggestions "
@@ -1102,61 +1135,10 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
     return len(deduped)
 
 
-def _diversity_rerank(scored: list[tuple], limit: int) -> list[tuple]:
-    """Reorder scored candidates without discarding the backfill pool."""
-    if not scored or limit <= 1:
-        return scored
-    cap = max(1, int(limit * 0.20))
-    remaining = list(scored)
-    visible: list[tuple] = []
-    artist_counts: dict[str, int] = {}
-
-    def artist_key(item: tuple) -> str:
-        return (item[0].artist or "").strip().casefold()
-
-    while remaining and len(visible) < limit:
-        previous = artist_key(visible[-1]) if visible else ""
-
-        # Prefer a candidate satisfying both diversity rules. If that cannot
-        # fill the requested category, relax the cap before adjacency so an
-        # A/B/A/B pool still produces the best possible visible order.
-        selected_index = next(
-            (
-                index
-                for index, item in enumerate(remaining)
-                if not artist_key(item)
-                or (
-                    artist_key(item) != previous
-                    and artist_counts.get(artist_key(item), 0) < cap
-                )
-            ),
-            None,
-        )
-        if selected_index is None:
-            selected_index = next(
-                (
-                    index
-                    for index, item in enumerate(remaining)
-                    if not artist_key(item) or artist_key(item) != previous
-                ),
-                None,
-            )
-        if selected_index is None:
-            selected_index = 0
-
-        selected = remaining.pop(selected_index)
-        visible.append(selected)
-        artist = artist_key(selected)
-        if artist:
-            artist_counts[artist] = artist_counts.get(artist, 0) + 1
-
-    # Keep every non-visible candidate in original score order for backfill.
-    selected_ids = {id(item) for item in visible}
-    deferred = [item for item in scored if id(item) not in selected_ids]
-    return visible + deferred
-
-
-def _update_snapshot(db: Session, category: str, video_ids: list[int]):
+def _update_snapshot(
+    db: Session, category: str, video_ids: list[int],
+    *, source_summary: dict | None = None,
+):
     """Upsert the snapshot for a category."""
     refresh_minutes = _get_setting(db, "nv_refresh_interval_minutes", "360", "int")
     now = datetime.now(timezone.utc)
@@ -1170,6 +1152,7 @@ def _update_snapshot(db: Session, category: str, video_ids: list[int]):
         snapshot.expires_at = now + timedelta(minutes=refresh_minutes)
         snapshot.payload_json = video_ids
         snapshot.generator_version = "v1"
+        snapshot.source_summary_json = source_summary
     else:
         snapshot = RecommendationSnapshot(
             category=category,
@@ -1177,6 +1160,7 @@ def _update_snapshot(db: Session, category: str, video_ids: list[int]):
             expires_at=now + timedelta(minutes=refresh_minutes),
             payload_json=video_ids,
             generator_version="v1",
+            source_summary_json=source_summary,
         )
         db.add(snapshot)
     db.flush()
@@ -1229,7 +1213,7 @@ def get_feed(db: Session) -> dict:
         "new": "nv_new_count",
     }
 
-    result: dict = {"categories": {}, "cart_count": cart_count}
+    result: dict = {"categories": {}, "cart_count": cart_count, "genuinely_new_count": 0}
 
     for cat in CATEGORIES:
         count_key = CATEGORY_COUNT_KEYS.get(cat)
@@ -1244,6 +1228,7 @@ def get_feed(db: Session) -> dict:
                 "videos": [],
                 "generated_at": None,
                 "expires_at": None,
+                "genuinely_new": 0,
             }
             continue
 
@@ -1319,7 +1304,9 @@ def get_feed(db: Session) -> dict:
             "videos": ordered,
             "generated_at": snapshot.generated_at.isoformat() if snapshot.generated_at else None,
             "expires_at": snapshot.expires_at.isoformat() if snapshot.expires_at else None,
+            "genuinely_new": (snapshot.source_summary_json or {}).get("genuinely_new", 0),
         }
+        result["genuinely_new_count"] += result["categories"][cat]["genuinely_new"]
 
     return result
 

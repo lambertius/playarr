@@ -257,11 +257,7 @@ def test_source_files_use_new_message_format():
 def test_deferred_coordinators_have_auto_clear():
     """Verify all 3 deferred coordinator files contain the auto-clear logic."""
     backend_dir = os.path.join(os.path.dirname(__file__), "..")
-    deferred_files = [
-        os.path.join(backend_dir, "app", "pipeline", "deferred.py"),
-        os.path.join(backend_dir, "app", "pipeline_lib", "deferred.py"),
-        os.path.join(backend_dir, "app", "pipeline_url", "deferred.py"),
-    ]
+    deferred_files = [os.path.join(backend_dir, "app", "pipeline_url", "deferred.py")]
 
     for path in deferred_files:
         with open(path, "r", encoding="utf-8") as f:

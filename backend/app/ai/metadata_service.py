@@ -905,12 +905,9 @@ def apply_ai_fields(
 
     # Write Playarr XML sidecar
     if video.folder_path:
-        try:
-            from app.services.playarr_xml import write_playarr_xml
-            write_playarr_xml(video, db)
-            _set_flag(db, video, "xml_exported", method="ai_apply")
-        except Exception as e:
-            logger.warning(f"Playarr XML write after apply failed for video {video_id}: {e}")
+        from app.services.playarr_xml import write_playarr_xml
+        write_playarr_xml(video, db)
+        _set_flag(db, video, "xml_exported", method="ai_apply")
 
     db.commit()
     return video

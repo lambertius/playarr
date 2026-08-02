@@ -752,6 +752,18 @@ export interface ArtistConsolidationAggregate {
   targets: Array<{ id: number; raw_name: string; provenance?: string | null; mb_artist_id?: string | null }>;
   mbids: string[];
 }
+export interface GenreConsolidationAggregate {
+  id: number;
+  stable_id: string;
+  mask_name: string;
+  revision: number;
+  target_genres: Array<{
+    id: number;
+    raw_name: string;
+    provenance_json?: Record<string, unknown> | null;
+    linked_video_count: number;
+  }>;
+}
 
 export interface PartyModeParams {
   search?: string;
@@ -1945,15 +1957,15 @@ export interface SuggestedVideoItem {
 export interface NewVideosCategoryData {
   videos: SuggestedVideoItem[];
   generated_at: string | null;
-  expires_at: string | null;
+  expires_at: string | null; genuinely_new?: number;
 }
-
 export interface NewVideosFeed {
   categories: Record<NewVideoCategory, NewVideosCategoryData>;
   cart_count: number;
   /** True while a background feed refresh is generating suggestions. */
-  refreshing?: boolean;
+  refreshing?: boolean; refresh_job_id?: number | null; genuinely_new_count?: number; failed_additions?: FailedNewVideoAddition[];
 }
+export interface FailedNewVideoAddition { job_id: number; status: string; error: string; suggestion: Pick<SuggestedVideoItem, "id" | "provider" | "provider_video_id" | "url" | "title" | "artist" | "thumbnail_url" | "category">; }
 
 export interface CartItem {
   id: number;

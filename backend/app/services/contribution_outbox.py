@@ -46,6 +46,14 @@ def enqueue_contribution(
         status="pending",
     )
     db.add(row)
+    from app.services.provenance_events import record_field_event
+    for field, state in envelope.get("fields", {}).items():
+        record_field_event(
+            db, video, field, event_type="submission_queued", actor_kind="instance",
+            actor_id=instance_user_id, prior_value=state.get("value"),
+            resulting_value=state.get("value"), provider="tmvdb",
+            transformation="eligibility_snapshot", operation_id=row.operation_id,
+        )
     db.flush()
     return row, eligibility, True
 
@@ -102,6 +110,18 @@ def process_next_contribution(session_factory: sessionmaker) -> str | None:
             remote_id=row.remote_id,
             response=result,
         ))
+        if video:
+            from app.services.provenance_events import record_field_event
+            submitted_at = datetime.now(timezone.utc)
+            for field, state in envelope.get("fields", {}).items():
+                record_field_event(
+                    db, video, field, event_type="submitted", actor_kind="instance",
+                    actor_id=envelope.get("instance_user_id"),
+                    prior_value=state.get("value"), resulting_value=state.get("value"),
+                    provider="tmvdb", remote_id=row.remote_id,
+                    transformation="tmvdb_push", operation_id=row.operation_id,
+                    submitted_at=submitted_at,
+                )
         db.commit()
         return row_id
     except Exception as exc:

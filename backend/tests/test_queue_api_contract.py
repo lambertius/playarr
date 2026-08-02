@@ -128,3 +128,20 @@ def test_ytdlp_update_is_accepted_as_a_job_before_dispatch(monkeypatch):
     assert response["status"] == "queued"
     assert response["job_id"] == accepted[0]
     assert db.get(ProcessingJob, response["job_id"]).job_type == "ytdlp_update"
+
+
+def test_worker_observes_durable_cancellation_from_another_process(monkeypatch):
+    db = _session()
+    job = ProcessingJob(job_type="import_url", status=JobStatus.cancelling)
+    db.add(job)
+    db.commit()
+
+    class SessionContext:
+        def __call__(self):
+            return sessionmaker(bind=db.get_bind(), expire_on_commit=False)()
+
+    monkeypatch.setattr("app.database.RequestSessionLocal", SessionContext())
+    from app.worker import clear_cancel, is_cancelled
+
+    clear_cancel(job.id)
+    assert is_cancelled(job.id) is True

@@ -197,10 +197,7 @@ def dispatch_deferred(video_id: int, tasks: List[str], ws: ImportWorkspace,
                 try:
                     _fv = _fdb.query(_FinalXMLVideo).get(video_id)
                     if _fv and _fv.folder_path and os.path.isdir(_fv.folder_path):
-                        try:
-                            _final_write_xml(_fv, _fdb)
-                        except Exception as _xw_exc:
-                            logger.warning(f"XML sidecar write failed for video {video_id}: {_xw_exc}")
+                        _final_write_xml(_fv, _fdb)
 
                     # Auto-clear review flags when the underlying issue
                     # has been resolved by the deferred tasks that just ran.

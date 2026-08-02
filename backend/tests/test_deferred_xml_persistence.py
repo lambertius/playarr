@@ -270,25 +270,12 @@ def test_scene_analysis_copies_thumbs():
     """
     import inspect
 
-    # Check pipeline_lib/deferred.py
-    from app.pipeline_lib.deferred import _deferred_scene_analysis as lib_sa
-    lib_sa_source = inspect.getsource(lib_sa)
-    assert "shutil" in lib_sa_source or "copy2" in lib_sa_source, \
-        "pipeline_lib _deferred_scene_analysis should copy thumbs to folder"
-
-    # Check pipeline_url/deferred.py
     from app.pipeline_url.deferred import _deferred_scene_analysis as url_sa
     url_sa_source = inspect.getsource(url_sa)
     assert "shutil" in url_sa_source or "copy2" in url_sa_source, \
         "pipeline_url _deferred_scene_analysis should copy thumbs to folder"
 
-    # Check pipeline/deferred.py (should already have this - baseline)
-    from app.pipeline.deferred import _deferred_scene_analysis as pipe_sa
-    pipe_sa_source = inspect.getsource(pipe_sa)
-    assert "shutil" in pipe_sa_source or "copy2" in pipe_sa_source, \
-        "pipeline _deferred_scene_analysis should copy thumbs (baseline)"
-
-    print("PASS: All pipeline deferred scene_analysis functions copy thumbnails")
+    print("PASS: canonical deferred scene_analysis copies thumbnails")
 
 
 if __name__ == "__main__":

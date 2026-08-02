@@ -73,3 +73,38 @@ def test_schema_upgrade_resumes_partial_processing_job_upgrade(tmp_path):
         (7, "request-existing", "operation-existing"),
         (42, None, "legacy_job_42"),
     ]
+
+
+def test_schema_upgrade_repairs_existing_artist_consolidation_aggregate(tmp_path):
+    engine = _legacy_processing_jobs_engine(tmp_path)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE artist_consolidations ("
+            "id INTEGER PRIMARY KEY, stable_id VARCHAR(36) NOT NULL, "
+            "mask_name VARCHAR(500) NOT NULL, revision INTEGER NOT NULL DEFAULT 1, "
+            "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
+        ))
+        conn.execute(text(
+            "CREATE TABLE artist_consolidation_targets ("
+            "id INTEGER PRIMARY KEY, consolidation_id INTEGER NOT NULL, "
+            "raw_name VARCHAR(500) NOT NULL, provenance VARCHAR(100), "
+            "mb_artist_id VARCHAR(36))"
+        ))
+
+    _apply_schema_upgrades(engine)
+    _apply_schema_upgrades(engine)
+
+    inspector = inspect(engine)
+    aggregate_columns = {
+        column["name"] for column in inspector.get_columns("artist_consolidations")
+    }
+    target_columns = {
+        column["name"] for column in inspector.get_columns("artist_consolidation_targets")
+    }
+    indexes = {
+        index["name"] for index in inspector.get_indexes("artist_consolidations")
+    }
+
+    assert {"created_by", "deleted_at"} <= aggregate_columns
+    assert "provenance_json" in target_columns
+    assert "ix_artist_consolidations_deleted_at" in indexes

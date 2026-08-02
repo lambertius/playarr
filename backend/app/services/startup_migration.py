@@ -247,6 +247,11 @@ def run_startup_migration(
         "database_backup_path": None,
         "database_backup_sha256": None,
         "original_database_sha256": _sha256(database_path) if existed and database_path else None,
+        "sidecar_transition_policy": {
+            "read_versions": [1, 2], "write_version": 2,
+            "v1_compatibility_fields": True,
+            "v1_write_exit": "Playarr 3.0 after at least one complete 2.x release; v1 reads remain through 3.x",
+        },
     }
     migration_required = not existed or target_version is None or (
         preflight.get("application_version_before") != target_version
@@ -255,6 +260,7 @@ def run_startup_migration(
     report["migration_required"] = migration_required
     if not migration_required:
         report.update(status="not_required", completed_at=_utc_now())
+        _write_report(report_path, report)
         return report
 
     backup_path: Path | None = None

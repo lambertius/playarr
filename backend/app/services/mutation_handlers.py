@@ -99,6 +99,15 @@ def add_new_video(db: Session, command: MutationCommand) -> dict[str, Any]:
         ),
         action_label="New Videos quick add",
         operation_id=command.id,
+        input_params={
+            "suggested_video_id": suggestion.id,
+            "provider": suggestion.provider,
+            "provider_video_id": suggestion.provider_video_id,
+            "category": suggestion.category,
+            "normalize": True,
+            "scrape": True,
+            "scrape_musicbrainz": True,
+        },
     )
     db.add(job)
     db.flush()
@@ -137,10 +146,12 @@ def dispatch_new_video_import(result: dict[str, Any]) -> None:
 
 def apply_import_plan(db: Session, command: MutationCommand) -> dict[str, Any]:
     """Apply the canonical Stage C plan inside the mutation actor transaction."""
-    from app.pipeline_lib.db_apply import TocTouDuplicateError, _execute_plan
+    from app.pipeline.db_apply import TocTouDuplicateError, _execute_plan
 
     try:
-        video_id = _execute_plan(command.payload_json["plan"], db)
+        plan = dict(command.payload_json["plan"])
+        plan["operation_id"] = command.id
+        video_id = _execute_plan(plan, db)
     except TocTouDuplicateError as exc:
         return {
             "duplicate": True,

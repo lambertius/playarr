@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
 from app.database import Base
-from app.models import AppSetting, ContributionLog, ContributionOutbox, ReviewCase, VideoItem
+from app.models import AppSetting, ContributionLog, ContributionOutbox, FieldProvenanceEvent, ReviewCase, VideoItem
 from app.provenance import build_eligible_contribution
 from app.routers.tmvdb import _pull_candidates
 from app.services.contribution_outbox import enqueue_contribution, process_next_contribution
@@ -76,6 +76,7 @@ def test_enqueue_is_idempotent_and_does_not_contact_provider(monkeypatch):
     assert first.id == second.id
     assert contacted is False
     assert db.query(ContributionOutbox).count() == 1
+    assert {event.event_type for event in db.query(FieldProvenanceEvent).all()} == {"submission_queued"}
 
 
 def test_background_delivery_transitions_to_submitted(monkeypatch):
@@ -103,6 +104,9 @@ def test_background_delivery_transitions_to_submitted(monkeypatch):
     assert delivered.remote_id == "remote-42"
     assert delivered.attempts == 1
     assert check.query(ContributionLog).filter_by(payload_hash=delivered.payload_hash).count() == 1
+    assert check.query(FieldProvenanceEvent).filter_by(
+        operation_id=delivered.operation_id, event_type="submitted",
+    ).count() == len(delivered.envelope_json["fields"])
 
 
 def test_pull_materializes_conflicts_without_overwriting_local_values():
@@ -118,6 +122,7 @@ def test_pull_materializes_conflicts_without_overwriting_local_values():
 
     assert video.title == "Human Title"
     assert result["review_case_id"]
+    assert db.query(FieldProvenanceEvent).filter_by(event_type="retrieved_candidate").count() == 2
     assert all(candidate["conflict"] for candidate in result["candidates"])
     case = db.query(ReviewCase).filter_by(category="tmvdb_conflict").one()
     assert case.status == "open"

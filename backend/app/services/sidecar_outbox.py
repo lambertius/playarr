@@ -104,6 +104,8 @@ def process_next_sidecar(session_factory: sessionmaker) -> bool:
             raise ValueError("written sidecar could not be parsed")
         entry.target_path = path
         entry.content_hash = parsed.get("content_hash")
+        from app.services.consolidations import write_library_consolidation_manifest
+        write_library_consolidation_manifest(db)
         entry.status = "complete"
         entry.completed_at = datetime.now(timezone.utc)
         entry.error_json = None

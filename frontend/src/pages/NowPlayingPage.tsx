@@ -12,6 +12,7 @@ import { addToVideoEditorQueue } from "@/pages/VideoEditorPage";
 import { useToast } from "@/components/Toast";
 import { FullscreenControls } from "@/components/FullscreenControls";
 import type { VideoItemDetail } from "@/types";
+import { PlaybackSessionGuard } from "@/lib/playbackSession";
 
 // ── Animated artwork grid background ──────────────────────
 type TransitionKind = "fade" | "flip" | "spin";
@@ -500,22 +501,19 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       if (tvMode) setNeedsGesture(true);
     });
   }, [tvMode]);
-
   // Every source assignment gets a session token. Event handlers close over
   // that token, so a delayed ended/error from the previous stream cannot
   // restart the current occurrence or advance twice.
-  const mediaSessionRef = useRef(0);
+  const mediaSessionRef = useRef(new PlaybackSessionGuard());
   useEffect(() => {
     const el = videoRef.current;
     if (!el || !track) return;
-    const session = ++mediaSessionRef.current;
-    let transitioned = false;
+    const session = mediaSessionRef.current.begin();
     setPlaybackState("loading");
     setPlaybackError(null);
 
     const onEnded = () => {
-      if (mediaSessionRef.current !== session || transitioned) return;
-      transitioned = true;
+      if (!mediaSessionRef.current.claimTransition(session)) return;
       const state = usePlaybackStore.getState();
       if (state.individualTrack) {
         state.stopIndividual();
@@ -524,7 +522,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       // Desktop audio is the master clock and advances the queue itself.
       if (!tvMode) return;
       if (state.repeat === "one") {
-        transitioned = false;
+        mediaSessionRef.current.releaseTransition(session);
         el.currentTime = 0;
         el.play().catch(() => {});
         return;
@@ -532,7 +530,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       state.next();
     };
     const onError = () => {
-      if (mediaSessionRef.current !== session) return;
+      if (!mediaSessionRef.current.isCurrent(session)) return;
       setPlaybackState("error");
       setPlaybackError("This stream could not be decoded. Retry keeps the current queue occurrence.");
     };
@@ -862,7 +860,9 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
             {(playbackState === "loading" || playbackState === "buffering") && track && (
               <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/35 text-white">
                 <div className="rounded-lg bg-black/70 px-5 py-3 text-sm">
-                  {playbackState === "buffering" ? "Buffering stream…" : "Starting stream…"}
+                  {playbackState === "buffering"
+                    ? "Buffering stream…"
+                    : transcode ? "Starting compatibility transcode…" : "Starting stream…"}
                 </div>
               </div>
             )}
@@ -1260,7 +1260,7 @@ function QueueList({
     <div ref={listRef} className="flex-1 overflow-y-auto min-h-0 relative">
       {queue.map((t, idx) => (
         <QueueRow
-          key={`${t.videoId}-${idx}`}
+          key={t.queueEntryId ?? `${t.videoId}-${idx}`}
           ref={idx === currentIndex ? currentRowRef : undefined}
           track={t}
           index={idx}

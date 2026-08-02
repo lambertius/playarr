@@ -706,6 +706,8 @@ def _require_case_revision(case: ReviewCase, expected: int) -> None:
 def list_review_cases(
     status: Optional[str] = Query("open"),
     category: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(_get_db),
 ):
     """Return durable cases; transition-era flags are materialized first."""
@@ -718,8 +720,18 @@ def list_review_cases(
         query = query.filter(ReviewCase.status == status)
     if category:
         query = query.filter(ReviewCase.category == category)
-    cases = query.order_by(ReviewCase.updated_at.desc(), ReviewCase.id.desc()).all()
-    return {"items": [_review_case_payload(case) for case in cases], "total": len(cases)}
+    total = query.count()
+    cases = (
+        query.order_by(ReviewCase.updated_at.desc(), ReviewCase.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return {
+        "items": [_review_case_payload(case) for case in cases],
+        "total": total, "page": page, "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+    }
 
 
 @review_router.post("/cases/{stable_id}/dismiss")
@@ -747,40 +759,14 @@ def stage_review_case_plan(
     """Validate a local plan and return its exact consequences before commit."""
     case = _case_or_404(db, stable_id)
     _require_case_revision(case, request.expected_revision)
-    item_ids = {item.video_stable_id for item in case.items}
-    allowed = {"keep", "dismiss", "no_change", "reclassify"}
-    consequences = {"metadata": [], "files": [], "relationships": []}
-    for index, action in enumerate(request.actions):
-        action_type = action.get("type")
-        target = action.get("video_stable_id")
-        if action_type not in allowed:
-            raise HTTPException(status_code=422, detail={
-                "code": "unsupported_review_action",
-                "message": f"Action {action_type!r} is not safe to stage yet",
-                "field_errors": {f"actions.{index}.type": "unsupported"},
-                "retryable": False,
-            })
-        if target and target not in item_ids:
-            raise HTTPException(status_code=422, detail={
-                "code": "unknown_case_item",
-                "message": "Action targets a video outside this case",
-                "field_errors": {f"actions.{index}.video_stable_id": "unknown"},
-                "retryable": False,
-            })
-        if action_type == "reclassify":
-            version_type = action.get("version_type")
-            if version_type not in {"normal", "cover", "live", "alternate", "uncensored", "18+"}:
-                raise HTTPException(status_code=422, detail="Invalid version_type")
-            consequences["metadata"].append({
-                "video_stable_id": target,
-                "field": "version_type",
-                "new_value": version_type,
-            })
-        elif action_type in {"keep", "dismiss"}:
-            consequences["relationships"].append({
-                "case": stable_id,
-                "result": "resolved" if action_type == "keep" else "dismissed",
-            })
+    from app.services.review_plan_actions import ReviewPlanError, describe_plan
+    try:
+        consequences = describe_plan(db, case, request.actions)
+    except ReviewPlanError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_review_action", "message": str(exc),
+            "field_errors": {exc.field: str(exc)}, "retryable": False,
+        }) from exc
     plan = ReviewActionPlan(
         case_id=case.id,
         expected_revision=request.expected_revision,
@@ -823,12 +809,10 @@ def commit_review_case_plan(
         ).all()
     }
     final_action = None
+    from app.services.review_plan_actions import apply_plan
+    applied = apply_plan(db, case, plan.actions_json, plan.id)
     for action in plan.actions_json:
         action_type = action.get("type")
-        target = action.get("video_stable_id")
-        if action_type == "reclassify" and target in videos:
-            videos[target].version_type = action["version_type"]
-            videos[target].revision += 1
         if action_type in {"keep", "dismiss"}:
             final_action = action_type
     if final_action == "dismiss":
@@ -845,8 +829,10 @@ def commit_review_case_plan(
     plan.status = "committed"
     plan.committed_at = datetime.now(timezone.utc)
     db.commit()
+    from app.services.review_plan_actions import dispatch_plan_jobs
+    dispatch_plan_jobs(applied)
     db.refresh(case)
-    return {"plan_id": plan.id, "status": plan.status, "case": _review_case_payload(case)}
+    return {"plan_id": plan.id, "status": plan.status, "case": _review_case_payload(case), "applied": applied}
 
 
 @review_router.get("", response_model=ReviewListOut)
@@ -961,13 +947,10 @@ def batch_approve(
         vi.review_reason = None
         vi.review_category = None
     db.commit()
-    # Persist to XML sidecars
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        for vi in items:
-            write_playarr_xml(vi, db)
-    except Exception:
-        pass
+    from app.services.playarr_xml import write_playarr_xml
+    for vi in items:
+        write_playarr_xml(vi, db)
+    db.commit()
     return {"status": "approved", "count": len(items)}
 
 
@@ -990,13 +973,10 @@ def batch_dismiss(
         vi.review_reason = None
         vi.review_category = None
     db.commit()
-    # Persist to XML sidecars
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        for vi in items:
-            write_playarr_xml(vi, db)
-    except Exception:
-        pass
+    from app.services.playarr_xml import write_playarr_xml
+    for vi in items:
+        write_playarr_xml(vi, db)
+    db.commit()
     return {"status": "dismissed", "count": len(items)}
 
 
@@ -1519,12 +1499,9 @@ def approve_review_item(
     vi.review_category = None
     db.commit()
 
-    # Persist to XML sidecar
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        write_playarr_xml(vi, db)
-    except Exception:
-        pass
+    from app.services.playarr_xml import write_playarr_xml
+    write_playarr_xml(vi, db)
+    db.commit()
 
     return {"status": "approved", "video_id": video_id}
 
@@ -1553,12 +1530,9 @@ def dismiss_review_item(
     vi.review_category = None
     db.commit()
 
-    # Update XML sidecar to persist the dismissed_duplicate_ids
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        write_playarr_xml(vi, db)
-    except Exception:
-        pass
+    from app.services.playarr_xml import write_playarr_xml
+    write_playarr_xml(vi, db)
+    db.commit()
 
     return {"status": "dismissed", "video_id": video_id}
 
@@ -1585,12 +1559,9 @@ def set_review_version_type(
         vi.review_category = None
     db.commit()
 
-    # Persist to XML sidecar so rescans don't revert the approval
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        write_playarr_xml(vi, db)
-    except Exception:
-        pass
+    from app.services.playarr_xml import write_playarr_xml
+    write_playarr_xml(vi, db)
+    db.commit()
 
     return {"status": "updated", "video_id": video_id, "version_type": version_type}
 

@@ -164,7 +164,7 @@ const legacyMigrations: LegacyMigration[] = [
   },
 ];
 
-async function migrateLegacyPreferences(
+export async function migrateLegacyPreferences(
   serverValues: Record<string, unknown>,
   serverRevisions: Record<string, number>,
 ): Promise<void> {

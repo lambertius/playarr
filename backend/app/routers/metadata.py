@@ -14,6 +14,7 @@ Endpoints:
     GET  /api/metadata/revisions/{entity_type}/{entity_id} — list revisions
 """
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File as FastAPIFile
@@ -455,6 +456,7 @@ def undo_refresh(entity_type: str, entity_id: int, db: Session = Depends(get_db)
 class ArtistConsolidationTargetInput(BaseModel):
     raw_name: str
     provenance: Optional[str] = None
+    provenance_json: Optional[dict] = None
     mb_artist_id: Optional[str] = None
 
 
@@ -485,6 +487,7 @@ def _replace_artist_consolidation_members(
         item.targets.append(ArtistConsolidationTarget(
             raw_name=raw_name,
             provenance=target.provenance,
+            provenance_json=target.provenance_json,
             mb_artist_id=target.mb_artist_id.strip() if target.mb_artist_id else None,
         ))
         if target.mb_artist_id and target.mb_artist_id.strip():
@@ -517,7 +520,9 @@ def create_artist_consolidation_v2(body: ArtistConsolidationCreate, db: Session 
 @router.put("/artist-consolidations-v2/{stable_id}")
 def update_artist_consolidation_v2(stable_id: str, body: ArtistConsolidationUpdate, db: Session = Depends(get_db)):
     from app.services.consolidations import serialize_artist_consolidation, write_library_consolidation_manifest
-    item = db.query(ArtistConsolidation).filter(ArtistConsolidation.stable_id == stable_id).one_or_none()
+    item = db.query(ArtistConsolidation).filter(
+        ArtistConsolidation.stable_id == stable_id, ArtistConsolidation.deleted_at.is_(None),
+    ).one_or_none()
     if not item:
         raise HTTPException(404, "Artist consolidation not found")
     if item.revision != body.expected_revision:
@@ -536,12 +541,15 @@ def update_artist_consolidation_v2(stable_id: str, body: ArtistConsolidationUpda
 @router.delete("/artist-consolidations-v2/{stable_id}")
 def delete_artist_consolidation_v2(stable_id: str, expected_revision: int, db: Session = Depends(get_db)):
     from app.services.consolidations import write_library_consolidation_manifest
-    item = db.query(ArtistConsolidation).filter(ArtistConsolidation.stable_id == stable_id).one_or_none()
+    item = db.query(ArtistConsolidation).filter(
+        ArtistConsolidation.stable_id == stable_id, ArtistConsolidation.deleted_at.is_(None),
+    ).one_or_none()
     if not item:
         raise HTTPException(404, "Artist consolidation not found")
     if item.revision != expected_revision:
         raise HTTPException(409, {"code": "stale_revision", "current_revision": item.revision})
-    db.delete(item)
+    item.deleted_at = datetime.now(timezone.utc)
+    item.revision += 1
     db.commit()
     write_library_consolidation_manifest(db)
     return {"deleted": True, "stable_id": stable_id}
@@ -662,14 +670,10 @@ def consolidate_artist(body: ArtistConsolidateRequest, db: Session = Depends(get
     if artist_ent:
         artist_ent.canonical_name = body.canonical_name
 
-    db.commit()
-
     # Persist to XML sidecars so the choice survives library clear + rescan
     for video in updated_videos:
-        try:
-            write_playarr_xml(video, db)
-        except Exception as e:
-            logger.warning(f"XML sidecar write failed for video {video.id}: {e}")
+        write_playarr_xml(video, db)
+    db.commit()
 
     return {"updated": updated, "mb_artist_id": body.mb_artist_id, "canonical_name": body.canonical_name}
 

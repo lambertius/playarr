@@ -54,7 +54,7 @@ celery_app = Celery(
     "playarr",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks", "app.mutation_tasks"],
+    include=["app.tasks", "app.mutation_tasks", "app.new_videos.tasks"],
 )
 
 celery_app.conf.update(
@@ -106,9 +106,26 @@ def request_cancel(job_id: int) -> None:
 
 
 def is_cancelled(job_id: int) -> bool:
-    """Check whether a job has been marked for cancellation."""
+    """Check the local fast path and the durable job state.
+
+    The database check is required in Redis deployments because the API
+    process accepting a cancellation is not necessarily the worker process
+    executing the job.
+    """
     with _cancel_lock:
-        return job_id in _cancelled_jobs
+        if job_id in _cancelled_jobs:
+            return True
+    from app.database import RequestSessionLocal
+    from app.models import JobStatus, ProcessingJob
+
+    db = RequestSessionLocal()
+    try:
+        status = db.query(ProcessingJob.status).filter(
+            ProcessingJob.id == job_id,
+        ).scalar()
+        return status in (JobStatus.cancelling, JobStatus.cancelled)
+    finally:
+        db.close()
 
 
 def clear_cancel(job_id: int) -> None:

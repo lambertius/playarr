@@ -102,6 +102,15 @@ export function FullscreenControls({
   const RepeatIcon = repeatIcon[repeat];
 
   const FullscreenIcon = fullscreenMode === "video" ? Minimize : fullscreenMode === "theater" ? Maximize : Monitor;
+  const navigateTvTransport = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+    const current = Math.max(0, buttons.indexOf(document.activeElement as HTMLButtonElement));
+    const delta = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+    buttons[(current + delta + buttons.length) % buttons.length]?.focus();
+    event.preventDefault();
+    onActivity?.();
+  };
 
   return (
     <div
@@ -157,7 +166,7 @@ export function FullscreenControls({
 
         {/* TV/cast transport is deliberately three large remote targets. */}
         {profile !== "browser" ? (
-          <div className="flex items-center justify-center gap-8" role="group" aria-label="TV playback transport">
+          <div className="flex items-center justify-center gap-8" role="group" aria-label="TV playback transport" onKeyDown={navigateTvTransport}>
             <button onClick={prev} className="h-[72px] w-[72px] rounded-full bg-white/10 text-white flex items-center justify-center focus:outline-none focus:ring-4 focus:ring-accent" aria-label="Previous track">
               <SkipBack size={32} />
             </button>

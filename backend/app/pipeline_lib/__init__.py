@@ -1,7 +1,14 @@
-# pipeline_lib pipeline package — ★ ACTIVE
-# Handles library file imports (importing existing videos from disk).
-from app.pipeline_url.workspace import ImportWorkspace
-from app.pipeline_lib.stages import run_library_import_pipeline
+"""Compatibility namespace for integrations using the previous disk path."""
+
+
+def __getattr__(name):
+    if name == "ImportWorkspace":
+        from app.pipeline.workspace import ImportWorkspace
+        return ImportWorkspace
+    if name == "run_library_import_pipeline":
+        from app.pipeline.stages import run_library_import_pipeline
+        return run_library_import_pipeline
+    raise AttributeError(name)
 
 __all__ = [
     "ImportWorkspace",

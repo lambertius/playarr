@@ -20,12 +20,12 @@ import type { GenreSearchResult, ArtworkEntityRow, ArtistConsolidationAggregate 
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
 import { Skeleton } from "@/components/Feedback";
+import { GenreConsolidationEditor } from "@/components/GenreConsolidationEditor";
 import { useQueryClient } from "@tanstack/react-query";
 
 // ─── Tab definitions ─────────────────────────────────────
 
 type TabId = "overview" | "artists" | "genres" | "genre-consolidation" | "artwork";
-
 const TABS: { id: TabId; label: string; icon: typeof Database }[] = [
   { id: "overview", label: "MBID Coverage", icon: BarChart3 },
   { id: "artists", label: "Artist Consolidation", icon: Users },
@@ -38,7 +38,6 @@ const TABS: { id: TabId; label: string; icon: typeof Database }[] = [
 
 export function MetadataManagerPage() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
-
   const navItemClass = (id: TabId) =>
     `flex items-center gap-2.5 w-full px-3 py-1.5 rounded-md text-sm text-left transition-colors ${
       activeTab === id
@@ -79,7 +78,7 @@ export function MetadataManagerPage() {
         <div className="flex-1 min-w-0 max-w-4xl space-y-6">
           {activeTab === "overview" && <MbidOverview onGoToArtists={() => setActiveTab("artists")} />}
           {activeTab === "artists" && <ArtistConsolidation />}
-          {activeTab === "genre-consolidation" && <GenreConsolidation />}
+          {activeTab === "genre-consolidation" && <GenreConsolidationEditor />}
           {activeTab === "genres" && <GenreManager />}
           {activeTab === "artwork" && <ArtworkManager />}
         </div>
@@ -733,7 +732,7 @@ function GenreAutofillInput({
 
 // ─── Genre Consolidation ─────────────────────────────────
 
-function GenreConsolidation() {
+function GenreConsolidationLegacy() {
   const { data: consolidations, isLoading: loadingConsolidations } = useGenreConsolidations();
   const { data: suggestions, isLoading: loadingSuggestions, refetch: refetchSuggestions } = useGenreSuggestions();
   const consolidateMutation = useConsolidateGenres();
@@ -1121,6 +1120,7 @@ function GenreConsolidation() {
 
 // ─── Genre Manager ───────────────────────────────────────
 
+void GenreConsolidationLegacy;
 function GenreManager() {
   const { data: genres, isLoading } = useGenreBlacklist();
   const updateMutation = useUpdateGenreBlacklist();

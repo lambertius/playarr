@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from app.services.sidecar_store import SidecarValidationError, validate_playarr_sidecar
+from app.services.video_editor import detect_letterbox, probe_file, resolve_encode_plan, validate_encoded_output
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "media"
@@ -65,3 +66,35 @@ def test_duplicate_and_sidecar_edge_cases_are_reproducible():
     validate_playarr_sidecar(FIXTURES / "cover_version.playarr.xml")
     with pytest.raises(SidecarValidationError):
         validate_playarr_sidecar(FIXTURES / "malformed.playarr.xml")
+
+
+@pytest.mark.parametrize(
+    ("name", "crop"),
+    [("letterboxed.mp4", (320, 180, 0, 30)), ("pillarboxed.mp4", (240, 180, 40, 0))],
+)
+def test_golden_media_crop_rectangles_and_confidence(name, crop):
+    result = detect_letterbox(str(FIXTURES / name))
+    assert (result["crop_w"], result["crop_h"], result["crop_x"], result["crop_y"]) == crop
+    assert result["confidence"] == pytest.approx(0.55)
+    assert result["review_suggested"] is True
+    assert result["auto_apply"] is False
+    assert result["instability_reason"] == "insufficient_samples"
+
+
+def test_fixture_driven_hdr_plan_and_staged_decode_validation(tmp_path):
+    hdr_path = str(FIXTURES / "hdr10_bt2020.mkv")
+    hdr_plan = resolve_encode_plan(hdr_path, profile="source_fidelity", probe=probe_file(hdr_path))
+    assert hdr_plan["source"]["hdr"] is True
+    assert hdr_plan["output"]["pixel_format"] == "yuv420p10le"
+    assert hdr_plan["output"]["maxrate"] is None
+
+    sdr_path = str(FIXTURES / "sdr_16x9.mp4")
+    sdr_plan = resolve_encode_plan(sdr_path, profile="source_fidelity", probe=probe_file(sdr_path))
+    checks = validate_encoded_output(sdr_path, sdr_path, sdr_plan)
+    assert checks["full_decode"] == "passed"
+    assert checks["ssim"] == pytest.approx(1.0)
+
+    corrupt = tmp_path / "corrupt.mp4"
+    corrupt.write_bytes((FIXTURES / "sdr_16x9.mp4").read_bytes()[:128])
+    with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
+        validate_encoded_output(sdr_path, str(corrupt), sdr_plan)

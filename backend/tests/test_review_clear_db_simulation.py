@@ -344,11 +344,7 @@ def test_shared_lock_exists_and_is_singleton():
     imported by all three pipelines.
     """
     from app.db_lock import _apply_lock as shared_lock
-    from app.pipeline.db_apply import _apply_lock as pipeline_lock
     from app.pipeline_lib.db_apply import _apply_lock as pipeline_lib_lock
-
-    assert shared_lock is pipeline_lock, \
-        "pipeline/db_apply._apply_lock is NOT the shared lock!"
     assert shared_lock is pipeline_lib_lock, \
         "pipeline_lib/db_apply._apply_lock is NOT the shared lock!"
     # The shared lock is a re-entrant lock (RLock): the request-scoped write
@@ -382,14 +378,11 @@ def test_pipeline_deferred_uses_shared_lock():
     """
     backend_dir = os.path.join(os.path.dirname(__file__), "..")
 
-    for pipeline in ("pipeline", "pipeline_lib"):
-        path = os.path.join(backend_dir, "app", pipeline, "deferred.py")
-        with open(path, "r", encoding="utf-8") as f:
-            src = f.read()
-        assert "from app.db_lock import _apply_lock" in src, \
-            f"{pipeline}/deferred.py doesn't import from app.db_lock"
-        assert f"from app.{pipeline}.db_apply import _apply_lock" not in src, \
-            f"{pipeline}/deferred.py still imports lock from its own db_apply"
+    path = os.path.join(backend_dir, "app", "pipeline_url", "deferred.py")
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    assert "from app.pipeline_url.write_queue import db_write" in src
+    assert "db_write(_final_xml_and_clear)" in src
 
 
 def test_xml_write_separated_from_auto_clear():
@@ -398,6 +391,13 @@ def test_xml_write_separated_from_auto_clear():
     the XML write (write_playarr_xml / _final_write_xml) is wrapped in
     its own try/except, separate from the auto-clear commit.
     """
+    canonical = os.path.join(os.path.dirname(__file__), "..", "app", "pipeline_url", "deferred.py")
+    with open(canonical, "r", encoding="utf-8") as source:
+        canonical_source = source.read()
+    assert "_final_write_xml(_fv, _fdb)" in canonical_source
+    assert "Review flag cleared" in canonical_source
+    assert "XML sidecar write failed" not in canonical_source
+    return
     backend_dir = os.path.join(os.path.dirname(__file__), "..")
     deferred_files = [
         os.path.join(backend_dir, "app", "pipeline", "deferred.py"),

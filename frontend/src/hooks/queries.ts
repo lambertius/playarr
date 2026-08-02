@@ -1257,10 +1257,10 @@ export function useSetExcludeFromScan() {
 }
 
 // ─── Archive Queries ──────────────────────────────────────
-export function useArchiveItems() {
+export function useArchiveItems(params: { reason?: string; search?: string; page: number; page_size: number }) {
   return useQuery({
-    queryKey: ["archiveItems"],
-    queryFn: () => settingsApi.archiveItems(),
+    queryKey: ["archiveItems", params],
+    queryFn: () => settingsApi.archiveItems(params),
   });
 }
 

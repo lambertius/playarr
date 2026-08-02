@@ -411,18 +411,18 @@ function ScrapeMetadataPopup({
         </div>
 
         {/* ── Retrieve from TMVDB ── */}
-        <div className="rounded-lg border px-3 py-2.5 transition-colors border-surface-border bg-surface-light/30 opacity-40 cursor-not-allowed">
-          <label className="flex items-center justify-between gap-3 text-sm text-text-secondary cursor-not-allowed select-none">
+        <div className={`rounded-lg border px-3 py-2.5 transition-colors ${scrapeTmvdb ? "border-accent/40 bg-accent/5" : "border-surface-border bg-surface-light/30"}`}>
+          <label className="flex items-center justify-between gap-3 text-sm text-text-secondary cursor-pointer select-none">
             <div className="flex items-center gap-2 flex-1">
               <Globe size={14} className="text-text-muted" />
               <div>
                 <span className="font-medium text-text-primary">Retrieve from TMVDB</span>
                 <p className="text-[11px] text-text-muted mt-0.5">
-                  Look up metadata from The Music Video DB community database. (Coming soon)
+                  Retrieve field-level candidates. Conflicts are shown for review before applying.
                 </p>
               </div>
             </div>
-            <Toggle checked={false} onChange={() => {}} disabled />
+            <Toggle checked={scrapeTmvdb} onChange={(v) => { setScrapeTmvdb(v); if (v) { setAiAutoAnalyse(false); setAiOnly(false); } }} />
           </label>
         </div>
       </div>

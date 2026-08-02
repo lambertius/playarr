@@ -1,5 +1,6 @@
 import { useNewVideosSettings, useNewVideosUpdateSettings } from "@/hooks/queries";
 import { Skeleton } from "@/components/Feedback";
+import { SettingRowLayout } from "@/components/SettingRowLayout";
 
 /* ── Setting definition for rendering ── */
 interface NVSettingDef {
@@ -128,12 +129,8 @@ function SettingRow({
   if (def.type === "bool") {
     const checked = value === true || value === "true";
     return (
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">{def.label}</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{def.description}</p>
-        </div>
-        <div className="shrink-0 sm:pt-0.5">
+      <SettingRowLayout label={def.label} description={def.description}>
+        <div>
           <button
             type="button"
             role="switch"
@@ -150,18 +147,14 @@ function SettingRow({
             />
           </button>
         </div>
-      </div>
+      </SettingRowLayout>
     );
   }
 
   if (def.type === "int" || def.type === "float") {
     const numVal = Number(value) || 0;
     return (
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">{def.label}</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{def.description}</p>
-        </div>
+      <SettingRowLayout label={def.label} description={def.description}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -179,7 +172,7 @@ function SettingRow({
             {def.type === "float" ? numVal.toFixed(2) : numVal}
           </span>
         </div>
-      </div>
+      </SettingRowLayout>
     );
   }
 
@@ -188,12 +181,8 @@ function SettingRow({
 
   if (def.type === "select" && def.options) {
     return (
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">{def.label}</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{def.description}</p>
-        </div>
-        <div className="shrink-0 sm:pt-0.5">
+      <SettingRowLayout label={def.label} description={def.description}>
+        <div>
           <select
             value={strVal}
             onChange={(e) => onChange(def.key, e.target.value)}
@@ -204,17 +193,13 @@ function SettingRow({
             ))}
           </select>
         </div>
-      </div>
+      </SettingRowLayout>
     );
   }
 
   return (
-    <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-      <div className="flex-1 min-w-0">
-        <label className="text-sm font-medium text-text-primary">{def.label}</label>
-        <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{def.description}</p>
-      </div>
-      <div className="shrink-0 sm:pt-0.5">
+    <SettingRowLayout label={def.label} description={def.description}>
+      <div>
         <input
           type="text"
           value={strVal}
@@ -222,6 +207,6 @@ function SettingRow({
           className="w-40 px-2 py-1 rounded bg-bg-secondary border border-border text-sm text-text-primary"
         />
       </div>
-    </div>
+    </SettingRowLayout>
   );
 }

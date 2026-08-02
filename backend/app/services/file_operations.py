@@ -239,6 +239,66 @@ def create_rename_operation(
     return operation
 
 
+def create_file_set_operation(
+    db: Session,
+    video: VideoItem,
+    operation_type: str,
+    transitions: list[dict],
+    *,
+    database_updates: dict | None = None,
+    metadata: dict | None = None,
+    command_id: str | None = None,
+) -> FileOperation:
+    """Persist an immutable archive/replace/restore/delete file-set plan."""
+    if operation_type not in {"archive", "replace", "restore", "delete"}:
+        raise ValueError(f"unsupported managed file operation {operation_type}")
+    operation_id = str(uuid4())
+    source_keys = {_path_key(item["source"]) for item in transitions}
+    steps, collisions = [], []
+    for index, transition in enumerate(transitions):
+        source = os.path.abspath(transition["source"])
+        destination = os.path.abspath(transition["destination"])
+        if not os.path.isfile(source):
+            raise FileNotFoundError(source)
+        same_path = _path_key(source) == _path_key(destination)
+        # A destination which is another step's source will be vacated first.
+        if os.path.exists(destination) and not same_path and _path_key(destination) not in source_keys:
+            collisions.append({"source": source, "destination": destination, "reason": "destination_exists"})
+        steps.append({
+            "index": index,
+            "role": transition.get("role") or _role_for(source, video.file_path),
+            "source": source,
+            "destination": destination,
+            "temporary": os.path.join(
+                os.path.dirname(destination),
+                f".{os.path.basename(destination)}.playarr-{operation_id}.tmp",
+            ),
+            "checksum": _sha256(source),
+            "size_bytes": os.path.getsize(source),
+            "state": "pending",
+            "case_only": same_path and source != destination,
+            "cross_volume": not _same_volume(source, destination),
+        })
+    plan = {
+        "version": 2, "operation_id": operation_id,
+        "operation_type": operation_type, "playarr_video_id": video.playarr_video_id,
+        "video_id": video.id, "expected_revision": int(video.revision or 1),
+        "steps": steps, "collisions": collisions,
+        "database_updates": database_updates or {}, **(metadata or {}),
+    }
+    operation = FileOperation(
+        id=operation_id, command_id=command_id, entity_stable_id=video.stable_id,
+        operation_type=operation_type, status="planned",
+        expected_revision=int(video.revision or 1), plan_json=plan,
+        rollback_json={"steps": [
+            {"source": step["source"], "destination": step["destination"]}
+            for step in steps
+        ]},
+    )
+    db.add(operation); db.commit(); db.refresh(operation)
+    return operation
+
+
 def _save_step(db: Session, operation: FileOperation, index: int, state: str) -> None:
     plan = copy.deepcopy(operation.plan_json)
     plan["steps"][index]["state"] = state
@@ -322,23 +382,29 @@ def _apply_database_paths(db: Session, operation: FileOperation) -> VideoItem:
     current_revision = int(video.revision or 1)
     if operation.expected_revision != current_revision:
         raise StaleRevisionError(operation.expected_revision or 0, current_revision)
-    updates = plan["path_updates"]
-    if video.file_path and _path_key(video.file_path) in updates:
-        video.file_path = updates[_path_key(video.file_path)]
-    video.folder_path = plan["new_folder"]
-    for asset in db.query(MediaAsset).filter(MediaAsset.video_id == video.id).all():
-        key = _path_key(asset.file_path)
-        if key in updates:
-            asset.file_path = updates[key]
-    try:
-        from app.ai.models import AIThumbnail
-        for thumbnail in db.query(AIThumbnail).filter(AIThumbnail.video_id == video.id).all():
-            key = _path_key(thumbnail.file_path)
+    if operation.operation_type == "rename":
+        updates = plan["path_updates"]
+        if video.file_path and _path_key(video.file_path) in updates:
+            video.file_path = updates[_path_key(video.file_path)]
+        video.folder_path = plan["new_folder"]
+        for asset in db.query(MediaAsset).filter(MediaAsset.video_id == video.id).all():
+            key = _path_key(asset.file_path)
             if key in updates:
-                thumbnail.file_path = updates[key]
-    except Exception:
-        # AI tables are optional in minimal/rebuild databases.
-        pass
+                asset.file_path = updates[key]
+        try:
+            from app.ai.models import AIThumbnail
+            for thumbnail in db.query(AIThumbnail).filter(AIThumbnail.video_id == video.id).all():
+                key = _path_key(thumbnail.file_path)
+                if key in updates:
+                    thumbnail.file_path = updates[key]
+        except (ImportError, LookupError):
+            pass
+    else:
+        allowed = {"file_path", "folder_path", "file_size_bytes", "file_checksum", "editor_edit_type"}
+        for field, value in (plan.get("database_updates") or {}).items():
+            if field not in allowed:
+                raise FileOperationFailed(f"unsupported database update {field}")
+            setattr(video, field, value)
     video.revision = current_revision + 1
     from app.services.sidecar_outbox import schedule_sidecar_write
     schedule_sidecar_write(db, video, operation_id=operation.command_id)
@@ -379,10 +445,12 @@ def execute_file_operation(
         operation.error_json = None
         db.commit()
         db.refresh(operation)
-        try:
-            os.removedirs(operation.plan_json["old_folder"])
-        except OSError:
-            pass
+        old_folder = operation.plan_json.get("old_folder")
+        if old_folder:
+            try:
+                os.removedirs(old_folder)
+            except OSError:
+                pass
         return operation
     except FileWaitingForRelease as exc:
         db.rollback()

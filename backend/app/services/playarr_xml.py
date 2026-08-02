@@ -12,6 +12,7 @@ The Kodi .nfo is left untouched — this is a separate, Playarr-specific file.
 import logging
 import os
 import hashlib
+import json
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -489,6 +490,35 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
             p = SubElement(prov_el, "field")
             p.set("name", fk)
             p.text = str(fv)
+
+    # Append-only field history makes contribution decisions explainable after
+    # a database-free rebuild. Values are represented only by hashes.
+    from app.models import FieldProvenanceEvent
+    events = db.query(FieldProvenanceEvent).filter(
+        FieldProvenanceEvent.video_stable_id == video.stable_id,
+    ).order_by(FieldProvenanceEvent.created_at).all()
+    if events:
+        history = SubElement(root, "provenance_events")
+        for event in events:
+            node = SubElement(history, "event")
+            node.set("id", event.id)
+            node.set("field", event.field_name)
+            node.set("type", event.event_type)
+            node.set("actorKind", event.actor_kind)
+            for attr, value in (
+                ("actorId", event.actor_id), ("modelId", event.model_id),
+                ("provider", event.provider), ("sourceUrl", event.source_url),
+                ("remoteId", event.remote_id), ("transformation", event.transformation),
+                ("priorHash", event.prior_value_hash), ("resultHash", event.resulting_value_hash),
+                ("operationId", event.operation_id),
+                ("retrievedAt", event.retrieved_at.isoformat() if event.retrieved_at else None),
+                ("submittedAt", event.submitted_at.isoformat() if event.submitted_at else None),
+                ("createdAt", event.created_at.isoformat() if event.created_at else None),
+            ):
+                if value is not None:
+                    node.set(attr, str(value))
+            if event.verification_json:
+                node.text = json.dumps(event.verification_json, sort_keys=True)
 
     # ── timestamps ──
     ts = SubElement(root, "timestamps")
@@ -998,6 +1028,29 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
             if fname and f.text:
                 result["field_provenance"][fname] = f.text.strip()
 
+    history = root.find("provenance_events")
+    if history is not None:
+        result["provenance_events"] = []
+        for event in history.findall("event"):
+            verification = None
+            if event.text and event.text.strip():
+                try:
+                    verification = json.loads(event.text)
+                except json.JSONDecodeError:
+                    verification = {"legacy_text": event.text.strip()}
+            result["provenance_events"].append({
+                "id": event.get("id"), "field_name": event.get("field"),
+                "event_type": event.get("type"), "actor_kind": event.get("actorKind"),
+                "actor_id": event.get("actorId"), "model_id": event.get("modelId"),
+                "provider": event.get("provider"), "source_url": event.get("sourceUrl"),
+                "remote_id": event.get("remoteId"), "transformation": event.get("transformation"),
+                "prior_value_hash": event.get("priorHash"),
+                "resulting_value_hash": event.get("resultHash"),
+                "operation_id": event.get("operationId"),
+                "retrieved_at": event.get("retrievedAt"), "submitted_at": event.get("submittedAt"),
+                "created_at": event.get("createdAt"), "verification_json": verification,
+            })
+
     # ── timestamps ──
     ts = root.find("timestamps")
     if ts is not None:
@@ -1008,7 +1061,8 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         "portable_identity", "identity", "genres", "musicbrainz", "playarr_ids",
         "artists", "artist_consolidation", "sources", "quality", "artwork",
         "scene_analysis", "file", "ratings", "archive", "processing_state",
-        "flags", "related_versions", "entity_refs", "field_provenance", "timestamps",
+        "flags", "related_versions", "entity_refs", "field_provenance",
+        "provenance_events", "timestamps",
     }
     known_attributes = {
         "version", "schemaVersion", "playarrVersion", "sidecarRevision",

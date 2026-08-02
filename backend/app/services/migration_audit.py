@@ -125,6 +125,7 @@ def post_migration_reconciliation(db: Session) -> dict:
                 "type": "duplicate_playarr_video_id", "playarr_video_id": portable_id,
                 "count": count, "repair": "review_portable_identity_collision",
             })
+    sidecar_versions = Counter()
     for video in db.query(VideoItem).all():
         if not video.playarr_video_id:
             discrepancies.append({
@@ -149,7 +150,9 @@ def post_migration_reconciliation(db: Session) -> dict:
                         "type": "invalid_sidecar", "video_id": video.id,
                         "path": str(sidecar_path), "repair": "enqueue_sidecar_rebuild",
                     })
-                elif parsed.get("playarr_video_id") != video.playarr_video_id:
+                else:
+                    sidecar_versions[str(parsed.get("xml_version") or "v1_legacy")] += 1
+                if parsed is not None and parsed.get("playarr_video_id") != video.playarr_video_id:
                     discrepancies.append({
                         "type": "sidecar_identity_mismatch", "video_id": video.id,
                         "sidecar_playarr_video_id": parsed.get("playarr_video_id"),
@@ -212,4 +215,10 @@ def post_migration_reconciliation(db: Session) -> dict:
             "portable_video_ids": len(portable_ids),
         },
         "retry_actions": sorted({item["repair"] for item in discrepancies}),
+        "migration_metrics": {
+            "sidecars_read_by_schema": dict(sidecar_versions),
+            "v1_read_supported": True,
+            "v2_write_enabled": True,
+            "v1_compatibility_fields_written": True,
+        },
     }

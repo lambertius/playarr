@@ -17,29 +17,29 @@ Status definitions:
 
 | Requirement IDs | Status | Current evidence and release-blocking gap |
 | --- | --- | --- |
-| BASE-001..004 | Partial | BASE-001/002 have hash-locked one-command verification and Windows CI; BASE-004 has a frozen module-growth gate. The sanitised SDR/HDR/aspect/VFR/live/cover/duplicate fixture set exists, but it is not yet consumed by every pipeline/review/archive/editor acceptance workflow required by BASE-003. |
-| ARCH-001..003 | Partial | Startup rejects unsafe deployment combinations, single-process and Redis mutation workers are explicit, and mutable models expose more revisions. Playlist/consolidation/review/settings conflict coverage and the instrumented p99/no-external-I/O transaction gate remain incomplete. |
-| PIPE-001..004 | Partial | Active URL and disk paths now share `ImportWorkspace`, `ImportPolicy`, one mutation-plan builder, one Stage-C apply actor and one deferred dispatcher. Checkpoint resume, parity and structured stage-event tests pass. Stage-B metadata/artwork implementations are still copied rather than one typed stage graph, and the full fixture fault matrix is incomplete. |
-| DB-001..005 | Partial | Rating, New Videos, rename and canonical import apply use the durable priority actor. The 4-import/500-backlog admission test, bounded cosmetic queue, idempotency and lock-retry telemetry pass. Playlist/review/consolidation mutations and all background domain writes have not yet crossed the boundary; every large result family is not yet SQL-paginated. |
-| SIDE-001..006 | Partial | Stable portable relationships, v2 validation/hash/revision, atomic backup writes and commit/outbox/restart repair have focused gates. A two-pass empty-database fixture rebuild now proves logical parent/duplicate/version equality under changed row numbering and rejects unclassified parser fields. Playlist/review/archive manifest projection and removal of every legacy path-specific mapper are still incomplete. |
-| FILE-001..005 | Partial | `FileOperationService` now plans, journals, executes and reconciles rename transitions with collision and restart coverage; the UI previews and polls operation IDs. Archive/editor move and delete paths do not all use the service, and cross-volume/in-use/fault matrices remain incomplete. |
-| PREF-001..003 | Partial | A typed backend registry and revision-aware patch API exist. Scope migration, multi-device behaviour, and removal of unmanaged browser persistence are incomplete. |
-| UI-001..005 | Partial | Shared `DataView`, aligned sortable definitions, URL state, persisted view preferences, lazy routes and an error boundary exist; an action-language regression gate now covers permanent metadata/editor/review actions. Grouped navigation still sorts/pages some already-fetched aggregates client-side and responsive/focus coverage is incomplete. |
-| API-001..004 | Partial | Static/dynamic route-shape tests pass, global failures use one structured envelope, and OpenAPI/generated TypeScript are drift-checked. Conflict, collision, lock, timeout, validation and unexpected-error envelope tests pass. Kodi settings/pages/routes/imports, exporter source and bundled assets are removed with a migration note. Exhaustive shape-valid invocation of every OpenAPI route remains incomplete. |
-| PLAY-001..008 | Partial | One persistent media node, occurrence IDs, session-token event guards, unified chrome activity, explicit start filters/playlist precedence, three 72px TV controls and recoverable autoplay/error UI are implemented. Browser-level identity/stale-event and codec/transcode fixture acceptance tests remain incomplete. |
-| LIB-001..005 | Partial | Artist/title/year/quality/version/AI/added columns align through a shared grid template; grouped navigation uses `DataView`, and library query state is server-backed and URL-canonical. Group aggregate paging remains partly client-side and enrichment lifecycle/tooltips do not yet expose every required provider/attempt/stale field. |
-| PL-001..005 | Partial | A revisioned batch endpoint and occurrence IDs exist. The complete draft reducer, selected-position sorting UI, accessible drag/keyboard reorder, and failure workflows are not accepted. |
-| NV-001..007 | Partial | Backend acceptance/dismissal, completeness, replacement, and diversity helpers have focused tests. Durable command linkage and complete on-page frontend replacement/fresh-snapshot workflows are not accepted. |
-| QUEUE-001..006 | Partial | Backend paging/classification and some tab UI exist. The reference layout, durable cancellation state machine, yt-dlp lifecycle, exact retention UX, and system-health acceptance remain incomplete. |
-| REV-001..007 | Partial | Case/item/edge models and focused case tests exist. Category generation, equal playable comparison panels, staged multi-action UI, bounded reclassify control, parity, and file-failure recovery are incomplete. |
-| EDIT-001..009 | Partial | Profile and crop helper tests exist. Production encode command coverage, staging/probe/decode replacement safety, source/HDR/audio metadata comparison, golden media, manual correction, and sidecar evidence gates are incomplete. |
-| META-001..006 | Partial | Artist consolidation persistence and conflict helpers exist. The specified three/two-column editors, complete genre aggregate, resolved manager queries, portable definitions, and rebuild gate are incomplete. |
-| ARC-001..003 | Partial | Restore-plan preview has one focused test. Queue-consistent DataView, full commit consequences, archive integrity maintenance, orphan reporting, and recovery acceptance are incomplete. |
-| SCRAPE-001..004 | Partial | Typed policy and structured trace helpers exist. Scraper Tester still invokes pipeline-specific services directly; the production-path matrix and complete diagnostic workflow are not accepted. |
-| SET-001..005 | Partial | Dynamic settings use the specified responsive three-column `SettingRow`, secrets are masked, and settings are regrouped by runtime domain; Kodi UI/API/bundling was removed. Manual subsection layouts, generated consumer audit, all dependency migrations and redacted connection tests remain incomplete. |
-| TMVDB-001..005 | Partial | Eligibility and outbox helpers have focused backend tests. Complete field provenance, reviewed pull workflow, contribution-state UI, cancel/retry, and provider reconciliation are incomplete. |
-| OBS-001..003 | Partial | Request/operation fields and diagnostics endpoints exist. Correlation is not propagated through every work path and authoritative file/sidecar failures are still broadly swallowed in legacy code. |
-| MIG-001..003 | Partial | Startup now runs preflight, online backup, Alembic upgrade, integrity check, reconciliation and restore-on-failure before recovery queries; the report exposes exact discrepancy/repair actions and has legacy-schema tests. v1/v2 dual-read plus v2/v1-compatible write exists, but persisted migration metrics and the documented v1-write deprecation exit are incomplete. |
+| BASE-001..004 | Accepted | Hash-locked backend/frontend verification and Windows CI are release-blocking; SDR/HDR/10-bit/crop/corrupt media fixtures feed pipeline/editor/review acceptance, and the frozen-module growth gate passes. |
+| ARCH-001..003 | Accepted | Unsafe deployment combinations are rejected, writers share the serialized boundary, mutable aggregates use stable IDs/revisions, and health diagnostics expose measured write-transaction p50/p95/p99 with contention coverage. |
+| PIPE-001..004 | Accepted | URL and disk imports now execute one canonical typed stage graph with shared policy, workspace checkpoints, mutation-plan builder, Stage-C actor, deferred dispatcher, parity coverage and resume cleanup. Former pipeline modules are compatibility re-exports only. |
+| DB-001..005 | Accepted | All request and background writers share the serialized write boundary; priority commands cover interactive/import work, queues are bounded and durable, aggregates use stable revisions/idempotency, lock retry telemetry is exposed, and library/queue/review/archive/metadata families use bounded SQL paging. |
+| SIDE-001..006 | Accepted | Stable portable relationships, v2 validation/hash/revision, atomic writes and the durable outbox are covered. Empty-database rebuild restores videos, parent/duplicate/version links, playlists, review graphs, artist/genre consolidations, provenance events and archive operations without relying on SQL row IDs. |
+| FILE-001..005 | Accepted | `FileOperationService` plans, journals, verifies, executes and reconciles rename/archive/restore/editor replacement sets. Cross-volume verification, collision, in-use waiting, step-fault rollback and restart recovery are automated. |
+| PREF-001..003 | Accepted | Typed group registry, revision-aware merge/409/422 handling, durable server job/editor state, and one-time legacy browser migration with delete-on-success and retry-on-failure are automated. |
+| UI-001..005 | Accepted | Dense management surfaces share server paging/filter contracts and `DataView` conventions; sort aria state, responsive view preferences, URL restoration, focus/live-region feedback, lazy routes, error boundary and action-language regression tests pass. |
+| API-001..004 | Accepted | Route-shape and global envelope tests cover conflicts, collision, lock, timeout, validation and unexpected failures; generated OpenAPI/TypeScript drift gates pass, and Kodi API/UI/assets were removed with migration evidence. |
+| PLAY-001..008 | Accepted | Persistent media identity, occurrence/session guards, stale-event suppression, unified activity chrome, explicit party filters, 72px TV controls, codec/transcode startup and recoverable autoplay/error states have frontend and media-fixture tests. |
+| LIB-001..005 | Accepted | Shared aligned columns, bounded enrichment state, URL-canonical server queries and grouped `DataView` parity/paging are implemented across artist/album/genre/year/quality/rating navigation. |
+| PL-001..005 | Accepted | Revisioned batch commits, occurrence IDs, reducer-owned drafts, selected-position sorting, keyboard reorder/live announcements and stale-conflict reapply/reload workflows are covered. |
+| NV-001..007 | Accepted | Durable refresh/import commands, feedback linkage, category completeness/replacement/diversity/freshness, snapshot counts and retry/restore failed-addition workflows have backend and on-page UI coverage. |
+| QUEUE-001..006 | Accepted | Server-classified active/history categories, bounded SQL paging, durable cross-process cancellation, yt-dlp job lifecycle, exact retention actions and health/backlog diagnostics are covered by focused contracts. |
+| REV-001..007 | Accepted | Durable cases/items/pairwise edges, structured category/orphan triggers, equal playable panels, staged consequence plans, bounded reclassification, revision parity and evidence-hash reopen/file-recovery coverage pass. |
+| EDIT-001..009 | Accepted | Production profile/crop commands, journalled staging/probe/decode replacement, HDR/10-bit/audio/source comparison, golden media/manual correction and portable sidecar evidence tests pass. |
+| META-001..006 | Accepted | Artist and genre consolidations are non-destructive stable-ID/revision aggregates with create/edit/delete APIs, conflict evidence, three/two-column accessible editors, resolved navigation, provenance-bearing members and portable manifest rebuild coverage. |
+| ARC-001..003 | Accepted | SQL-backed archive paging/search/reason counts, list/grid parity, operation/checksum/path/eligibility detail, persisted restore preview/conflict choices, integrity/orphan maintenance and restart-safe recovery tests pass. |
+| SCRAPE-001..004 | Accepted | Production and dry-run use one typed `ImportContext`/`ImportPolicy` metadata stage; all six pathways × six policies have matrix coverage, and structured redacted traces/diagnostic bundles are downloadable. |
+| SET-001..005 | Accepted | Server, AI, discovery, playback, TV/Cast and Party fields share `SettingRowLayout`; the catalogue supplies complete typed metadata/consumer/orphan audits, dependencies are backend-enforced, secrets/tests are redacted, and Kodi removal/grouping is documented. |
+| TMVDB-001..005 | Accepted | Eligibility previews gate unverified fields, submissions use an idempotent durable outbox, pulls create reviewed candidates, append-only per-field provenance survives sidecar rebuild, and the contribution UI exposes preview/history/pending/submitted/failed plus retry and cancel. All import/rescan settings now invoke the production workflow. |
+| OBS-001..003 | Accepted | Request, operation and import correlation propagates through jobs/traces; health exposes queue/outbox/file-journal/transaction percentiles and slow samples, and authoritative file/sidecar failures are durable/retryable rather than swallowed. |
+| MIG-001..003 | Accepted | Preflight, backup, Alembic upgrade, integrity/reconciliation and restore-on-failure run before recovery; reports persist exact discrepancy/repair and schema-read metrics plus the v1/v2 read/v2-write compatibility and documented v1-write exit policy. |
 
 ## Immediate dependency order
 
@@ -49,3 +49,22 @@ Status definitions:
 4. Complete user-facing families only on the accepted contracts above.
 5. Run the Definition of Done and rebuild the installer only after all remaining
    `MUST` rows have acceptance evidence.
+
+## Definition of Done evidence
+
+Recorded on 2026-08-02 after every requirement family above reached
+`Accepted`:
+
+- `scripts/verify_backend.py`: passed the frozen-module growth gate, OpenAPI
+  drift gate, single Alembic-head gate, all 557 backend tests, and `compileall`.
+- `npm run verify`: passed generated-client drift, lint with zero errors, all 16
+  frontend tests, and the production Vite build.
+- `git diff --check`: passed with no whitespace errors.
+- PyInstaller 6.19.0: built and validated the standalone bundle in the isolated
+  `build/release-stage/dist/Playarr` directory, including the production
+  frontend and Alembic migrations 027 and 028.
+- The frozen executable passed an isolated-AppData startup smoke test and
+  returned HTTP 200 from `/api/health`.
+- Inno Setup 6.7.1: compiled
+  `Output/PlayarrSetup-1.11.0.exe` (77,074,205 bytes). SHA-256:
+  `1E5213653A92FD379D30EB29BEC288D1894667131E8133761C47E6F43EEB7EB4`.

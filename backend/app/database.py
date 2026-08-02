@@ -4,6 +4,7 @@ Playarr Database Engine & Session Management.
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from typing import Generator
+import re
 
 from app.config import get_settings
 from app.db_lock import _apply_lock
@@ -117,15 +118,26 @@ CosmeticSessionLocal = sessionmaker(
 # _apply_lock is an RLock, so an endpoint that also wraps its commit in an
 # explicit ``with _apply_lock:`` (e.g. routers/jobs.py) re-enters cleanly.
 
-_WRITE_STATEMENT_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
+_WRITE_STATEMENT_PREFIXES = (
+    "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER", "DROP",
+    "VACUUM", "ATTACH", "DETACH", "REINDEX",
+)
 _GUARD_FLAG = "_playarr_holds_apply_lock"
 
 
 def _statement_is_write(statement) -> bool:
     if not statement:
         return False
-    head = statement.lstrip()[:7].upper()
-    return head.startswith(_WRITE_STATEMENT_PREFIXES)
+    normalized = re.sub(r"/\*.*?\*/|--[^\r\n]*", " ", str(statement), flags=re.S).lstrip().upper()
+    if normalized.startswith(_WRITE_STATEMENT_PREFIXES):
+        return True
+    if normalized.startswith("PRAGMA"):
+        return "=" in normalized or normalized.startswith(("PRAGMA WAL_CHECKPOINT", "PRAGMA OPTIMIZE"))
+    # CTE-first writes are common in generated SQL. Read-only WITH statements
+    # have no mutation keyword before their first top-level SELECT.
+    if normalized.startswith("WITH"):
+        return bool(re.search(r"\b(INSERT|UPDATE|DELETE|REPLACE)\b", normalized))
+    return False
 
 
 def _install_write_serialization(target_engine) -> None:
@@ -143,14 +155,20 @@ def _install_write_serialization(target_engine) -> None:
         if _statement_is_write(statement):
             _apply_lock.acquire()
             conn.info[_GUARD_FLAG] = True
+            from app.services.transaction_telemetry import begin
+            begin(conn)
 
     @event.listens_for(target_engine, "commit")
     def _release_on_commit(conn):
+        from app.services.transaction_telemetry import finish
+        finish(conn, "commit")
         if conn.info.pop(_GUARD_FLAG, False):
             _apply_lock.release()
 
     @event.listens_for(target_engine, "rollback")
     def _release_on_rollback(conn):
+        from app.services.transaction_telemetry import finish
+        finish(conn, "rollback")
         if conn.info.pop(_GUARD_FLAG, False):
             _apply_lock.release()
 

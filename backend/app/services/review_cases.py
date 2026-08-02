@@ -127,14 +127,14 @@ def _case_spec(category: str, key: str, videos: list[VideoItem], quality_by_vide
     evidence = {
         "schema": 1,
         "category": category,
-        "trigger_code": f"legacy_flag:{category}",
+        "trigger_code": f"video_flag:{category}",
         "items": sorted(item_evidence, key=lambda item: item["video_stable_id"]),
         "edges": edges,
     }
     return {
         "stable_id": str(uuid5(NAMESPACE_URL, f"playarr:review:{category}:{key}")),
         "category": category,
-        "trigger_code": f"legacy_flag:{category}",
+        "trigger_code": f"video_flag:{category}",
         "videos": videos,
         "items": item_evidence,
         "edges": edges,
@@ -234,13 +234,61 @@ def sync_review_cases(db: Session) -> list[ReviewCase]:
 
     stale_query = db.query(ReviewCase).filter(
         ReviewCase.status == "open",
-        ReviewCase.trigger_code.like("legacy_flag:%"),
+        ReviewCase.trigger_code.like("video_flag:%"),
     )
     if generated_ids:
         stale_query = stale_query.filter(ReviewCase.stable_id.notin_(generated_ids))
     for stale in stale_query.all():
         stale.status = "obsolete"
         stale.resolved_at = now
+    db.flush()
+    return materialized
+
+
+def sync_orphan_review_cases(db: Session, orphan_records: list[dict]) -> list[ReviewCase]:
+    """Materialize filesystem-only media as review cases without inventing DB videos."""
+    now = datetime.now(timezone.utc)
+    active_ids: set[str] = set()
+    materialized: list[ReviewCase] = []
+    for record in orphan_records:
+        path = str(record["folder_path"])
+        stable_id = str(uuid5(NAMESPACE_URL, f"playarr:review:orphan:{_normalise(path)}"))
+        active_ids.add(stable_id)
+        evidence = {
+            "schema": 1,
+            "category": "orphan_file",
+            "trigger_code": "filesystem_scan:unrepresented_media",
+            "folder_path": path,
+            "size_bytes": record.get("size_bytes"),
+            "file_count": record.get("file_count"),
+            "files": sorted(record.get("files") or []),
+        }
+        evidence_hash = _canonical_hash(evidence)
+        case = db.query(ReviewCase).filter(ReviewCase.stable_id == stable_id).one_or_none()
+        if case is None:
+            case = ReviewCase(
+                stable_id=stable_id, category="orphan_file",
+                trigger_code="filesystem_scan:unrepresented_media",
+                evidence_hash=evidence_hash, evidence_json=evidence,
+            )
+            db.add(case)
+        elif case.evidence_hash != evidence_hash:
+            case.revision += 1
+            case.evidence_hash = evidence_hash
+            case.evidence_json = evidence
+            case.status = "open"
+            case.resolved_at = None
+        materialized.append(case)
+
+    stale = db.query(ReviewCase).filter(
+        ReviewCase.status == "open",
+        ReviewCase.trigger_code == "filesystem_scan:unrepresented_media",
+    )
+    if active_ids:
+        stale = stale.filter(ReviewCase.stable_id.notin_(active_ids))
+    for case in stale.all():
+        case.status = "obsolete"
+        case.resolved_at = now
     db.flush()
     return materialized
 

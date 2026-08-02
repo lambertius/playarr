@@ -1,7 +1,8 @@
-"""
-⚠️  LEGACY — Superseded by pipeline_url/ and pipeline_lib/. Do not modify.
+"""Canonical staged import pipeline.
 
-Staged pipeline orchestrator.
+URL and on-disk imports deliberately enter this one module. Source-specific
+acquisition remains in two Stage-B adapters; subsequent policy resolution,
+mutation planning, durable Stage-C apply and deferred work are shared.
 
 Public entry points:
   run_library_import_pipeline(job_id)   — for library_import_video_task
@@ -22,7 +23,7 @@ from typing import Dict, Optional
 
 from app.pipeline.workspace import ImportWorkspace
 from app.pipeline.mutation_plan import build_plan_from_workspace
-from app.pipeline.db_apply import apply_mutation_plan
+from app.pipeline.db_apply import TocTouDuplicateError, apply_mutation_plan
 
 logger = logging.getLogger(__name__)
 
@@ -38,51 +39,43 @@ def run_library_import_pipeline(job_id: int) -> None:
 
     ws = ImportWorkspace(job_id)
     try:
-        ws.reset()  # clear stale artifacts from recycled job IDs
         # Stage A — coarse status
         params = _load_job_params(job_id)
         if params is None:
             _coarse_update(job_id, JobStatus.failed, error="Missing job configuration")
             return
 
-        ws.write_artifact("input", {**params, "import_type": "library"})
+        from app.services.import_policy import policy_from_pipeline_options
+        import_policy = policy_from_pipeline_options(params, library=True)
+        params = {**params, "import_policy": import_policy.model_dump(mode="json")}
+        ws.prepare_run({**params, "import_type": "library"})
         _basename = os.path.basename(params.get("file_path", ""))
         _mode = (params.get("options") or {}).get("mode", "simple")
         _mode_label = "Advanced Import" if _mode == "advanced" else "Import"
         _coarse_update(job_id, JobStatus.analyzing, step="Starting import", progress=5,
                        display_name=f"{_basename} \u203a {_mode_label}")
         ws.log(f"Library import started: {params.get('file_path', '?')}")
+        ws.log(f"Import policy: {import_policy.model_dump_json()}")
 
         # Stage B — workspace build (NO lock, NO DB writes)
         _library_stage_b(ws, job_id, params)
         ws.sync_logs_to_db()
 
         # Stage C — apply mutation plan (short serialised DB transaction)
-        ws.update_stage("apply", "running")
-        _coarse_update(job_id, JobStatus.analyzing, step="Applying to database", progress=85)
         plan = ws.read_artifact("mutation_plan")
-        video_id = apply_mutation_plan(plan)
-        ws.update_stage("apply", "complete")
-        ws.write_artifact("apply_result", {"video_id": video_id})
+        prior_apply = ws.read_artifact("apply_result") if ws.is_stage_complete("apply") else None
+        if prior_apply:
+            video_id = int(prior_apply["video_id"])
+        else:
+            ws.update_stage("apply", "running")
+            _coarse_update(job_id, JobStatus.analyzing, step="Applying to database", progress=85)
+            video_id = apply_mutation_plan(plan)
+            ws.write_artifact("apply_result", {"video_id": video_id})
+            ws.update_stage("apply", "complete")
         ws.log(f"Applied to DB — video_id={video_id}")
 
-        # Write Playarr XML sidecar
-        try:
-            from app.services.playarr_xml import write_playarr_xml
-            from app.database import SessionLocal as _XMLSessionLocal
-            _xml_db = _XMLSessionLocal()
-            try:
-                _xml_video = _xml_db.query(VideoItem).get(video_id)
-                if _xml_video:
-                    write_playarr_xml(_xml_video, _xml_db)
-                    from app.tasks import _set_processing_flag
-                    _set_processing_flag(_xml_db, _xml_video, "xml_exported", method="import")
-                    _xml_db.commit()
-                    ws.log("Playarr XML sidecar written")
-            finally:
-                _xml_db.close()
-        except Exception as e:
-            ws.log(f"Playarr XML write warning: {e}", level="warning")
+        # Stage C transactionally scheduled the authoritative sidecar outbox.
+        ws.log("Playarr XML sidecar queued for reconciliation")
 
         # Terminal status is set atomically inside apply_mutation_plan.
         ws.log("Import complete")
@@ -95,7 +88,10 @@ def run_library_import_pipeline(job_id: int) -> None:
         _coarse_update(job_id, JobStatus.cancelled, error="Cancelled by user")
         ws.log("Import cancelled", level="warning")
         ws.sync_logs_to_db()
-    except _DuplicateSkip as dup:
+    except (TocTouDuplicateError, _DuplicateSkip) as dup:
+        if isinstance(dup, TocTouDuplicateError):
+            from app.services.import_cleanup import cleanup_import_artifacts
+            cleanup_import_artifacts(ws)
         _dup_reason = dup.reason or "Suspected duplicate"
         ws.log(f"Skipped: {_dup_reason}")
         _coarse_update(job_id, JobStatus.skipped,
@@ -132,27 +128,35 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
 
     ws = ImportWorkspace(job_id)
     try:
-        ws.reset()  # clear stale artifacts from recycled job IDs
+        from app.services.import_policy import policy_from_pipeline_options
+        import_policy = policy_from_pipeline_options(opts)
+        opts = {**opts, "import_policy": import_policy.model_dump(mode="json")}
         _coarse_update(job_id, JobStatus.downloading, step="Starting import", progress=5)
-        ws.write_artifact("input", {
+        ws.prepare_run({
             "import_type": "url",
             "url": url,
             "mode": "advanced",
+            "options": opts,
             **opts,
         })
         ws.log(f"URL import started: {url}")
+        ws.log(f"Import policy: {import_policy.model_dump_json()}")
 
         # Stage B
         _url_stage_b(ws, job_id, url, opts)
         ws.sync_logs_to_db()
 
         # Stage C
-        ws.update_stage("apply", "running")
-        _coarse_update(job_id, JobStatus.analyzing, step="Applying to database", progress=85)
         plan = ws.read_artifact("mutation_plan")
-        video_id = apply_mutation_plan(plan)
-        ws.update_stage("apply", "complete")
-        ws.write_artifact("apply_result", {"video_id": video_id})
+        prior_apply = ws.read_artifact("apply_result") if ws.is_stage_complete("apply") else None
+        if prior_apply:
+            video_id = int(prior_apply["video_id"])
+        else:
+            ws.update_stage("apply", "running")
+            _coarse_update(job_id, JobStatus.analyzing, step="Applying to database", progress=85)
+            video_id = apply_mutation_plan(plan)
+            ws.write_artifact("apply_result", {"video_id": video_id})
+            ws.update_stage("apply", "complete")
         ws.log(f"Applied to DB — video_id={video_id}")
         # Update display name to resolved artist - title with job type
         _artist_d = plan['video'].get('artist', '')
@@ -170,23 +174,8 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
             _label_db.close()
         _coarse_update(job_id, display_name=_display)
 
-        # Write Playarr XML sidecar
-        try:
-            from app.services.playarr_xml import write_playarr_xml
-            from app.database import SessionLocal as _XMLSessionLocal
-            _xml_db = _XMLSessionLocal()
-            try:
-                _xml_video = _xml_db.query(VideoItem).get(video_id)
-                if _xml_video:
-                    write_playarr_xml(_xml_video, _xml_db)
-                    from app.tasks import _set_processing_flag
-                    _set_processing_flag(_xml_db, _xml_video, "xml_exported", method="url_import")
-                    _xml_db.commit()
-                    ws.log("Playarr XML sidecar written")
-            finally:
-                _xml_db.close()
-        except Exception as e:
-            ws.log(f"Playarr XML write warning: {e}", level="warning")
+        # Stage C transactionally scheduled the authoritative sidecar outbox.
+        ws.log("Playarr XML sidecar queued for reconciliation")
 
         # Terminal status is set atomically inside apply_mutation_plan.
         ws.log("Import complete")
@@ -199,7 +188,10 @@ def run_url_import_pipeline(job_id: int, url: str, **opts) -> None:
         _coarse_update(job_id, JobStatus.cancelled, error="Cancelled by user")
         ws.log("Import cancelled", level="warning")
         ws.sync_logs_to_db()
-    except _DuplicateSkip as dup:
+    except (TocTouDuplicateError, _DuplicateSkip) as dup:
+        if isinstance(dup, TocTouDuplicateError):
+            from app.services.import_cleanup import cleanup_import_artifacts
+            cleanup_import_artifacts(ws)
         _dup_reason = dup.reason or "Suspected duplicate"
         ws.log(f"Skipped: {_dup_reason}")
         _coarse_update(job_id, JobStatus.skipped,
@@ -931,11 +923,12 @@ def _step_resolve_metadata(ws: ImportWorkspace, artist: str, title: str,
     _skip_wiki = not (opts.get("scrape_wikipedia", True) or opts.get("ai_auto_analyse", False))
     _skip_mb = not (opts.get("scrape_musicbrainz", True) or opts.get("ai_auto_analyse", False))
 
-    from app.services.unified_metadata import resolve_metadata_unified
+    from app.pipeline.import_context import context_from_options, run_metadata_stage
     ytdlp_meta = ws.read_artifact("ytdlp_metadata") or {}
 
     try:
-        metadata = resolve_metadata_unified(
+        context = context_from_options("disk_import", identity.get("source_url") or "disk", options)
+        metadata = run_metadata_stage(context,
             artist=artist,
             title=title,
             source_url=identity.get("source_url", ""),
@@ -946,9 +939,6 @@ def _step_resolve_metadata(ws: ImportWorkspace, artist: str, title: str,
             upload_date=ytdlp_meta.get("upload_date") or "",
             duration_seconds=ffprobe.get("duration_seconds"),
             ytdlp_metadata=ytdlp_meta or None,
-            skip_wikipedia=_skip_wiki,
-            skip_musicbrainz=_skip_mb,
-            skip_ai=_skip_ai,
         )
     except Exception as e:
         ws.log(f"Metadata resolution warning: {e}", level="warning")
@@ -984,10 +974,11 @@ def _step_resolve_metadata_url(ws: ImportWorkspace, artist: str, title: str,
     _skip_wiki = not (opts.get("scrape", True) or opts.get("ai_auto_analyse", False))
     _skip_mb = not (opts.get("scrape_musicbrainz", True) or opts.get("ai_auto_analyse", False))
 
-    from app.services.unified_metadata import resolve_metadata_unified
+    from app.pipeline.import_context import context_from_options, run_metadata_stage
 
     try:
-        metadata = resolve_metadata_unified(
+        context = context_from_options("url_add", canonical, opts)
+        metadata = run_metadata_stage(context,
             artist=artist, title=title,
             source_url=canonical,
             platform_title=ytdlp_meta.get("title", ""),
@@ -998,9 +989,6 @@ def _step_resolve_metadata_url(ws: ImportWorkspace, artist: str, title: str,
             filename=os.path.basename(ws.read_artifact("download", ).get("file_path", "")),
             duration_seconds=ffprobe.get("duration_seconds"),
             ytdlp_metadata=ytdlp_meta or None,
-            skip_wikipedia=_skip_wiki,
-            skip_musicbrainz=_skip_mb,
-            skip_ai=_skip_ai,
         )
     except Exception as e:
         ws.log(f"Metadata resolution warning: {e}", level="warning")

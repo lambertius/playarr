@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401 - register shared tables
 import app.new_videos.models  # noqa: F401 - register recommendation tables
 from app.database import Base
-from app.models import MutationCommand, ProcessingJob
+from app.models import JobStatus, MutationCommand, ProcessingJob
 from app.new_videos.models import (
     RecommendationSnapshot,
     SuggestedVideo,
@@ -15,6 +15,7 @@ from app.new_videos.models import (
 from app.new_videos.recommendation_ranker import RecommendationCandidate
 from app.new_videos.recommendation_service import _diversity_rerank, _serialize_video
 from app.new_videos.router import CartAddRequest, add_video
+from app.new_videos.failed_additions import list_failed_additions, restore_failed_suggestion
 from app.services.mutation_runtime import process_next_mutation
 
 
@@ -146,3 +147,30 @@ def test_quick_add_acknowledges_before_actor_commits_and_dispatches(monkeypatch)
     assert command.result_json["status"] == "importing"
     assert command.result_json["replacement"]["provider_video_id"] == "replacement"
     assert dispatched[0]["job_id"] == command.result_json["job_id"]
+
+
+def test_failed_addition_can_be_retried_or_restored_to_feed():
+    db = _session()
+    suggestion = SuggestedVideo(
+        provider="youtube", provider_video_id="failed", url="https://example.invalid/failed",
+        title="Failed import", artist="Artist", category="new",
+    )
+    db.add(suggestion)
+    db.flush()
+    db.add(SuggestedVideoDismissal(
+        suggested_video_id=suggestion.id, dismissal_type="permanent",
+        reason="auto-dismissed on add", provider="youtube", provider_video_id="failed",
+    ))
+    job = ProcessingJob(
+        job_type="import_url", status=JobStatus.failed, error_message="network unavailable",
+        input_params={"suggested_video_id": suggestion.id},
+    )
+    db.add(job)
+    db.commit()
+
+    failed = list_failed_additions(db)
+    assert failed[0]["job_id"] == job.id
+    assert failed[0]["error"] == "network unavailable"
+    restored = restore_failed_suggestion(db, job.id)
+    assert restored["suggested_video_id"] == suggestion.id
+    assert db.query(SuggestedVideoDismissal).count() == 0

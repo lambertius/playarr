@@ -13,9 +13,16 @@ from app.database import Base
 from app.models import (
     ArtistConsolidation,
     ArtistConsolidationTarget,
+    FieldProvenanceEvent,
+    Playlist,
+    PlaylistEntry,
     QualitySignature,
+    ReviewCase,
+    ReviewCaseEdge,
+    ReviewCaseItem,
     VideoItem,
 )
+from app.services.consolidations import library_consolidation_manifest
 from app.services.playarr_xml import build_playarr_xml
 from app.services.sidecar_restore import field_coverage, parse_restore_document, rebuild_from_sidecars
 
@@ -84,6 +91,34 @@ def test_two_pass_rebuild_preserves_logical_state_with_different_row_ids(tmp_pat
         stable_id="33333333-3333-4333-8333-333333333333", mask_name="Fixture Artist",
         targets=[ArtistConsolidationTarget(raw_name="Fixture Artist", provenance="test")],
     ))
+    source.add(Playlist(
+        stable_id="44444444-4444-4444-8444-444444444444", name="Portable set",
+        revision=7, entries=[
+            PlaylistEntry(occurrence_id="55555555-5555-4555-8555-555555555555", video_id=parent.id, position=0),
+            PlaylistEntry(occurrence_id="66666666-6666-4666-8666-666666666666", video_id=child.id, position=1),
+        ],
+    ))
+    review = ReviewCase(
+        stable_id="77777777-7777-4777-8777-777777777777", category="duplicate",
+        status="open", revision=2, trigger_code="fixture_duplicate",
+        evidence_hash="fixture-evidence", evidence_json={"reason": "same track"},
+    )
+    review.items.extend([
+        ReviewCaseItem(video_id=parent.id, video_stable_id=parent.stable_id, role="left", evidence_summary_json={}),
+        ReviewCaseItem(video_id=child.id, video_stable_id=child.stable_id, role="right", evidence_summary_json={}),
+    ])
+    review.edges.append(ReviewCaseEdge(
+        left_video_stable_id=parent.stable_id, right_video_stable_id=child.stable_id,
+        evidence_type="fixture", score=1.0, evidence_hash="edge-fixture", evidence_json={},
+    ))
+    source.add(review)
+    source.add(FieldProvenanceEvent(
+        id="88888888-8888-4888-8888-888888888888", video_id=parent.id,
+        video_stable_id=parent.stable_id, field_name="title", event_type="field_changed",
+        actor_kind="user", actor_id="fixture-user", provider="manual",
+        prior_value_hash="a" * 64, resulting_value_hash="b" * 64,
+        operation_id="op_fixture",
+    ))
     source.commit()
 
     sidecars = []
@@ -93,6 +128,10 @@ def test_two_pass_rebuild_preserves_logical_state_with_different_row_ids(tmp_pat
         sidecar.write_bytes(tostring(root, encoding="utf-8", xml_declaration=True))
         sidecars.append(sidecar)
     expected = _projection(source)
+    import json
+    (library / ".playarr-library-manifest.json").write_text(
+        json.dumps(library_consolidation_manifest(source)), encoding="utf-8",
+    )
 
     target_sessions = _sessions()
     target = target_sessions()
@@ -109,6 +148,13 @@ def test_two_pass_rebuild_preserves_logical_state_with_different_row_ids(tmp_pat
         ArtistConsolidation.stable_id == "33333333-3333-4333-8333-333333333333",
     ).one().mask_name == "Fixture Artist"
     assert target.query(VideoItem).filter(VideoItem.playarr_video_id == "PVD-parent").one().id != parent.id
+    restored_playlist = target.query(Playlist).filter(Playlist.stable_id == "44444444-4444-4444-8444-444444444444").one()
+    assert restored_playlist.revision == 7
+    assert [entry.video_item.playarr_video_id for entry in restored_playlist.entries] == ["PVD-parent", "PVD-child"]
+    restored_review = target.query(ReviewCase).filter(ReviewCase.stable_id == "77777777-7777-4777-8777-777777777777").one()
+    assert len(restored_review.items) == 2 and len(restored_review.edges) == 1
+    restored_event = target.get(FieldProvenanceEvent, "88888888-8888-4888-8888-888888888888")
+    assert restored_event and restored_event.operation_id == "op_fixture"
 
 
 def test_canonical_parser_classifies_every_sidecar_field(tmp_path):

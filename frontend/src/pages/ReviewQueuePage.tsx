@@ -25,12 +25,10 @@ import { Tooltip } from "@/components/Tooltip";
 import { cn, formatBytes, timeAgo } from "@/lib/utils";
 import { ScrapeOptionsModal, type ScrapeOptions } from "@/components/ScrapeOptionsModal";
 import { ScanOptionsModal } from "@/components/ScanOptionsModal";
-import { getPref, setPref } from "@/lib/preferences";
+import { getPref, setPref } from "@/lib/preferences"; import { ReviewCasesPanel } from "@/components/review/ReviewCasesPanel";
 
 // ── Types ───────────────────────────────────────────────
-type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "manual_review" | "rename" | "scanned" | "normalization" | "canonical_missing" | "canonical_conflict" | "canonical_low_confidence" | "ai_pending" | "ai_partial" | "artwork_incomplete" | "missing_artwork";
-
-const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 500, 1000, 0];
+type ReviewCategory = "all" | "version_detection" | "duplicate" | "url_import_error" | "manual_review" | "rename" | "scanned" | "normalization" | "canonical_missing" | "canonical_conflict" | "canonical_low_confidence" | "ai_pending" | "ai_partial" | "artwork_incomplete" | "missing_artwork"; const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 500, 1000, 0];
 
 // ── Review page preferences (server-backed) ─────────────
 interface ReviewPrefs {
@@ -780,6 +778,7 @@ export default function ReviewQueuePage() {
 
   return (
     <div className="p-4 md:p-6 max-w-5xl mx-auto">
+      <ReviewCasesPanel />
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>

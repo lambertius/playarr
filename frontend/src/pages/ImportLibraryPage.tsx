@@ -93,6 +93,7 @@ export function ImportLibraryPage() {
       normalize_audio: getBoolSetting(settings, "auto_normalize_on_import", true),
       scrape_wikipedia: getBoolSetting(settings, "import_scrape_wikipedia", true),
       scrape_musicbrainz: getBoolSetting(settings, "import_scrape_musicbrainz", false),
+      scrape_tmvdb: getBoolSetting(settings, "import_scrape_tmvdb", false),
       ai_auto_analyse: getBoolSetting(settings, "import_ai_auto", false),
       ai_auto_fallback: getBoolSetting(settings, "import_ai_only", false),
       find_source_video: getBoolSetting(settings, "import_find_source_video", false),
@@ -503,11 +504,10 @@ function OptionsStep({
             description="Fetch metadata from MusicBrainz database."
           />
           <ToggleOption
-            checked={false}
-            onChange={() => {}}
+            checked={options.scrape_tmvdb}
+            onChange={(v) => update({ scrape_tmvdb: v, ...(v ? { ai_auto_analyse: false, ai_auto_fallback: false } : {}) })}
             label="Retrieve from TMVDB"
-            description="Look up metadata from The Music Video DB community database. (Coming soon)"
-            disabled
+            description="Retrieve field-level metadata candidates from The Music Video DB."
           />
           <ToggleOption
             checked={options.ai_auto_analyse}

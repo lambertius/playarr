@@ -619,11 +619,16 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
     pre_logs.append(f"[scraper-test] Entering unified metadata pipeline with: artist='{artist}', title='{title}'")
 
     # â”€â”€ Run unified metadata resolution â”€â”€
-    from app.scraper.unified_metadata import resolve_metadata_unified
+    from app.pipeline.import_context import ImportContext, run_metadata_stage
 
     logs: List[str] = []
 
-    metadata = resolve_metadata_unified(
+    context = ImportContext(
+        pathway="scraper_test", source=canonical, policy=policy, dry_run=True,
+        artist_override=req.artist_override, title_override=req.title_override,
+        wikipedia_url=req.wikipedia_url, musicbrainz_url=req.musicbrainz_url,
+    )
+    metadata = run_metadata_stage(context,
         artist=artist,
         title=title,
         db=db,
@@ -635,13 +640,7 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
         upload_date=ytdlp_meta.get("upload_date", ""),
         duration_seconds=ytdlp_meta.get("duration"),
         ytdlp_metadata=info_dict,
-        skip_wikipedia=skip_wiki,
-        skip_musicbrainz=skip_mb,
-        skip_ai=skip_ai,
-        wikipedia_url=req.wikipedia_url if not skip_wiki else None,
-        musicbrainz_url=req.musicbrainz_url if not skip_mb else None,
         log_callback=lambda msg: logs.append(msg),
-        _test_mode=True,
     )
 
     # â”€â”€ Determine provenance for each resolved field â”€â”€
@@ -1167,7 +1166,7 @@ def run_scraper_test_stream(req: ScraperTestRequest):
             s = time.monotonic()
             yield emit_start(step_idx)
 
-            from app.scraper.unified_metadata import resolve_metadata_unified
+            from app.pipeline.import_context import ImportContext, run_metadata_stage
 
             logs: List[str] = []
             _last_sub: List[Optional[str]] = [None]
@@ -1189,7 +1188,12 @@ def run_scraper_test_stream(req: ScraperTestRequest):
                 if sub and sub != _last_sub[0]:
                     _last_sub[0] = sub
 
-            metadata = resolve_metadata_unified(
+            context = ImportContext(
+                pathway="scraper_test", source=canonical, policy=policy, dry_run=True,
+                artist_override=req.artist_override, title_override=req.title_override,
+                wikipedia_url=req.wikipedia_url, musicbrainz_url=req.musicbrainz_url,
+            )
+            metadata = run_metadata_stage(context,
                 artist=artist,
                 title=title,
                 db=db,
@@ -1201,13 +1205,7 @@ def run_scraper_test_stream(req: ScraperTestRequest):
                 upload_date=ytdlp_meta.get("upload_date", ""),
                 duration_seconds=ytdlp_meta.get("duration"),
                 ytdlp_metadata=info_dict,
-                skip_wikipedia=skip_wiki,
-                skip_musicbrainz=skip_mb,
-                skip_ai=skip_ai,
-                wikipedia_url=req.wikipedia_url if not skip_wiki else None,
-                musicbrainz_url=req.musicbrainz_url if not skip_mb else None,
                 log_callback=_log_with_progress,
-                _test_mode=True,
             )
             yield emit_done(step_idx, s)
 
@@ -1818,9 +1816,15 @@ def run_import_test_stream(req: ImportTestRequest):
                 elif "ai" in ml and "review" in ml:
                     sub = "AI Final Review"
 
-            from app.scraper.unified_metadata import resolve_metadata_unified
+            from app.pipeline.import_context import ImportContext, run_metadata_stage
 
-            metadata = resolve_metadata_unified(
+            context = ImportContext(
+                pathway="scraper_test", source=canonical or source_path,
+                policy=policy, dry_run=True,
+                artist_override=req.artist_override, title_override=req.title_override,
+                wikipedia_url=req.wikipedia_url, musicbrainz_url=req.musicbrainz_url,
+            )
+            metadata = run_metadata_stage(context,
                 artist=artist,
                 title=title,
                 db=db,
@@ -1834,13 +1838,7 @@ def run_import_test_stream(req: ImportTestRequest):
                 ytdlp_metadata=info_dict,
                 filename=chosen_file,
                 folder_name=directory,
-                skip_wikipedia=skip_wiki,
-                skip_musicbrainz=skip_mb,
-                skip_ai=skip_ai,
-                wikipedia_url=req.wikipedia_url if not skip_wiki else None,
-                musicbrainz_url=req.musicbrainz_url if not skip_mb else None,
                 log_callback=_log_with_progress,
-                _test_mode=True,
             )
             yield emit_done(step_idx, s)
 

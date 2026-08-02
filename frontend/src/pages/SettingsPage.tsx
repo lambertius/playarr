@@ -11,6 +11,7 @@ import { CleanLibraryDialog } from "@/components/CleanLibraryDialog";
 import { LogViewer } from "@/components/LogViewer";
 import { NewVideosSettings } from "@/components/new-videos/NewVideosSettings";
 import { AISettingsPanel } from "@/components/AISettingsPanel";
+import { SettingRowLayout } from "@/components/SettingRowLayout";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
 import type { QueueHideMode } from "@/stores/artworkSettingsStore";
 import { useFireworksStore } from "@/stores/fireworksStore";
@@ -642,11 +643,7 @@ export function SettingsPage() {
             <div>
               <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Scraping Defaults</h4>
               <div className="space-y-4 pl-2 border-l-2 border-border">
-                {settingRows(scrapingDefaults.filter(s => s.key !== "import_scrape_tmvdb"))}
-                {/* TMVDB toggle — greyed out, not yet active */}
-                <div className="opacity-40 pointer-events-none select-none">
-                  {settingRows(scrapingDefaults.filter(s => s.key === "import_scrape_tmvdb"))}
-                </div>
+                {settingRows(scrapingDefaults)}
               </div>
             </div>
             <div className="mt-4">
@@ -685,16 +682,16 @@ export function SettingsPage() {
       );
     }
 
-    // TMVDB — coming soon, greyed out
+    // TMVDB connection and contribution policy.
     if (group === "tmvdb") {
       return (
         <section key={group}>
           <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
             {GROUP_LABELS[group]}
           </h2>
-          <div className="card space-y-5 opacity-40 pointer-events-none select-none">
+          <div className="card space-y-5">
             <p className="text-xs text-text-muted italic">
-              TMVDB integration is not yet available. These settings will become active in a future update.
+              Pulls create reviewed field candidates; pushes use the durable outbox and include only eligible verified data.
             </p>
             <div className="space-y-4 pl-2 border-l-2 border-border">
               {settingRows(groups[group])}
@@ -1250,9 +1247,7 @@ function DirectoryRow({
   const isDirty = value !== setting.value;
 
   return (
-    <div className="flex flex-col gap-1">
-      <label className="text-sm font-medium text-text-primary">{label}</label>
-      <p className="text-xs text-text-muted leading-relaxed">{description}</p>
+    <SettingRowLayout label={label} description={description}>
       <div className="flex items-center gap-2">
         <input
           type="text"
@@ -1301,7 +1296,7 @@ function DirectoryRow({
           </Tooltip>
         )}
       </div>
-    </div>
+    </SettingRowLayout>
   );
 }
 
@@ -1372,13 +1367,8 @@ function SourceDirectoriesEditor({
   };
 
   return (
-    <div className="flex flex-col gap-2 border-t border-white/5 pt-4">
-      <div>
-        <label className="text-sm font-medium text-text-primary">Source Directories</label>
-        <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-          Additional folders containing music videos. Adding a directory auto-imports its videos using local metadata only (NFO files, folder names). Removing a directory cleans its videos from the library.
-        </p>
-      </div>
+    <SettingRowLayout label="Source Directories" description="Additional folders containing music videos. Adding a directory auto-imports with local metadata; removing one cleans its videos from the library." className="border-t border-white/5 pt-4">
+      <div className="space-y-2">
       {dirs.map((d, i) => (
         <div key={i} className="flex items-center gap-2">
           <span className="input-field flex-1 text-sm py-1.5 px-2 bg-surface-light/50">{d}</span>
@@ -1450,7 +1440,8 @@ function SourceDirectoriesEditor({
           </button>
         </div>
       )}
-    </div>
+      </div>
+    </SettingRowLayout>
   );
 }
 
@@ -1853,13 +1844,7 @@ function NowPlayingSettings() {
         <div className="space-y-4 pl-2 border-l-2 border-border">
 
       {/* Artwork Size */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Tile Size (px)</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Fixed pixel size for each artwork tile in the background grid.
-          </p>
-        </div>
+      <SettingRowLayout label="Tile Size (px)" description="Fixed pixel size for each artwork tile in the background grid.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -1872,16 +1857,10 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{artworkSize}</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Scroll Rate (duration) */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Scroll Speed</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            How quickly the artwork grid scrolls. Lower values = faster scrolling.
-          </p>
-        </div>
+      <SettingRowLayout label="Scroll Speed" description="How quickly the artwork grid scrolls. Lower values = faster scrolling.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -1894,7 +1873,7 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{scrollDuration}s</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
         </div>
       </div>
@@ -1905,13 +1884,7 @@ function NowPlayingSettings() {
         <div className="space-y-4 pl-2 border-l-2 border-border">
 
       {/* Artwork Swapping Toggle */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Enable Swapping</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Periodically swap artwork tiles in the background grid.
-          </p>
-        </div>
+      <SettingRowLayout label="Enable Swapping" description="Periodically swap artwork tiles in the background grid.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <button
             onClick={() => setArtChangeEnabled(!artChangeEnabled)}
@@ -1920,16 +1893,10 @@ function NowPlayingSettings() {
             <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${artChangeEnabled ? "translate-x-6" : "translate-x-1"}`} />
           </button>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Change Rate */}
-      <div className={`flex flex-col sm:flex-row sm:items-start gap-2 transition-opacity ${artChangeEnabled ? "" : "opacity-40 pointer-events-none"}`}>
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Swap Interval (s)</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Time period over which all tile swaps are distributed.
-          </p>
-        </div>
+      <SettingRowLayout label="Swap Interval (s)" description="Time period over which all tile swaps are distributed." disabled={!artChangeEnabled}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -1942,16 +1909,10 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{changeRate}s</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Tiles Per Interval */}
-      <div className={`flex flex-col sm:flex-row sm:items-start gap-2 transition-opacity ${artChangeEnabled ? "" : "opacity-40 pointer-events-none"}`}>
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Tiles Per Interval</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Number of tiles to swap per interval, evenly spaced across the period.
-          </p>
-        </div>
+      <SettingRowLayout label="Tiles Per Interval" description="Number of tiles to swap per interval, evenly spaced across the period." disabled={!artChangeEnabled}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -1964,16 +1925,10 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{artChangeCount}</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Transition Style */}
-      <div className={`flex flex-col sm:flex-row sm:items-start gap-2 transition-opacity ${artChangeEnabled ? "" : "opacity-40 pointer-events-none"}`}>
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Transition Style</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Animation style when tiles swap. Random uses a mix of all styles.
-          </p>
-        </div>
+      <SettingRowLayout label="Transition Style" description="Animation style when tiles swap. Random uses a mix of all styles." disabled={!artChangeEnabled}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <select
             value={artChangeStyle}
@@ -1986,16 +1941,10 @@ function NowPlayingSettings() {
             <option value="random">Random</option>
           </select>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Fade Duration */}
-      <div className={`flex flex-col sm:flex-row sm:items-start gap-2 transition-opacity ${artChangeEnabled ? "" : "opacity-40 pointer-events-none"}`}>
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Transition Duration (s)</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            How long each tile transition animation takes.
-          </p>
-        </div>
+      <SettingRowLayout label="Transition Duration (s)" description="How long each tile transition animation takes." disabled={!artChangeEnabled}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -2008,16 +1957,10 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{fadeDuration}s</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Artwork Repetition Penalty */}
-      <div className={`flex flex-col sm:flex-row sm:items-start gap-2 transition-opacity ${artChangeEnabled ? "" : "opacity-40 pointer-events-none"}`}>
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Repeat Penalty</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Reduces the chance of showing the same artwork again. Higher = less repetition.
-          </p>
-        </div>
+      <SettingRowLayout label="Repeat Penalty" description="Reduces the chance of showing the same artwork again. Higher = less repetition." disabled={!artChangeEnabled}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -2030,7 +1973,7 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{artRepeatPenalty === 0 ? "Off" : artRepeatPenalty}</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
         </div>
       </div>
@@ -2041,13 +1984,7 @@ function NowPlayingSettings() {
         <div className="space-y-4 pl-2 border-l-2 border-border">
 
       {/* Playback Area Ratio */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Playback Area Size (%)</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Percentage of available vertical space used by the playback area.
-          </p>
-        </div>
+      <SettingRowLayout label="Playback Area Size (%)" description="Percentage of available vertical space used by the playback area.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -2060,16 +1997,10 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{playbackRatio}%</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Queue Opacity */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Queue Panel Opacity (%)</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Transparency of the queue panel background. Lower = more transparent.
-          </p>
-        </div>
+      <SettingRowLayout label="Queue Panel Opacity (%)" description="Transparency of the queue panel background. Lower = more transparent.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -2082,16 +2013,10 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{queueOpacity}%</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Queue Clock */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Queue Clock</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Show the current time and estimated start time for each track in the queue.
-          </p>
-        </div>
+      <SettingRowLayout label="Queue Clock" description="Show the current time and estimated start time for each track in the queue.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <button
             onClick={() => setQueueClock(!queueClock)}
@@ -2100,18 +2025,10 @@ function NowPlayingSettings() {
             <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${queueClock ? "translate-x-6" : "translate-x-1"}`} />
           </button>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Queue Auto-Hide */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Queue Auto-Hide</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Fade the queue out automatically on the Now Playing screen (windowed and fullscreen).
-            <strong>Per song</strong> reappears at the start of every track; <strong>Full auto-hide</strong>{" "}
-            stays hidden until you move the mouse. Either way, moving the mouse brings it back (like the play bar).
-          </p>
-        </div>
+      <SettingRowLayout label="Queue Auto-Hide" description={<>Fade the queue out automatically on the Now Playing screen (windowed and fullscreen). <strong>Per song</strong> reappears at each track; <strong>Full auto-hide</strong> stays hidden until pointer movement.</>}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <select
             value={queueHideMode}
@@ -2123,16 +2040,10 @@ function NowPlayingSettings() {
             <option value="auto">Full auto-hide</option>
           </select>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Queue Hide Delay */}
-      <div className={`flex flex-col sm:flex-row sm:items-start gap-2 transition-opacity ${queueHideMode === "off" ? "opacity-40 pointer-events-none" : ""}`}>
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Hide After (s)</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            How long the queue stays visible before it fades out.
-          </p>
-        </div>
+      <SettingRowLayout label="Hide After (s)" description="How long the queue stays visible before it fades out." disabled={queueHideMode === "off"}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -2145,20 +2056,11 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{queueHideDelay}s</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Compatibility transcoding — browser playback only.  TV and Cast
           transcoding live in their own Party Mode subsections. */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Transcode for Compatibility — Browser</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Re-encode video on the server to a broadly-compatible H.264/AAC stream for regular in-browser
-            playback (Now Playing and the video player). Turn on if normal playback drops frames or stutters
-            (e.g. HEVC/VP9/AV1, 10-bit, or high-bitrate sources). Uses more server CPU. TV and Cast modes
-            have their own transcode toggles under Party Mode.
-          </p>
-        </div>
+      <SettingRowLayout label="Transcode for Compatibility — Browser" description="Re-encode video on the server to a broadly-compatible H.264/AAC stream for regular in-browser playback. Turn on if normal playback drops frames or stutters. Uses more server CPU; TV and Cast have separate controls.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <button
             onClick={() => setBrowserTranscode(!browserTranscode)}
@@ -2167,16 +2069,10 @@ function NowPlayingSettings() {
             <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${browserTranscode ? "translate-x-6" : "translate-x-1"}`} />
           </button>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Metadata Overlay Duration */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Metadata Overlay Duration (s)</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            How long the video description overlay is shown when a new track starts. Set to 0 to disable.
-          </p>
-        </div>
+      <SettingRowLayout label="Metadata Overlay Duration (s)" description="How long the video description overlay is shown when a new track starts. Set to 0 to disable.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -2189,16 +2085,10 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{overlayDuration === 0 ? "Off" : `${overlayDuration}s`}</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Metadata Overlay Size */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Infobox Display Size (%)</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Height of the metadata infobox as a percentage of the video area.
-          </p>
-        </div>
+      <SettingRowLayout label="Infobox Display Size (%)" description="Height of the metadata infobox as a percentage of the video area.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <input
             type="range"
@@ -2211,7 +2101,7 @@ function NowPlayingSettings() {
           />
           <span className="text-sm text-text-secondary w-12 text-right">{overlaySize}%</span>
         </div>
-      </div>
+      </SettingRowLayout>
 
         </div>
       </div>
@@ -2296,15 +2186,7 @@ function PartyModeSettings() {
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Playlist</h4>
         <div className="space-y-4 pl-2 border-l-2 border-border">
-          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-            <div className="flex-1 min-w-0">
-              <label className="text-sm font-medium text-text-primary">Party Mode Playlist</label>
-              <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                Choose a playlist to play (shuffled) when Party Mode starts. Leave as
-                <span className="text-text-secondary"> Auto-generate</span> to build the queue from the current
-                filter and the exclusion / era settings below.
-              </p>
-            </div>
+          <SettingRowLayout label="Party Mode Playlist" description={<>Choose a playlist to play shuffled when Party Mode starts. Leave as <span className="text-text-secondary">Auto-generate</span> to use the current filters.</>}>
             <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
               <select
                 value={partyPlaylist.playlistId ?? ""}
@@ -2319,7 +2201,7 @@ function PartyModeSettings() {
                 ))}
               </select>
             </div>
-          </div>
+          </SettingRowLayout>
         </div>
       </div>
 
@@ -2327,13 +2209,7 @@ function PartyModeSettings() {
       <div className="mt-4">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Animation</h4>
         <div className="space-y-4 pl-2 border-l-2 border-border">
-          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-            <div className="flex-1 min-w-0">
-              <label className="text-sm font-medium text-text-primary">Startup Animation</label>
-              <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                Show a fireworks animation when Party Mode launches.
-              </p>
-            </div>
+          <SettingRowLayout label="Startup Animation" description="Show a fireworks animation when Party Mode launches.">
             <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
               <button
                 onClick={() => {
@@ -2347,16 +2223,10 @@ function PartyModeSettings() {
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${animation.enabled ? "translate-x-6" : "translate-x-1"}`} />
               </button>
             </div>
-          </div>
+          </SettingRowLayout>
 
           {animation.enabled && (
-            <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-              <div className="flex-1 min-w-0">
-                <label className="text-sm font-medium text-text-primary">Duration</label>
-                <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                  How long the startup fireworks animation plays.
-                </p>
-              </div>
+            <SettingRowLayout label="Duration" description="How long the startup fireworks animation plays.">
               <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
                 <input
                   type="range"
@@ -2377,7 +2247,7 @@ function PartyModeSettings() {
                 />
                 <span className="text-sm text-text-secondary w-12 text-right">{animation.duration}s</span>
               </div>
-            </div>
+            </SettingRowLayout>
           )}
         </div>
       </div>
@@ -2386,14 +2256,7 @@ function PartyModeSettings() {
       <div className="mt-4">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Party Like It's…</h4>
         <div className="space-y-4 pl-2 border-l-2 border-border">
-          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-            <div className="flex-1 min-w-0">
-              <label className="text-sm font-medium text-text-primary">Enable</label>
-              <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                Cap Party Mode at a chosen year — nothing newer plays, and videos closest to that
-                year are favoured for the start of the queue, gradually falling off the further back they go.
-              </p>
-            </div>
+          <SettingRowLayout label="Enable" description="Cap Party Mode at a chosen year. Nothing newer plays, and videos closest to that year are favoured near the start of the queue.">
             <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
               <button
                 onClick={() => {
@@ -2406,16 +2269,10 @@ function PartyModeSettings() {
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${era.enabled ? "translate-x-6" : "translate-x-1"}`} />
               </button>
             </div>
-          </div>
+          </SettingRowLayout>
 
           {era.enabled && (
-            <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-              <div className="flex-1 min-w-0">
-                <label className="text-sm font-medium text-text-primary">Year</label>
-                <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                  Party like it's this year.
-                </p>
-              </div>
+            <SettingRowLayout label="Year" description="Party like it's this year.">
               <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
                 <input
                   type="number"
@@ -2439,7 +2296,7 @@ function PartyModeSettings() {
                   className="input-field w-24 py-1.5 text-sm"
                 />
               </div>
-            </div>
+            </SettingRowLayout>
           )}
         </div>
       </div>
@@ -2453,8 +2310,7 @@ function PartyModeSettings() {
             regardless of the active page filters.
           </p>
 
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-text-primary">Exclude Version Types</label>
+          <SettingRowLayout label="Exclude Version Types" description="Selected version types are excluded whenever Party Mode starts.">
             <div className="flex flex-wrap gap-2">
               {VERSION_TYPE_OPTIONS.map((vt) => (
                 <label key={vt.value} className="flex items-center gap-1.5 text-sm text-text-secondary cursor-pointer">
@@ -2468,37 +2324,25 @@ function PartyModeSettings() {
                 </label>
               ))}
             </div>
-          </div>
+          </SettingRowLayout>
 
-          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-            <div className="flex-1 min-w-0">
-              <label className="text-sm font-medium text-text-primary">Min Song Rating</label>
-              <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                Only include songs with at least this rating.
-              </p>
-            </div>
+          <SettingRowLayout label="Min Song Rating" description="Only include songs with at least this rating.">
             <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
               <MinRatingStars
                 value={exclusions.min_song_rating}
                 onChange={(v) => save({ ...exclusions, min_song_rating: v })}
               />
             </div>
-          </div>
+          </SettingRowLayout>
 
-          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-            <div className="flex-1 min-w-0">
-              <label className="text-sm font-medium text-text-primary">Min Video Rating</label>
-              <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                Only include videos with at least this rating.
-              </p>
-            </div>
+          <SettingRowLayout label="Min Video Rating" description="Only include videos with at least this rating.">
             <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
               <MinRatingStars
                 value={exclusions.min_video_rating}
                 onChange={(v) => save({ ...exclusions, min_video_rating: v })}
               />
             </div>
-          </div>
+          </SettingRowLayout>
         </div>
       </div>
 
@@ -2564,16 +2408,7 @@ function TvModeSettings() {
       </p>
 
       {/* TV Resolution */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Render Resolution</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            TV browsers often report a low viewport, which leaves the artwork wall only a few tiles
-            wide. This lays the page out on a fixed 16:9 canvas at the chosen resolution then scales it
-            to fit, giving browser-like density. Higher = denser wall and a smaller video relative to the
-            background.
-          </p>
-        </div>
+      <SettingRowLayout label="Render Resolution" description="Lay the TV page out on a fixed 16:9 canvas and scale it to fit. Higher resolutions produce a denser artwork wall.">
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <select
             value={tvResolution}
@@ -2585,19 +2420,10 @@ function TvModeSettings() {
             <option value={2160}>4K (2160p)</option>
           </select>
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* TV transcode */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Transcode for Compatibility</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Re-encode video on the server to a broadly-compatible, network-friendly H.264/AAC stream
-            (capped at 1080p) for the <code>/tv</code> page. Turn on if TV playback drops frames or stutters
-            (e.g. HEVC/VP9/AV1, 10-bit, or high-bitrate sources). The encode only runs while <code>/tv</code>
-            is actually open, so it adds no PC overhead the rest of the time.
-          </p>
-        </div>
+      <SettingRowLayout label="Transcode for Compatibility" description={<>Re-encode to a network-friendly H.264/AAC stream for the <code>/tv</code> page. Encoding runs only while that page is open.</>}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <button
             onClick={() => setTvTranscode(!tvTranscode)}
@@ -2606,7 +2432,7 @@ function TvModeSettings() {
             <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${tvTranscode ? "translate-x-6" : "translate-x-1"}`} />
           </button>
         </div>
-      </div>
+      </SettingRowLayout>
     </div>
   );
 }
@@ -2630,15 +2456,7 @@ function CastModeSettings() {
       </p>
 
       {/* Cast transcode */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <label className="text-sm font-medium text-text-primary">Transcode for Compatibility</label>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Re-encode the source to H.264/AAC for the <code>/cast</code> page. Usually unnecessary since
-            Chrome already re-encodes the tab, but turn it on if the source codec won't decode on this PC
-            (e.g. AV1 without hardware support). Only runs while <code>/cast</code> is open.
-          </p>
-        </div>
+      <SettingRowLayout label="Transcode for Compatibility" description={<>Re-encode to H.264/AAC for the <code>/cast</code> page when the source codec cannot decode locally. Encoding runs only while that page is open.</>}>
         <div className="flex items-center gap-3 shrink-0 sm:pt-0.5">
           <button
             onClick={() => setCastTranscode(!castTranscode)}
@@ -2647,7 +2465,7 @@ function CastModeSettings() {
             <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${castTranscode ? "translate-x-6" : "translate-x-1"}`} />
           </button>
         </div>
-      </div>
+      </SettingRowLayout>
     </div>
   );
 }
@@ -2708,9 +2526,7 @@ function TagInputField({
   onRemove: (v: string) => void;
 }) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium text-text-primary">{label}</label>
-      <p className="text-xs text-text-muted leading-relaxed">{description}</p>
+    <SettingRowLayout label={label} description={description}>
       <div className="flex items-center gap-2">
         <input
           type="text"
@@ -2739,7 +2555,7 @@ function TagInputField({
           ))}
         </div>
       )}
-    </div>
+    </SettingRowLayout>
   );
 }
 
@@ -2775,17 +2591,7 @@ function SettingRow({
   const description = meta?.description;
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-[minmax(11rem,0.9fr)_minmax(12rem,1fr)_minmax(15rem,1.35fr)] sm:items-start gap-2 sm:gap-4">
-      <div className="min-w-0 sm:pt-2">
-        <div className="flex items-center gap-1">
-          <label className="text-sm font-medium text-text-primary">{label}</label>
-          {meta?.tooltip && (
-            <Tooltip content={meta.tooltip}>
-              <span className="text-text-muted hover:text-text-secondary cursor-help text-xs">ⓘ</span>
-            </Tooltip>
-          )}
-        </div>
-      </div>
+    <SettingRowLayout label={label} description={<>{description || "No additional description."}{isSecret && <span className="block mt-1 text-emerald-400/80">Stored securely; the configured value is never returned in full.</span>}</>} labelExtra={meta?.tooltip && <Tooltip content={meta.tooltip}><span className="text-text-muted hover:text-text-secondary cursor-help text-xs">ⓘ</span></Tooltip>}>
       <div className="flex items-center gap-2 min-w-0">
         {isBoolean ? (
           <button
@@ -2846,10 +2652,6 @@ function SettingRow({
           </Tooltip>
         )}
       </div>
-      <p id={`setting-description-${setting.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`} className="text-xs text-text-muted leading-relaxed sm:pt-2">
-        {description || "No additional description."}
-        {isSecret && <span className="block mt-1 text-emerald-400/80">Stored securely; the configured value is never returned in full.</span>}
-      </p>
-    </div>
+    </SettingRowLayout>
   );
 }

@@ -590,7 +590,7 @@ def import_video_task(self, job_id: int, url: str, artist_override: str = None,
     Full import pipeline for a video URL.
     Delegates to the staged pipeline (workspace → mutation plan → serial apply).
     """
-    from app.pipeline_url.stages import run_url_import_pipeline
+    from app.pipeline.stages import run_url_import_pipeline
 
     _update_job(job_id, status=JobStatus.downloading, started_at=datetime.now(timezone.utc),
                 celery_task_id=getattr(getattr(self, 'request', None), 'id', None),
@@ -627,7 +627,7 @@ def batch_import_task(self, parent_job_id: int, child_specs: list):
     Downloads overlap; DB writes serialize through the write queue.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from app.pipeline_url.stages import run_url_import_pipeline
+    from app.pipeline.stages import run_url_import_pipeline
 
     celery_id = getattr(getattr(self, 'request', None), 'id', None)
 
@@ -952,8 +952,7 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
                 _set_processing_flag(db, video_item, "audio_normalized", method="redownload")
                 # Clear review flag if it was set due to a prior normalization failure
                 if (video_item.review_status == "needs_human_review"
-                        and video_item.review_reason
-                        and "normalization failed" in video_item.review_reason.lower()):
+                        and video_item.review_category == "normalization_failure"):
                     video_item.review_status = "none"
                     video_item.review_reason = None
                     video_item.review_category = None
@@ -966,6 +965,7 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
             if video_item.review_status == "none":
                 video_item.review_status = "needs_human_review"
                 video_item.review_reason = "Audio normalization failed (possible codec incompatibility)"
+                video_item.review_category = "normalization_failure"
 
         # --- Write NFO from EXISTING metadata ---
         _update_job(job_id, status=JobStatus.writing_nfo, current_step="Writing NFO", progress_percent=85)
@@ -1004,13 +1004,9 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
 
         _set_processing_flag(db, video_item, "nfo_exported", method="redownload")
 
-        # Write Playarr XML sidecar
-        try:
-            from app.services.playarr_xml import write_playarr_xml
-            write_playarr_xml(video_item, db)
-            _set_processing_flag(db, video_item, "xml_exported", method="redownload")
-        except Exception as e:
-            _append_job_log(job_id, f"Playarr XML write error: {e}")
+        # The outbox entry is created in the central write closure below so
+        # it commits atomically with the authoritative metadata update.
+        _set_processing_flag(db, video_item, "xml_exported", method="redownload")
 
         # --- Update ONLY file-related fields on video_item ---
         # Route the final commit through the centralised write queue so it
@@ -1123,6 +1119,9 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
                     _job.progress_percent = 100
                     _job.current_step = "Complete"
                     _job.completed_at = datetime.now(timezone.utc)
+
+                from app.services.playarr_xml import write_playarr_xml
+                write_playarr_xml(_vi, _db, operation_id=str(job_id))
 
                 _db.commit()
             finally:
@@ -2358,17 +2357,12 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                     # data first so that values the DB doesn't have (e.g.
                     # loudness_lufs from a previous normalization) are not
                     # lost when the XML is rewritten.
-                    try:
-                        from app.services.playarr_xml import (
-                            write_playarr_xml, find_playarr_xml, parse_playarr_xml,
-                        )
-                        _merge_existing_xml_quality(db, video_item, ctx_folder_path)
-                        db.flush()  # persist entity links before XML generation
-                        db.refresh(video_item)
-                        write_playarr_xml(video_item, db)
-                        _set_processing_flag(db, video_item, "xml_exported", method="rescan")
-                    except Exception as _xml_e:
-                        _append_job_log(job_id, f"Playarr XML write error: {_xml_e}")
+                    from app.services.playarr_xml import write_playarr_xml
+                    _merge_existing_xml_quality(db, video_item, ctx_folder_path)
+                    db.flush()  # persist entity links before outbox projection
+                    db.refresh(video_item)
+                    write_playarr_xml(video_item, db, operation_id=str(job_id))
+                    _set_processing_flag(db, video_item, "xml_exported", method="rescan")
 
                 # Compute Playarr content IDs (+ phash / fingerprint / checksum)
                 try:
@@ -4219,19 +4213,13 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 _set_pipeline_step(job_id, "Writing NFO", "failed")
                 _append_job_log(job_id, f"NFO write error (non-fatal): {_nfo_e}")
 
-            try:
-                from app.services.playarr_xml import write_playarr_xml
-                _merge_existing_xml_quality(db, video_item,
-                                            video_item.folder_path)
-                db.refresh(video_item)
-                write_playarr_xml(video_item, db)
-                _set_processing_flag(db, video_item, "xml_exported", method="scrape_metadata")
-                _set_pipeline_step(job_id, "Writing Playarr XML", "success")
-                _append_job_log(job_id, "Playarr XML sidecar written")
-            except Exception as _xml_e:
-                db.rollback()
-                _set_pipeline_step(job_id, "Writing Playarr XML", "failed")
-                _append_job_log(job_id, f"Playarr XML write error (non-fatal): {_xml_e}")
+            from app.services.playarr_xml import write_playarr_xml
+            _merge_existing_xml_quality(db, video_item, video_item.folder_path)
+            db.refresh(video_item)
+            write_playarr_xml(video_item, db, operation_id=str(job_id))
+            _set_processing_flag(db, video_item, "xml_exported", method="scrape_metadata")
+            _set_pipeline_step(job_id, "Writing Playarr XML", "success")
+            _append_job_log(job_id, "Playarr XML sidecar queued")
 
             _safe_commit(db)
 
@@ -6462,7 +6450,7 @@ def library_import_video_task(self, job_id: int):
     Import a single video file from an external library.
     Delegates to the staged pipeline (workspace -> mutation plan -> serial apply).
     """
-    from app.pipeline_lib.stages import run_library_import_pipeline
+    from app.pipeline.stages import run_library_import_pipeline
 
     _update_job(job_id, status=JobStatus.analyzing, started_at=datetime.now(timezone.utc),
                 celery_task_id=getattr(getattr(self, "request", None), "id", None))
@@ -6808,10 +6796,8 @@ def scan_sources_task(self, job_id: int, video_ids: list):
 
         # Update XML
         for vi in items:
-            try:
-                write_playarr_xml(vi, db)
-            except Exception:
-                pass
+            write_playarr_xml(vi, db)
+        db.commit()
 
         summary = f"Done — {repaired} repaired, {already_ok} already OK, {dismissed} unavailable"
         _append_job_log(job_id, summary)

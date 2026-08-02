@@ -352,17 +352,8 @@ def _is_genre_blacklisted(db: Session, genre_name: str) -> bool:
 
 def _get_genre_display_map(db: Session) -> dict:
     """Return a dict mapping alias genre names → master genre names."""
-    rows = (
-        db.query(Genre.name, Genre.master_genre_id)
-        .filter(Genre.master_genre_id.isnot(None))
-        .all()
-    )
-    if not rows:
-        return {}
-    master_ids = {r[1] for r in rows}
-    masters = db.query(Genre.id, Genre.name).filter(Genre.id.in_(master_ids)).all()
-    master_names = {m[0]: m[1] for m in masters}
-    return {r[0]: master_names[r[1]] for r in rows if r[1] in master_names}
+    from app.services.consolidations import genre_display_map
+    return genre_display_map(db)
 
 
 def _apply_facet_filters(query, *, version_type=None, artist=None,
@@ -989,6 +980,9 @@ def detect_orphans(db: Session = Depends(get_db)):
                 "files": all_files[:20],
             })
 
+    from app.services.review_cases import sync_orphan_review_cases
+    sync_orphan_review_cases(db, orphans)
+    db.commit()
     return {"orphans": orphans}
 
 
@@ -1603,6 +1597,8 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
     from app.user_identity import get_instance_user_id
     _uid = get_instance_user_id(db)
     _save_metadata_snapshot(db, item, "manual_edit", user_id=_uid)
+    from app.services.provenance_events import capture_manual_values, record_manual_changes
+    _prior_values = capture_manual_values(item)
 
     # Capture old entity IDs before changes — orphan cleanup after commit
     _old_artist_entity_id = item.artist_entity_id
@@ -1766,6 +1762,7 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
             _fp_flag(item, "field_verifications")
 
         item.last_edited_by = _uid
+        record_manual_changes(db, item, _manually_changed, _prior_values, _uid)
     item.revision += 1
     db.commit()
     db.refresh(item)
@@ -1816,11 +1813,8 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
                 logger.warning(f"NFO rewrite after manual edit failed for video {video_id}: {e}")
 
             # Rewrite Playarr XML
-            try:
-                from app.services.playarr_xml import write_playarr_xml
-                write_playarr_xml(item, db)
-            except Exception as e:
-                logger.warning(f"Playarr XML rewrite after manual edit failed for video {video_id}: {e}")
+            from app.services.playarr_xml import write_playarr_xml
+            write_playarr_xml(item, db)
 
     # Clean up orphaned entities/folders from old entity links
     if _old_artist_entity_id and _old_artist_entity_id != item.artist_entity_id:
@@ -2764,12 +2758,8 @@ def rename_to_expected(video_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         logger.warning(f"NFO rewrite failed (non-fatal): {e}")
 
-    # --- Write Playarr XML sidecar ---
-    try:
-        from app.services.playarr_xml import write_playarr_xml
-        write_playarr_xml(video, db)
-    except Exception as e:
-        logger.warning(f"Playarr XML write failed (non-fatal): {e}")
+    from app.services.playarr_xml import write_playarr_xml
+    write_playarr_xml(video, db)
 
     # --- Set processing flag ---
     state = dict(video.processing_state or {})
@@ -3156,11 +3146,8 @@ def bulk_rename_execute(db: Session = Depends(get_db)):
                 logger.warning(f"NFO rewrite failed for {v.artist} - {v.title}: {e}")
 
             # --- Step 4b: Write Playarr XML sidecar ---
-            try:
-                from app.services.playarr_xml import write_playarr_xml
-                write_playarr_xml(v, db)
-            except Exception as e:
-                logger.warning(f"Playarr XML write failed for {v.artist} - {v.title}: {e}")
+            from app.services.playarr_xml import write_playarr_xml
+            write_playarr_xml(v, db)
 
             # --- Step 5: Update processing state ---
             state = dict(v.processing_state or {})

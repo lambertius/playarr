@@ -366,6 +366,14 @@ def _execute_plan(plan: dict, db=None) -> int:
             job.pipeline_steps = steps
             flag_modified(job, "pipeline_steps")
 
+        # The database mutation and its portable sidecar intent are one
+        # transaction. Filesystem reconciliation happens only after commit.
+        video_item.revision = max(1, int(video_item.revision or 1))
+        from app.services.sidecar_outbox import schedule_sidecar_write
+        schedule_sidecar_write(
+            db, video_item, operation_id=plan.get("operation_id"),
+        )
+
         # Commit only when this compatibility entry point owns the session.
         if owns_session:
             db.commit()

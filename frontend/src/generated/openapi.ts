@@ -2433,6 +2433,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/metadata/genre-consolidations-v2": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Genre Consolidations V2 */
+        get: operations["get_genre_consolidations_v2_api_metadata_genre_consolidations_v2_get"];
+        put?: never;
+        /** Create Genre Consolidation V2 */
+        post: operations["create_genre_consolidation_v2_api_metadata_genre_consolidations_v2_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metadata/genre-consolidations-v2/{stable_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Genre Consolidation V2 */
+        put: operations["update_genre_consolidation_v2_api_metadata_genre_consolidations_v2__stable_id__put"];
+        post?: never;
+        /** Delete Genre Consolidation V2 */
+        delete: operations["delete_genre_consolidation_v2_api_metadata_genre_consolidations_v2__stable_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/metadata/genre-create-tile": {
         parameters: {
             query?: never;
@@ -2894,6 +2930,26 @@ export interface paths {
         get: operations["list_dismissed_api_new_videos_dismissed_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/new-videos/failed/{job_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore Failed Addition
+         * @description Put an auto-dismissed failed addition back into recommendation results.
+         */
+        post: operations["restore_failed_addition_api_new_videos_failed__job_id__restore_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4619,6 +4675,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/archive-items/page": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Archive Items Page
+         * @description Return an indexed, bounded archive page with server-owned filters.
+         */
+        get: operations["list_archive_items_page_api_settings_archive_items_page_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings/archive-restore": {
         parameters: {
             query?: never;
@@ -6164,6 +6240,10 @@ export interface components {
             mb_artist_id?: string | null;
             /** Provenance */
             provenance?: string | null;
+            /** Provenance Json */
+            provenance_json?: {
+                [key: string]: unknown;
+            } | null;
             /** Raw Name */
             raw_name: string;
         };
@@ -7449,6 +7529,31 @@ export interface components {
             alias_genre_ids: number[];
             /** Master Genre Id */
             master_genre_id: number;
+        };
+        /** GenreConsolidationCreate */
+        GenreConsolidationCreate: {
+            /** Mask Name */
+            mask_name: string;
+            /** Target Genres */
+            target_genres?: components["schemas"]["GenreConsolidationMemberInput"][];
+        };
+        /** GenreConsolidationMemberInput */
+        GenreConsolidationMemberInput: {
+            /** Provenance Json */
+            provenance_json?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Name */
+            raw_name: string;
+        };
+        /** GenreConsolidationUpdate */
+        GenreConsolidationUpdate: {
+            /** Expected Revision */
+            expected_revision: number;
+            /** Mask Name */
+            mask_name: string;
+            /** Target Genres */
+            target_genres?: components["schemas"]["GenreConsolidationMemberInput"][];
         };
         /** GenreCreateRequest */
         GenreCreateRequest: {
@@ -13921,6 +14026,127 @@ export interface operations {
             };
         };
     };
+    get_genre_consolidations_v2_api_metadata_genre_consolidations_v2_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    create_genre_consolidation_v2_api_metadata_genre_consolidations_v2_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenreConsolidationCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_genre_consolidation_v2_api_metadata_genre_consolidations_v2__stable_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                stable_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenreConsolidationUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_genre_consolidation_v2_api_metadata_genre_consolidations_v2__stable_id__delete: {
+        parameters: {
+            query: {
+                expected_revision: number;
+            };
+            header?: never;
+            path: {
+                stable_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_genre_tile_api_metadata_genre_create_tile_post: {
         parameters: {
             query?: never;
@@ -14543,6 +14769,37 @@ export interface operations {
             };
             header?: never;
             path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restore_failed_addition_api_new_videos_failed__job_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: number;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -16470,6 +16727,8 @@ export interface operations {
             query?: {
                 status?: string | null;
                 category?: string | null;
+                page?: number;
+                page_size?: number;
             };
             header?: never;
             path?: never;
@@ -17452,6 +17711,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ArchiveItemOut"][];
+                };
+            };
+        };
+    };
+    list_archive_items_page_api_settings_archive_items_page_get: {
+        parameters: {
+            query?: {
+                reason?: string | null;
+                search?: string | null;
+                page?: number;
+                page_size?: number;
+                refresh?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

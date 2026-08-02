@@ -28,6 +28,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.db_lock import _apply_lock
 from app.database import _install_write_serialization, _apply_sqlite_pragmas
+from app.services.transaction_telemetry import stats as transaction_stats
 
 Base = declarative_base()
 
@@ -136,6 +137,9 @@ def test_request_writes_serialise_against_write_queue(tmp_path):
         s.close()
     assert total == DAEMON_WRITES + REQ_THREADS * REQ_WRITES, f"lost writes: {total}"
     assert req_total == REQ_THREADS * REQ_WRITES, f"lost request writes: {req_total}"
+    telemetry = transaction_stats()
+    assert telemetry["count"] >= REQ_THREADS * REQ_WRITES
+    assert telemetry["p99_ms"] >= telemetry["p50_ms"] >= 0
 
     # Lock must be fully released at the end (no leak).
     got = _apply_lock.acquire(timeout=1)

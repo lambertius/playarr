@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Bot, Key, Save, Server, Sparkles, Zap, Brain, Fingerprint, TestTube2, Check, X, ChevronDown, ChevronRight, Info, FileText, RotateCcw, Activity, Image } from "lucide-react";
 import { Tooltip } from "@/components/Tooltip";
+import { SettingRowLayout } from "@/components/SettingRowLayout";
 import { useAISettings, useAIUpdateSettings, useAITestConnection, useModelCatalog, useRoutingPreview, useAIPrompts, useAIUpdatePrompts, useTestModelAvailability } from "@/hooks/queries";
 import { ErrorState, Skeleton } from "@/components/Feedback";
 import { useToast } from "@/components/Toast";
@@ -134,16 +135,7 @@ export function AISettingsPanel() {
   return (
     <div className="space-y-6">
       {/* Provider Selection */}
-      <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <Bot size={16} className="text-accent" />
-            <label className="text-sm font-medium text-text-primary">AI Provider</label>
-          </div>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            Select which AI service to use for metadata enrichment and plot generation.
-          </p>
-        </div>
+      <SettingRowLayout label="AI Provider" labelExtra={<Bot size={16} className="text-accent" />} description="Select which AI service to use for metadata enrichment and plot generation.">
         <div className="flex items-center gap-2">
           <select
             value={activeProvider}
@@ -170,7 +162,7 @@ export function AISettingsPanel() {
             </Tooltip>
           )}
         </div>
-      </div>
+      </SettingRowLayout>
 
       {/* Test result */}
       {testMutation.data && (
@@ -226,14 +218,7 @@ export function AISettingsPanel() {
 
       {activeProvider === "local" && (
         <>
-          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <Server size={16} className="text-text-muted" />
-                <label className="text-sm font-medium text-text-primary">Local LLM URL</label>
-              </div>
-              <p className="text-xs text-text-muted mt-0.5">OpenAI-compatible endpoint (Ollama, LM Studio, etc.)</p>
-            </div>
+          <SettingRowLayout label="Local LLM URL" labelExtra={<Server size={16} className="text-text-muted" />} description="OpenAI-compatible endpoint (Ollama, LM Studio, etc.)">
             <div className="flex items-center gap-2">
               <input
                 type="text"
@@ -248,7 +233,7 @@ export function AISettingsPanel() {
                 </button>
               )}
             </div>
-          </div>
+          </SettingRowLayout>
         </>
       )}
 
@@ -314,13 +299,7 @@ export function AISettingsPanel() {
             </div>
           )}
 
-          <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-            <div className="flex-1 min-w-0">
-              <label className="text-sm font-medium text-text-primary">Selection Mode</label>
-              <p className="text-xs text-text-muted mt-0.5">
-                Auto: routes tasks to optimal models by tier. Manual: use a single model for everything.
-              </p>
-            </div>
+          <SettingRowLayout label="Selection Mode" description="Auto routes tasks to optimal models by tier; Manual uses one model for everything.">
             <select
               value={selectionMode}
               onChange={(e) => save({ model_selection_mode: e.target.value })}
@@ -330,7 +309,7 @@ export function AISettingsPanel() {
               <option value="auto">Auto</option>
               <option value="manual">Manual</option>
             </select>
-          </div>
+          </SettingRowLayout>
 
           {/* ── Manual Mode ── */}
           {selectionMode === "manual" && modelOptions.length > 0 && (
@@ -394,13 +373,7 @@ export function AISettingsPanel() {
           {/* ── Auto Mode ── */}
           {selectionMode === "auto" && (
             <>
-              <div className="flex flex-col sm:flex-row sm:items-start gap-2 ml-4">
-                <div className="flex-1 min-w-0">
-                  <label className="text-sm font-medium text-text-primary">Tier Preference</label>
-                  <p className="text-xs text-text-muted mt-0.5">
-                    Shifts model tiers: cheapest uses faster models, accuracy uses stronger ones.
-                  </p>
-                </div>
+              <SettingRowLayout label="Tier Preference" description="Shifts model tiers: cheapest uses faster models, accuracy uses stronger ones." className="ml-4">
                 <select
                   value={draft.auto_tier_preference ?? settings.auto_tier_preference ?? "balanced"}
                   onChange={(e) => save({ auto_tier_preference: e.target.value })}
@@ -411,7 +384,7 @@ export function AISettingsPanel() {
                   <option value="balanced">Balanced</option>
                   <option value="accuracy">Prefer Accuracy</option>
                 </select>
-              </div>
+              </SettingRowLayout>
 
               {/* Routing Preview Table */}
               {routingPreview && routingPreview.entries.length > 0 && (
@@ -506,16 +479,7 @@ export function AISettingsPanel() {
 
       {/* ── Auto-Apply Threshold ── */}
       <div className={`border-t border-white/5 pt-4 ${!providerEnabled ? "opacity-50" : ""}`}>
-        <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <Zap size={16} className="text-green-400" />
-              <label className="text-sm font-medium text-text-primary">Auto-Apply Threshold</label>
-            </div>
-            <p className="text-xs text-text-muted mt-0.5">
-              Minimum AI confidence (0–1) to automatically apply field corrections.
-            </p>
-          </div>
+        <SettingRowLayout label="Auto-Apply Threshold" labelExtra={<Zap size={16} className="text-green-400" />} description="Minimum AI confidence (0–1) to automatically apply field corrections." disabled={!providerEnabled}>
           <div className="flex items-center gap-2">
             <input
               type="number"
@@ -537,22 +501,12 @@ export function AISettingsPanel() {
               </button>
             )}
           </div>
-        </div>
+        </SettingRowLayout>
       </div>
 
       {/* ── Thumbnail Ranking Mode ── */}
       <div className={`border-t border-white/5 pt-4 ${!providerEnabled ? "opacity-50" : ""}`}>
-        <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <Image size={16} className="text-purple-400" />
-              <label className="text-sm font-medium text-text-primary">Thumbnail Ranking</label>
-            </div>
-            <p className="text-xs text-text-muted mt-0.5">
-              How thumbnail candidates are scored during scene analysis.
-              AI-assisted mode uses vision to detect artist visibility, composition quality, and artifacts.
-            </p>
-          </div>
+        <SettingRowLayout label="Thumbnail Ranking" labelExtra={<Image size={16} className="text-purple-400" />} description="How thumbnail candidates are scored during scene analysis. AI-assisted mode uses vision to assess visibility, composition, and artifacts." disabled={!providerEnabled}>
           <div className="flex items-center gap-2">
             <select
               value={draft.scene_analysis_mode ?? settings.scene_analysis_mode}
@@ -568,24 +522,12 @@ export function AISettingsPanel() {
               <option value="ai_assisted">AI-Assisted</option>
             </select>
           </div>
-        </div>
+        </SettingRowLayout>
       </div>
 
       {/* ── AcoustID / Fingerprinting ── */}
       <div className="border-t border-white/5 pt-4">
-        <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <Fingerprint size={16} className="text-cyan-400" />
-              <label className="text-sm font-medium text-text-primary">AcoustID API Key</label>
-            </div>
-            <p className="text-xs text-text-muted mt-0.5">
-              Optional. Enables audio fingerprint identification via Chromaprint/AcoustID.{" "}
-              {settings.acoustid_api_key_set && (
-                <span className="text-green-400">Key configured</span>
-              )}
-            </p>
-          </div>
+        <SettingRowLayout label="AcoustID API Key" labelExtra={<Fingerprint size={16} className="text-cyan-400" />} description={<>Optional. Enables audio fingerprint identification via Chromaprint/AcoustID. {settings.acoustid_api_key_set && <span className="text-green-400">Key configured</span>}</>}>
           <div className="flex items-center gap-2">
             <input
               type="password"
@@ -607,7 +549,7 @@ export function AISettingsPanel() {
               </button>
             )}
           </div>
-        </div>
+        </SettingRowLayout>
       </div>
 
       {/* ── AI Prompt Templates ── */}
@@ -634,17 +576,7 @@ function APIKeyRow({
   isPending: boolean;
 }) {
   return (
-    <div className="flex flex-col sm:flex-row sm:items-start gap-2">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <Key size={16} className="text-text-muted" />
-          <label className="text-sm font-medium text-text-primary">{label}</label>
-        </div>
-        <p className="text-xs text-text-muted mt-0.5">
-          {isSet ? "Key is configured" : "Not configured"}{" "}
-          <span className={`inline-block w-2 h-2 rounded-full ${isSet ? "bg-green-500" : "bg-red-500"}`} />
-        </p>
-      </div>
+    <SettingRowLayout label={label} labelExtra={<Key size={16} className="text-text-muted" />} description={<>{isSet ? "Key is configured" : "Not configured"} <span className={`inline-block w-2 h-2 rounded-full ${isSet ? "bg-green-500" : "bg-red-500"}`} /></>}>
       <div className="flex items-center gap-2">
         <input
           type="password"
@@ -659,7 +591,7 @@ function APIKeyRow({
           </button>
         )}
       </div>
-    </div>
+    </SettingRowLayout>
   );
 }
 
@@ -679,11 +611,7 @@ function ModelSelect({
   isPending: boolean;
 }) {
   return (
-    <div className="flex flex-col sm:flex-row sm:items-start gap-2 ml-4">
-      <div className="flex-1 min-w-0">
-        <label className="text-sm font-medium text-text-primary">{label}</label>
-        <p className="text-xs text-text-muted mt-0.5">{description}</p>
-      </div>
+    <SettingRowLayout label={label} description={description} className="ml-4">
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -694,7 +622,7 @@ function ModelSelect({
           <option key={o.value} value={o.value}>{o.label}</option>
         ))}
       </select>
-    </div>
+    </SettingRowLayout>
   );
 }
 

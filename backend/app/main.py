@@ -21,6 +21,7 @@ from app.version import APP_VERSION
 from app.routers import library, jobs, playback, settings as settings_router
 from app.routers import preferences as preferences_router
 from app.routers import metadata as metadata_router
+from app.routers import genre_consolidations as genre_consolidations_router
 from app.routers import resolve as resolve_router
 from app.routers import ai as ai_router
 from app.routers import artwork as artwork_router
@@ -37,7 +38,10 @@ from app.new_videos import router as new_videos_router
 def _apply_schema_upgrades(eng):
     """Add columns that don't exist yet (SQLite create_all won't alter existing tables)."""
     from sqlalchemy import text, inspect
-    from app.services.operation_schema import apply_operation_schema_repairs
+    from app.services.operation_schema import (
+        apply_consolidation_schema_repairs,
+        apply_operation_schema_repairs,
+    )
     insp = inspect(eng)
     if "processing_jobs" not in insp.get_table_names():
         return  # Fresh install — create_all already handles it
@@ -71,6 +75,7 @@ def _apply_schema_upgrades(eng):
         ))
 
     apply_operation_schema_repairs(eng)
+    apply_consolidation_schema_repairs(eng)
     if "video_items" in insp.get_table_names():
         vi_cols = {c["name"] for c in insp.get_columns("video_items")}
         with eng.begin() as conn:
@@ -837,7 +842,7 @@ async def _finalizing_watchdog():
             # If deferred coordinators or the write queue are active, the
             # system is genuinely busy — skip this watchdog cycle.
             try:
-                from app.pipeline_url.deferred import active_coordinator_count
+                from app.pipeline.deferred import active_coordinator_count
                 from app.pipeline_url.write_queue import pending as wq_pending
                 n_coords = active_coordinator_count()
                 n_pending = wq_pending()
@@ -1421,6 +1426,7 @@ app.include_router(playback.router)
 app.include_router(settings_router.router)
 app.include_router(preferences_router.router)
 app.include_router(metadata_router.router)
+app.include_router(genre_consolidations_router.router)
 app.include_router(resolve_router.resolve_router)
 app.include_router(resolve_router.review_router)
 app.include_router(resolve_router.search_router)

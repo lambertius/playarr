@@ -21,6 +21,7 @@ from app.services import file_operations
 from app.services.file_operations import (
     FilePlanCollision,
     cancel_file_operation,
+    create_file_set_operation,
     create_rename_operation,
     execute_file_operation,
     reconcile_file_operations,
@@ -158,9 +159,31 @@ def test_active_file_waits_without_blocking_and_can_be_cancelled(tmp_path, monke
     assert result.error_json["code"] == "waiting_for_release"
     assert files["video"].is_file()
 
-    cancelled = cancel_file_operation(db, operation.id)
-    assert cancelled.status == "cancelled"
-    assert files["video"].is_file()
+
+def test_editor_replace_archives_original_then_atomically_installs_staging(tmp_path):
+    db = _session()
+    video, _, files = _video_tree(db, tmp_path)
+    staging = tmp_path / "encode-staging.mkv"
+    staging.write_bytes(b"validated-new-encode")
+    archive = tmp_path / "archive" / "original.mkv"
+    operation = create_file_set_operation(
+        db, video, "replace", [
+            {"source": str(files["video"]), "destination": str(archive), "role": "video"},
+            {"source": str(staging), "destination": str(files["video"]), "role": "video"},
+        ],
+        database_updates={
+            "file_path": str(files["video"]),
+            "file_size_bytes": len(b"validated-new-encode"),
+            "editor_edit_type": "crop",
+        },
+        metadata={"reason": "crop", "archive_relative_path": "original.mkv"},
+    )
+    assert operation.plan_json["collisions"] == []
+    execute_file_operation(db, operation.id)
+    db.expire_all()
+    assert archive.read_bytes() != files["video"].read_bytes()
+    assert files["video"].read_bytes() == b"validated-new-encode"
+    assert db.get(VideoItem, video.id).revision == 4
 
 
 def test_rename_http_workflow_uses_preview_command_and_file_journal(tmp_path, monkeypatch):

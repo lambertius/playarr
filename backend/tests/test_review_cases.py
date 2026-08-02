@@ -11,9 +11,10 @@ from app.routers.resolve import (
     ReviewCasePlanRequest,
     commit_review_case_plan,
     dismiss_review_case,
+    list_review_cases,
     stage_review_case_plan,
 )
-from app.services.review_cases import sync_review_cases
+from app.services.review_cases import sync_orphan_review_cases, sync_review_cases
 
 
 def _session():
@@ -119,3 +120,79 @@ def test_staged_reclassification_commits_as_one_case_revision():
     assert committed["case"]["revision"] == 2
     assert db.get(VideoItem, videos[0].id).version_type == "live"
     assert all(video.review_status == "none" for video in db.query(VideoItem).all())
+
+
+def test_case_listing_is_sql_paginated():
+    db = _session()
+    for index in range(25):
+        db.add(VideoItem(
+            artist=f"Artist {index}", title="Review", file_path=f"C:/library/{index}.mkv",
+            review_status="needs_human_review", review_category="low_certainty_import",
+        ))
+    db.commit()
+
+    page = list_review_cases(status="open", category=None, page=2, page_size=10, db=db)
+    assert page["total"] == 25
+    assert page["page"] == 2
+    assert page["total_pages"] == 3
+    assert len(page["items"]) == 10
+
+
+def test_plan_previews_rescrape_normalise_and_recoverable_delete(tmp_path):
+    db = _session()
+    source = tmp_path / "video.mkv"
+    sidecar = tmp_path / "video.playarr.xml"
+    source.write_bytes(b"video")
+    sidecar.write_text("<playarr/>", encoding="utf-8")
+    video = VideoItem(
+        artist="Plan", title="Actions", file_path=str(source), folder_path=str(tmp_path),
+        review_status="needs_human_review", review_category="duplicate",
+    )
+    db.add(video); db.commit()
+    case = sync_review_cases(db)[0]; db.commit()
+
+    staged = stage_review_case_plan(
+        case.stable_id,
+        ReviewCasePlanRequest(expected_revision=case.revision, actions=[
+            {"type": "rescrape", "video_stable_id": video.stable_id},
+            {"type": "normalise", "video_stable_id": video.stable_id},
+            {"type": "delete", "video_stable_id": video.stable_id},
+            {"type": "keep"},
+        ]),
+        db,
+    )
+    assert {job["job_type"] for job in staged["consequences"]["jobs"]} == {"metadata_scrape", "normalize"}
+    assert staged["consequences"]["files"][0]["recoverable"] is True
+    assert set(staged["consequences"]["files"][0]["paths"]) == {str(source), str(sidecar)}
+
+
+def test_all_structured_review_categories_do_not_parse_reason_text():
+    db = _session()
+    categories = (
+        "duplicate", "version_ambiguity", "low_certainty_import",
+        "requested_step_incomplete", "normalization_failure",
+        "rename", "canonical_link_mismatch",
+    )
+    for index, category in enumerate(categories):
+        db.add(VideoItem(
+            artist=f"Artist {index}", title=f"Title {index}",
+            review_status="needs_human_review", review_category=category,
+            review_reason="identical unstructured text",
+        ))
+    db.commit()
+    cases = sync_review_cases(db)
+    assert {case.category for case in cases} == set(categories)
+    assert all(case.trigger_code == f"video_flag:{case.category}" for case in cases)
+
+
+def test_orphan_files_materialize_without_a_video_row():
+    db = _session()
+    cases = sync_orphan_review_cases(db, [{
+        "folder_path": "C:/library/untracked", "size_bytes": 42,
+        "file_count": 1, "files": ["orphan.mkv"],
+    }])
+    db.commit()
+    assert len(cases) == 1
+    assert cases[0].category == "orphan_file"
+    assert cases[0].items == []
+    assert cases[0].evidence_json["trigger_code"] == "filesystem_scan:unrepresented_media"

@@ -1120,12 +1120,10 @@ def scan_library_for_letterboxing(
             qs.letterbox_evidence_hash = crop_evidence_hash(info, video.file_checksum)
             db.commit()
 
-            # Persist to sidecar XML so future scans with fresh DB can skip
-            try:
-                from app.services.playarr_xml import write_playarr_xml
-                write_playarr_xml(video, db)
-            except Exception:
-                pass
+            # Persist through the durable outbox so future rebuilds retain it.
+            from app.services.playarr_xml import write_playarr_xml
+            write_playarr_xml(video, db)
+            db.commit()
 
             if info["detected"] or info["review_suggested"]:
                 results.append({

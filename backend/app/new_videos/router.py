@@ -4,8 +4,6 @@ New Videos API Router — Discovery feed, cart, dismissals, feedback, and settin
 All endpoints are under /api/new-videos/*.
 """
 import logging
-import threading
-from datetime import datetime, timezone
 from typing import Optional, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +16,7 @@ from app.new_videos.models import (
     RecommendationFeedback,
 )
 from app.new_videos import recommendation_service, feedback_service
+from app.models import JobStatus, ProcessingJob
 
 logger = logging.getLogger(__name__)
 
@@ -30,65 +29,41 @@ router = APIRouter(prefix="/api/new-videos", tags=["New Videos"])
 # up a request worker. Instead we run it in a background thread and expose a
 # ``refreshing`` flag (on the feed + a status endpoint) so the UI can poll.
 
-_refresh_lock = threading.Lock()
-_refresh_info: dict = {
-    "status": "idle",       # idle | running | done | error
-    "started_at": None,
-    "finished_at": None,
-    "refreshed": {},
-    "error": None,
-}
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _is_refreshing() -> bool:
-    with _refresh_lock:
-        return _refresh_info["status"] == "running"
-
-
-def _run_refresh_bg(categories: Optional[List[str]], force: bool) -> None:
-    """Regenerate the feed on a background thread using a guarded session."""
-    from app.database import RequestSessionLocal
-    db = RequestSessionLocal()
-    try:
-        if categories:
-            results = {
-                cat: recommendation_service.refresh_category(db, cat, force=force)
-                for cat in categories
-            }
-        else:
-            results = recommendation_service.refresh_all_categories(db, force=force)
-        with _refresh_lock:
-            _refresh_info.update(status="done", finished_at=_now_iso(),
-                                 refreshed=results, error=None)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("[new-videos] background refresh failed")
-        with _refresh_lock:
-            _refresh_info.update(status="error", finished_at=_now_iso(),
-                                 error=str(exc))
-    finally:
-        db.close()
-
-
-def _start_background_refresh(categories: Optional[List[str]], force: bool) -> bool:
-    """Start a background refresh unless one is already running.
-
-    Returns True if a new refresh was started, False if one was in flight.
-    """
-    with _refresh_lock:
-        if _refresh_info["status"] == "running":
-            return False
-        _refresh_info.update(status="running", started_at=_now_iso(),
-                             finished_at=None, error=None)
-    t = threading.Thread(
-        target=_run_refresh_bg, args=(categories, force),
-        daemon=True, name="nv-refresh",
+def _active_refresh(db: Session) -> ProcessingJob | None:
+    return (
+        db.query(ProcessingJob)
+        .filter(
+            ProcessingJob.job_type == "new_videos_refresh",
+            ProcessingJob.status.in_((JobStatus.queued, JobStatus.analyzing)),
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .first()
     )
-    t.start()
-    return True
+
+
+def _start_refresh(
+    db: Session, categories: Optional[List[str]], force: bool,
+) -> tuple[ProcessingJob, bool]:
+    active = _active_refresh(db)
+    if active is not None:
+        return active, False
+    job = ProcessingJob(
+        job_type="new_videos_refresh",
+        status=JobStatus.queued,
+        display_name="Build fresh New Videos list",
+        action_label="New Videos fresh list",
+        input_params={"categories": categories, "force": force},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    from app.new_videos.tasks import refresh_recommendations
+    from app.worker import dispatch_task
+    dispatch_task(
+        refresh_recommendations, job_id=job.id,
+        categories=categories, force=force,
+    )
+    return job, True
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
@@ -158,15 +133,19 @@ def get_feed(db: Session = Depends(get_db)):
         len(cat_data["videos"]) > 0
         for cat_data in feed["categories"].values()
     )
-    if not has_any and not _is_refreshing():
-        _start_background_refresh(None, True)
+    active = _active_refresh(db)
+    if not has_any and active is None:
+        active, _ = _start_refresh(db, None, True)
 
-    feed["refreshing"] = _is_refreshing()
+    feed["refreshing"] = active is not None
+    feed["refresh_job_id"] = active.id if active else None
+    from app.new_videos.failed_additions import list_failed_additions
+    feed["failed_additions"] = list_failed_additions(db)
     return feed
 
 
 @router.post("/refresh")
-def refresh_feed(req: RefreshRequest):
+def refresh_feed(req: RefreshRequest, db: Session = Depends(get_db)):
     """Regenerate the discovery feed (all or selected categories).
 
     Generation runs on a background thread (it performs many slow yt-dlp
@@ -178,20 +157,36 @@ def refresh_feed(req: RefreshRequest):
         if invalid:
             raise HTTPException(400, f"Unknown categories: {invalid}")
 
-    started = _start_background_refresh(req.categories, req.force)
+    job, started = _start_refresh(db, req.categories, req.force)
     return {
         "status": "started" if started else "already_running",
         "refreshing": True,
+        "job_id": job.id,
+        "operation_id": job.operation_id,
     }
 
 
 @router.get("/refresh/status")
-def refresh_status():
+def refresh_status(db: Session = Depends(get_db)):
     """Report the state of the background feed refresh."""
-    with _refresh_lock:
-        info = dict(_refresh_info)
-    info["refreshing"] = info["status"] == "running"
-    return info
+    job = (
+        db.query(ProcessingJob)
+        .filter(ProcessingJob.job_type == "new_videos_refresh")
+        .order_by(ProcessingJob.created_at.desc())
+        .first()
+    )
+    if job is None:
+        return {"status": "idle", "refreshing": False, "job_id": None}
+    return {
+        "status": job.status.value,
+        "refreshing": job.status in (JobStatus.queued, JobStatus.analyzing),
+        "job_id": job.id,
+        "operation_id": job.operation_id,
+        "started_at": job.started_at,
+        "finished_at": job.completed_at,
+        "refreshed": (job.input_params or {}).get("results", {}),
+        "error": job.error_message,
+    }
 
 
 # ── Cart endpoints ────────────────────────────────────────────────────────────
@@ -317,6 +312,16 @@ def import_all_cart(req: CartImportAllRequest = CartImportAllRequest(), db: Sess
             input_url=item.url,
             display_name=f"{item.artist} \u2013 {item.title} \u203a New Videos Import" if item.artist and item.title else item.url,
             action_label="New Videos import",
+            input_params={
+                "suggested_video_id": item.suggested_video_id,
+                "provider": item.provider,
+                "provider_video_id": item.provider_video_id,
+                "normalize": req.normalize,
+                "scrape": req.scrape,
+                "scrape_musicbrainz": req.scrape_musicbrainz,
+                "ai_auto_analyse": req.ai_auto_analyse,
+                "ai_auto_fallback": req.ai_auto_fallback,
+            },
         )
         db.add(job)
         db.flush()
@@ -441,6 +446,18 @@ def add_video(req: CartAddRequest, db: Session = Depends(get_db)):
             "new_videos.add", stable_id, req.idempotency_key,
         ), priority=MutationPriority.INTERACTIVE,
     ))
+
+
+@router.post("/failed/{job_id}/restore")
+def restore_failed_addition(job_id: int, db: Session = Depends(get_db)):
+    """Put an auto-dismissed failed addition back into recommendation results."""
+    from app.new_videos.failed_additions import restore_failed_suggestion
+    try:
+        return restore_failed_suggestion(db, job_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 # ── Feedback endpoint ────────────────────────────────────────────────────────

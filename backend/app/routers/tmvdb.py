@@ -11,6 +11,7 @@ Handles:
 import logging
 import hashlib
 import json
+from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
 from typing import Optional
 
@@ -52,6 +53,8 @@ def _pull_candidates(video, result, db: Session) -> dict:
     locked = set(video.locked_fields or [])
     candidates = []
     conflicts = []
+    from app.services.provenance_events import record_field_event
+    retrieved_at = datetime.now(timezone.utc)
     for field, proposed in (result.fields or {}).items():
         current = getattr(video, field, None)
         conflict = current not in (None, "") and current != proposed
@@ -66,6 +69,13 @@ def _pull_candidates(video, result, db: Session) -> dict:
             "auto_applicable": current in (None, "") and field not in locked,
         }
         candidates.append(candidate)
+        record_field_event(
+            db, video, field, event_type="retrieved_candidate", actor_kind="provider",
+            provider="tmvdb", source_url=getattr(result, "source_url", None),
+            remote_id=str(getattr(result, "remote_id", "") or "") or None,
+            prior_value=current, resulting_value=proposed,
+            transformation="tmvdb_pull_candidate", retrieved_at=retrieved_at,
+        )
         if conflict:
             conflicts.append(candidate)
     review_case_id = None
@@ -103,6 +113,8 @@ def _pull_candidates(video, result, db: Session) -> dict:
             case.resolved_at = None
         db.commit()
         review_case_id = case.stable_id
+    elif candidates:
+        db.commit()
     return {
         "status": "found",
         "fields": result.fields,
