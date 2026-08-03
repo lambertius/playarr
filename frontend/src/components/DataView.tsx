@@ -1,9 +1,10 @@
 import { useMemo } from "react";
 import type { ReactNode } from "react";
-import { LayoutGrid, List, ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { getPref, setPref } from "@/lib/preferences";
 import type { ViewMode } from "@/types";
+import { ViewToggle } from "@/components/ViewToggle";
 
 export interface DataViewColumn<T> {
   id: string;
@@ -28,15 +29,22 @@ interface DataViewProps<T> {
   rowKey: (row: T) => string | number;
   columns: DataViewColumn<T>[];
   renderCard: (row: T) => ReactNode;
+  /** Optional grouped/specialised grid renderer. List view remains shared. */
+  renderGrid?: (rows: T[]) => ReactNode;
+  /** Set false when a grouped grid should remain intact rather than split across pages. */
+  paginateGrid?: boolean;
   preferenceKey: string;
   defaultSort: string;
   defaultDirection?: "asc" | "desc";
   empty: ReactNode;
+  /** Places navigation controls inside the page's canonical, always-visible filter tile. */
+  renderFilterTile?: (navigationControls: ReactNode) => ReactNode;
 }
 
 /** Shared grid/list query, sorting, paging and alignment primitive. */
 export function DataView<T>({
   rows, rowKey, columns, renderCard, preferenceKey, defaultSort, defaultDirection = "asc", empty,
+  renderFilterTile, renderGrid, paginateGrid = true,
 }: DataViewProps<T>) {
   const [params, setParams] = useSearchParams();
   const prefs = getPref<PanelPreferences>("panels", {});
@@ -70,7 +78,8 @@ export function DataView<T>({
   }, [columns, direction, rows, sort]);
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
   const page = Math.min(requestedPage, totalPages);
-  const visible = sorted.slice((page - 1) * pageSize, page * pageSize);
+  const pagingEnabled = view !== "grid" || paginateGrid;
+  const visible = pagingEnabled ? sorted.slice((page - 1) * pageSize, page * pageSize) : sorted;
   const template = columns.map((column) => column.width ?? "minmax(8rem,1fr)").join(" ");
 
   const changeView = (next: ViewMode) => {
@@ -90,21 +99,25 @@ export function DataView<T>({
     update({ page_size: String(size) });
   };
 
-  if (!rows.length) return <>{empty}</>;
-  return <div>
-    <div className="flex justify-end items-center gap-2 mb-3">
-      <label className="text-xs text-text-muted flex items-center gap-2">Page size
+  const navigationControls = (
+    <div className="ml-auto flex items-end gap-2">
+      {pagingEnabled && <label className="flex flex-col gap-1 text-xs text-text-muted">Page size
         <select value={pageSize} onChange={(event) => changePageSize(Number(event.target.value))} className="input-field py-1 text-xs w-auto">
           {[25, 50, 100, 200].map((size) => <option key={size} value={size}>{size}</option>)}
         </select>
-      </label>
-      <div className="flex border border-surface-border rounded-lg overflow-hidden">
-        <button onClick={() => changeView("grid")} className={`p-1.5 ${view === "grid" ? "bg-accent/10 text-accent" : "text-text-muted"}`} aria-label="Grid view"><LayoutGrid size={16} /></button>
-        <button onClick={() => changeView("list")} className={`p-1.5 ${view === "list" ? "bg-accent/10 text-accent" : "text-text-muted"}`} aria-label="List view"><List size={16} /></button>
-      </div>
+      </label>}
+      <ViewToggle value={view} onChange={changeView} label={`${preferenceKey} layout`} />
     </div>
+  );
+  const controlSurface = renderFilterTile
+    ? renderFilterTile(navigationControls)
+    : <div className="flex justify-end items-center gap-2 mb-3">{navigationControls}</div>;
+
+  if (!rows.length) return <>{controlSurface}{empty}</>;
+  return <div>
+    {controlSurface}
     {view === "grid" ? (
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">{visible.map((row) => <div key={rowKey(row)}>{renderCard(row)}</div>)}</div>
+      renderGrid ? renderGrid(visible) : <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">{visible.map((row) => <div key={rowKey(row)}>{renderCard(row)}</div>)}</div>
     ) : (
       <div className="card p-0 overflow-x-auto">
         <div className="grid min-w-[560px] gap-3 px-4 py-2 border-b border-surface-border text-xs text-text-muted font-medium" style={{ gridTemplateColumns: template }}>
@@ -119,7 +132,7 @@ export function DataView<T>({
         </div>)}
       </div>
     )}
-    {totalPages > 1 && <div className="flex justify-center items-center gap-3 mt-4 text-sm text-text-muted">
+    {pagingEnabled && totalPages > 1 && <div className="flex justify-center items-center gap-3 mt-4 text-sm text-text-muted">
       <button className="btn-ghost btn-sm" disabled={page <= 1} onClick={() => update({ page: String(page - 1) })}><ChevronLeft size={15} /> Previous</button>
       <span>Page {page} of {totalPages}</span>
       <button className="btn-ghost btn-sm" disabled={page >= totalPages} onClick={() => update({ page: String(page + 1) })}>Next <ChevronRight size={15} /></button>

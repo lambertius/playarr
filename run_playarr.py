@@ -162,23 +162,37 @@ def ensure_first_run_setup():
     logger.info(f"Logs: {dirs.log_dir}")
 
 
-def _read_db_bool(key: str, default: str = "false") -> bool:
-    """Read a boolean setting from the SQLite DB (best-effort)."""
+def _read_db_setting(key: str, default: str) -> str:
+    """Read an instance setting before the application server is running."""
     try:
         import sqlite3
         from app.runtime_dirs import get_runtime_dirs
         db_path = str(get_runtime_dirs().db_path)
         if not os.path.exists(db_path):
-            return default == "true"
+            return default
         conn = sqlite3.connect(db_path, timeout=2)
         cur = conn.execute(
             "SELECT value FROM app_settings WHERE key = ? AND user_id IS NULL", (key,)
         )
         row = cur.fetchone()
         conn.close()
-        return (row[0] if row else default).lower() == "true"
+        return str(row[0]) if row else default
     except Exception:
-        return default == "true"
+        return default
+
+
+def _read_db_bool(key: str, default: str = "false") -> bool:
+    return _read_db_setting(key, default).lower() == "true"
+
+
+def _default_port() -> int:
+    """Environment overrides DB; DB overrides the packaged default."""
+    raw = os.environ.get("PLAYARR_PORT") or _read_db_setting("server.port", "6969")
+    try:
+        port = int(raw)
+        return port if 1 <= port <= 65535 else 6969
+    except (TypeError, ValueError):
+        return 6969
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +382,8 @@ def main():
     )
     parser.add_argument("--delay", type=int, default=0,
                         help="Seconds to wait before starting (for Windows startup)")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("PLAYARR_PORT", "6969")),
-                        help="Port to listen on (default: 6969)")
+    parser.add_argument("--port", type=int, default=_default_port(),
+                        help="Port to listen on (default: saved Settings value, then 6969)")
     parser.add_argument("--host", type=str, default=os.environ.get("PLAYARR_HOST", "0.0.0.0"),
                         help="Host to bind to (default: 0.0.0.0)")
     parser.add_argument("--headless", action="store_true",

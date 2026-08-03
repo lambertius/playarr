@@ -13,6 +13,8 @@ interface Props {
 }
 
 export interface RescanOptions {
+  artist_override: string;
+  title_override: string;
   scrape_wikipedia: boolean;
   scrape_musicbrainz: boolean;
   scrape_tmvdb: boolean;
@@ -21,6 +23,7 @@ export interface RescanOptions {
   hint_cover: boolean;
   hint_live: boolean;
   hint_alternate: boolean;
+  hint_uncensored: boolean;
   normalize: boolean;
   find_source_video: boolean;
   from_disk: boolean;
@@ -34,6 +37,8 @@ function getBoolSetting(settings: { key: string; value: string }[] | undefined, 
 }
 
 export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending }: Props) {
+  const [artistOverride, setArtistOverride] = useState("");
+  const [titleOverride, setTitleOverride] = useState("");
   const [scrapeWiki, setScrapeWiki] = useState(true);
   const [scrapeMusicbrainz, setScrapeMusicbrainz] = useState(true);
   const [scrapeTmvdb, setScrapeTmvdb] = useState(false);
@@ -42,6 +47,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
   const [isCover, setIsCover] = useState(false);
   const [isLive, setIsLive] = useState(false);
   const [isAlternate, setIsAlternate] = useState(false);
+  const [isUncensored, setIsUncensored] = useState(false);
   const [normalize, setNormalize] = useState(true);
   const [findSourceVideo, setFindSourceVideo] = useState(false);
   const [fromDisk, setFromDisk] = useState(false);
@@ -65,6 +71,8 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
 
   const handleConfirm = () => {
     onConfirm({
+      artist_override: count === 1 ? artistOverride.trim() : "",
+      title_override: count === 1 ? titleOverride.trim() : "",
       scrape_wikipedia: fromDisk ? false : scrapeWiki,
       scrape_musicbrainz: fromDisk ? false : scrapeMusicbrainz,
       scrape_tmvdb: fromDisk ? false : scrapeTmvdb,
@@ -73,6 +81,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
       hint_cover: isCover,
       hint_live: isLive,
       hint_alternate: isAlternate,
+      hint_uncensored: isUncensored,
       normalize,
       find_source_video: fromDisk ? false : findSourceVideo,
       from_disk: fromDisk,
@@ -106,6 +115,12 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
         </p>
 
         <div className="space-y-4">
+          {count === 1 && (
+            <div className="grid grid-cols-2 gap-3 rounded-lg border border-surface-border/50 p-3">
+              <label className="text-xs text-text-muted">Artist override<input className="input-field mt-1 w-full text-sm" value={artistOverride} onChange={(event) => setArtistOverride(event.target.value)} placeholder="Auto-detect" /></label>
+              <label className="text-xs text-text-muted">Title override<input className="input-field mt-1 w-full text-sm" value={titleOverride} onChange={(event) => setTitleOverride(event.target.value)} placeholder="Auto-detect" /></label>
+            </div>
+          )}
           {/* Rescan from Disk */}
           <div className="space-y-2 rounded-lg border border-accent/30 p-3">
             <div className="flex items-center gap-1.5">
@@ -145,7 +160,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
               <input
                 type="checkbox"
                 checked={isCover}
-                onChange={(e) => { setIsCover(e.target.checked); if (e.target.checked) { setIsLive(false); setIsAlternate(false); } }}
+                onChange={(e) => { setIsCover(e.target.checked); if (e.target.checked) { setIsLive(false); setIsAlternate(false); setIsUncensored(false); } }}
                 className="h-4 w-4 rounded border-surface-border bg-surface text-accent focus:ring-accent"
               />
               This is a cover version
@@ -154,7 +169,7 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
               <input
                 type="checkbox"
                 checked={isLive}
-                onChange={(e) => { setIsLive(e.target.checked); if (e.target.checked) { setIsCover(false); setIsAlternate(false); } }}
+                onChange={(e) => { setIsLive(e.target.checked); if (e.target.checked) { setIsCover(false); setIsAlternate(false); setIsUncensored(false); } }}
                 className="h-4 w-4 rounded border-surface-border bg-surface text-accent focus:ring-accent"
               />
               This is a live performance
@@ -163,10 +178,14 @@ export function RescanOptionsDialog({ open, count, onClose, onConfirm, isPending
               <input
                 type="checkbox"
                 checked={isAlternate}
-                onChange={(e) => { setIsAlternate(e.target.checked); if (e.target.checked) { setIsCover(false); setIsLive(false); } }}
+                onChange={(e) => { setIsAlternate(e.target.checked); if (e.target.checked) { setIsCover(false); setIsLive(false); setIsUncensored(false); } }}
                 className="h-4 w-4 rounded border-surface-border bg-surface text-accent focus:ring-accent"
               />
               This is an alternate version
+            </label>
+            <label className="flex items-center gap-3 text-sm text-text-secondary cursor-pointer">
+              <input type="checkbox" checked={isUncensored} onChange={(e) => { setIsUncensored(e.target.checked); if (e.target.checked) { setIsCover(false); setIsLive(false); setIsAlternate(false); } }} className="h-4 w-4 rounded border-surface-border bg-surface text-accent focus:ring-accent" />
+              This is an uncensored version
             </label>
           </div>
 

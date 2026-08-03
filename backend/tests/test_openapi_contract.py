@@ -77,5 +77,8 @@ def test_kodi_addon_and_export_routes_are_retired():
     }
     assert not violations, violations
     assert not (root / "backend/app/metadata/exporters/kodi.py").exists()
+    assert not (root / "backend/app/services/theatre_backdrop.py").exists()
     assert not (root / "kodi/plugin.video.playarr-1.9.18.zip").exists()
+    assert "/api/playback/raw/{video_id}" not in paths
+    assert "/api/playback/theatre/{video_id}" not in paths
     assert (root / "docs/KODI_REMOVAL.md").is_file()

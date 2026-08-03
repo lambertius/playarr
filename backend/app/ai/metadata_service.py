@@ -880,9 +880,12 @@ def apply_ai_fields(
     else:
         ai_result.status = AIResultStatus.partial
 
-    # Optionally rename files
+    video.revision = int(video.revision or 1) + 1
+
+    # Optionally queue the journalled rename in this same transaction.
+    rename_queued = False
     if rename_files:
-        _rename_files_for_metadata(db, video)
+        rename_queued = _rename_files_for_metadata(db, video)
 
     # Re-write NFO to reflect applied changes
     if video.folder_path:
@@ -910,6 +913,9 @@ def apply_ai_fields(
         _set_flag(db, video, "xml_exported", method="ai_apply")
 
     db.commit()
+    if rename_queued:
+        from app.services.rename_operations import notify_expected_rename
+        notify_expected_rename()
     return video
 
 
@@ -1256,39 +1262,18 @@ def _generate_source_proposals_from_ids(
     return proposals
 
 
-def _rename_files_for_metadata(db: Session, video: VideoItem):
-    """Rename video folder/file based on updated metadata (if enabled in settings)."""
+def _rename_files_for_metadata(db: Session, video: VideoItem) -> bool:
+    """Queue a durable rename in the caller's metadata transaction."""
     try:
         if not video.folder_path or not os.path.isdir(video.folder_path):
-            return
+            return False
 
-        from app.services.file_organizer import build_folder_name
-        from app.config import get_settings
-        settings = get_settings()
-
-        new_folder_name = build_folder_name(
-            video.artist, video.title, video.resolution_label or "1080p",
-        )
-        old_folder = video.folder_path
-        new_folder = os.path.join(os.path.dirname(old_folder), new_folder_name)
-
-        if old_folder == new_folder:
-            return
-
-        if os.path.exists(new_folder):
-            logger.warning(f"Target folder already exists: {new_folder}")
-            return
-
-        import shutil
-        shutil.move(old_folder, new_folder)
-        video.folder_path = new_folder
-
-        # Update file paths
-        if video.file_path:
-            old_filename = os.path.basename(video.file_path)
-            video.file_path = os.path.join(new_folder, old_filename)
-
-        logger.info(f"Renamed: {old_folder} → {new_folder}")
+        from app.services.rename_operations import enqueue_expected_rename
+        enqueue_expected_rename(db, video)
+        return True
+    except ValueError:
+        return False
     except Exception as e:
-        logger.error(f"File rename failed: {e}")
+        logger.error(f"File rename could not be queued: {e}")
+        return False
 

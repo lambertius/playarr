@@ -303,6 +303,15 @@ def import_all_cart(req: CartImportAllRequest = CartImportAllRequest(), db: Sess
     if not items:
         return {"status": "empty", "jobs": []}
 
+    from app.services.import_policy import policy_from_pipeline_options
+    import_policy = policy_from_pipeline_options({
+        "scrape": req.scrape,
+        "scrape_musicbrainz": req.scrape_musicbrainz,
+        "ai_auto_analyse": req.ai_auto_analyse,
+        "ai_auto_fallback": req.ai_auto_fallback,
+        "normalize": req.normalize,
+    }).model_dump(mode="json")
+
     jobs = []
     for item in items:
         # Create a processing job using the same pattern as jobs.py
@@ -321,6 +330,7 @@ def import_all_cart(req: CartImportAllRequest = CartImportAllRequest(), db: Sess
                 "scrape_musicbrainz": req.scrape_musicbrainz,
                 "ai_auto_analyse": req.ai_auto_analyse,
                 "ai_auto_fallback": req.ai_auto_fallback,
+                "import_policy": import_policy,
             },
         )
         db.add(job)

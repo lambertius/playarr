@@ -50,6 +50,24 @@ def _read_db_bool(key: str, default: str = "false") -> bool:
         return default == "true"
 
 
+def _read_db_int(key: str, default: int) -> int:
+    """Read an integer setting from SQLite for pre-server launch options."""
+    try:
+        import sqlite3
+        from app.runtime_dirs import get_runtime_dirs
+        db_path = str(get_runtime_dirs().db_path)
+        if not os.path.exists(db_path):
+            return default
+        with sqlite3.connect(db_path, timeout=2) as conn:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ? AND user_id IS NULL", (key,)
+            ).fetchone()
+        value = int(row[0]) if row else default
+        return value if 1 <= value <= 65535 else default
+    except Exception:
+        return default
+
+
 def main():
     parser = argparse.ArgumentParser(description="Playarr server launcher")
     parser.add_argument("--delay", type=int, default=0,
@@ -60,22 +78,23 @@ def main():
         print(f"[start_server] Delayed start: waiting {args.delay}s …")
         time.sleep(args.delay)
 
+    port = _read_db_int("server.port", 6969)
     minimize_to_tray = _read_db_bool("minimize_to_tray", "true")
     if minimize_to_tray:
-        start_tray(port=6969)
+        start_tray(port=port)
 
     auto_open = _read_db_bool("auto_open_browser", "true")
     if auto_open:
         import threading, webbrowser
         def _open():
             time.sleep(3)  # Wait for server to be ready
-            webbrowser.open("http://localhost:6969")
+            webbrowser.open(f"http://localhost:{port}")
         threading.Thread(target=_open, daemon=True).start()
 
     while True:
         result = subprocess.run(
             [sys.executable, "-m", "uvicorn", "app.main:app",
-             "--host", "0.0.0.0", "--port", "6969"],
+             "--host", "0.0.0.0", "--port", str(port)],
         )
         if result.returncode == RESTART_EXIT_CODE:
             print("[start_server] Restart requested — relaunching …")

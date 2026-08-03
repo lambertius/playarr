@@ -24,17 +24,24 @@ def test_archive_filters_and_pages_are_bounded_in_sql():
             folder=f"C:/archive/{index}", path=f"C:/archive/{index}/video.mkv",
             reason="crop" if index % 2 else "edit", artist=f"Artist {index}",
             title="Needle" if index == 51 else "Track", archived_at=datetime(2026, 1, 1),
+            video_id=42 if index in {42, 51} else None,
             integrity_status="ok", last_seen_at=datetime(2026, 1, 1),
         ))
     db.commit()
 
     page = query_archive_catalog(db, reason="crop", search=None, page=2, page_size=20)
     assert page["total"] == 62
+    assert page["reason_counts"]["all"] == 125
     assert len(page["items"]) == 20
     assert page["total_pages"] == 4
     assert all(item["reason"] == "crop" for item in page["items"])
     searched = query_archive_catalog(db, reason=None, search="Needle", page=1, page_size=20)
     assert searched["total"] == 1
+    focused = query_archive_catalog(
+        db, reason=None, search=None, video_id=42, page=1, page_size=20,
+    )
+    assert focused["total"] == 2
+    assert {item["video_id"] for item in focused["items"]} == {42}
 
 
 def test_catalog_sync_removes_missing_entries_without_deleting_archive_files(tmp_path, monkeypatch):

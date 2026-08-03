@@ -1,13 +1,16 @@
 import { useState, useCallback, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
-  LayoutGrid, List, RefreshCw, ChevronLeft, ChevronRight,
+  RefreshCw, ChevronLeft, ChevronRight,
   Library as LibraryIcon, Trash2, CheckSquare, Square, PartyPopper, ListPlus,
 } from "lucide-react";
 import { useLibrary, useRescanBatch, useRescan, useNormalize, useDeleteVideo, useDeleteBatch } from "@/hooks/queries";
 import { VideoCard } from "@/components/VideoCard";
-import { LIBRARY_LIST_GRID, VideoRow } from "@/components/VideoRow";
+import { VideoRow } from "@/components/VideoRow";
 import { FilterBar } from "@/components/FilterBar";
+import { LibraryListHeader } from "@/components/LibraryListHeader";
+import { EnrichmentStatusHelp } from "@/components/EnrichmentStatusHelp";
+import { ViewToggle } from "@/components/ViewToggle";
 import { LibrarySkeleton, EmptyState, ErrorState } from "@/components/Feedback";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -17,6 +20,7 @@ import type { RescanOptions } from "@/components/RescanOptionsDialog";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { usePartyMode } from "@/hooks/usePartyMode";
 import { getLibraryPrefs, patchLibraryPrefs, PAGE_SIZE_OPTIONS } from "@/lib/libraryPrefs";
+import { ENRICHMENT_STATUSES, ENRICHMENT_STATUS_BY_VALUE, normaliseEnrichmentStatus } from "@/lib/enrichmentStatus";
 import type { ViewMode, LibraryParams, FacetFilterParams } from "@/types";
 
 const SORT_OPTIONS = [
@@ -252,13 +256,27 @@ export function LibraryPage() {
     });
   }, [setSearchParams]);
 
+  const clearAllFilters = useCallback(() => {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      [
+        "search", "artist", "album", "album_entity_id", "genre", "year", "year_from", "year_to",
+        "version_type", "enrichment", "import_method", "song_rating", "video_rating", "quality", "page",
+      ].forEach((key) => next.delete(key));
+      return next;
+    });
+  }, [setSearchParams]);
+
   // Active filter pills (only non-facet filters — facet ones live in FilterBar)
   const activeFilters = [
     params.search && { key: "search", label: `"${params.search}"` },
     params.album_entity_id && { key: "album_entity_id", label: params.album ? `Album: ${params.album}` : `Album ID: ${params.album_entity_id}` },
     !params.album_entity_id && params.album && { key: "album", label: `Album: ${params.album}` },
     params.year && { key: "year", label: `Year: ${params.year}` },
-    params.enrichment && { key: "enrichment", label: `AI: ${params.enrichment}` },
+    params.enrichment && {
+      key: "enrichment",
+      label: `AI: ${ENRICHMENT_STATUS_BY_VALUE[normaliseEnrichmentStatus(params.enrichment) ?? "not_requested"].label}`,
+    },
     params.import_method && { key: "import_method", label: `Source: ${params.import_method}` },
   ].filter(Boolean) as { key: string; label: string }[];
 
@@ -365,13 +383,19 @@ export function LibraryPage() {
         </Tooltip>
       </div>
 
-      <FilterBar filters={facetFilters} onChange={handleFilterChange}>
+      <FilterBar
+        filters={facetFilters}
+        onChange={handleFilterChange}
+        additionalActiveCount={activeFilters.length}
+        onClearAll={clearAllFilters}
+      >
         <label className="flex flex-col gap-1 text-xs text-text-muted">
-          AI status
+          <span className="flex items-center gap-1.5">AI status <EnrichmentStatusHelp /></span>
           <select value={params.enrichment ?? ""} onChange={(e) => setParam("enrichment", e.target.value || null)} className="input-field w-auto py-1 text-xs">
             <option value="">All</option>
-            <option value="not_requested">Not requested</option><option value="queued">Queued</option><option value="running">Running</option>
-            <option value="partial">Partial</option><option value="complete">Complete</option><option value="failed">Failed</option><option value="stale">Stale</option>
+            {ENRICHMENT_STATUSES.map((status) => (
+              <option key={status.value} value={status.value}>{status.label}</option>
+            ))}
           </select>
         </label>
         <label className="flex flex-col gap-1 text-xs text-text-muted">
@@ -395,10 +419,7 @@ export function LibraryPage() {
             {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
         </label>
-        <div className="flex border border-surface-border rounded-lg overflow-hidden" aria-label="View mode">
-          <button onClick={() => setView("grid")} className={`p-1.5 ${view === "grid" ? "bg-accent/10 text-accent" : "text-text-muted hover:text-text-primary"}`} aria-label="Grid view"><LayoutGrid size={16} /></button>
-          <button onClick={() => setView("list")} className={`p-1.5 ${view === "list" ? "bg-accent/10 text-accent" : "text-text-muted hover:text-text-primary"}`} aria-label="List view"><List size={16} /></button>
-        </div>
+        <ViewToggle value={view} onChange={setView} label="Library layout" />
         {activeFilters.length > 0 && <div className="basis-full flex flex-wrap gap-2 pt-1">
           {activeFilters.map((f) => (
             <button
@@ -423,12 +444,6 @@ export function LibraryPage() {
               <span className="text-blue-300 hover:text-white">&times;</span>
             </button>
           ))}
-          <button
-            onClick={() => setSearchParams({})}
-            className="text-xs text-text-muted hover:text-text-primary"
-          >
-            Clear all
-          </button>
         </div>}
       </FilterBar>
 
@@ -469,33 +484,13 @@ export function LibraryPage() {
             </div>
           ) : (
             <div className="card p-0 overflow-x-auto">
-              <div className={`grid ${LIBRARY_LIST_GRID} min-w-[1050px] items-center gap-3 px-4 py-2 border-b border-surface-border text-xs text-text-muted font-medium`}>
-                <div>
-                  <input
-                    type="checkbox"
-                    checked={allPageSelected}
-                    onChange={toggleSelectAll}
-                    className="h-4 w-4 rounded border-surface-border bg-surface-lighter text-accent focus:ring-accent cursor-pointer accent-[var(--color-accent)]"
-                  />
-                </div>
-                <span aria-hidden="true" />
-                {[
-                  ["artist", "Artist"], ["title", "Title"], ["album", "Album"],
-                  ["year", "Year"], ["quality", "Quality"],
-                ].map(([key, label]) => (
-                  <button key={key} onClick={() => setSort(key)} className="text-left hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent rounded" aria-sort={params.sort_by === key ? (params.sort_dir === "asc" ? "ascending" : "descending") : "none"}>
-                    {label}{params.sort_by === key ? (params.sort_dir === "asc" ? " ↑" : " ↓") : ""}
-                  </button>
-                ))}
-                <span className="text-center">Version</span>
-                <button onClick={() => setSort("enrichment")} className="text-center hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent rounded" aria-sort={params.sort_by === "enrichment" ? (params.sort_dir === "asc" ? "ascending" : "descending") : "none"}>
-                  AI{params.sort_by === "enrichment" ? (params.sort_dir === "asc" ? " ↑" : " ↓") : ""}
-                </button>
-                <button onClick={() => setSort("created_at")} className="text-right hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent rounded" aria-sort={params.sort_by === "created_at" ? (params.sort_dir === "asc" ? "ascending" : "descending") : "none"}>
-                  Added{params.sort_by === "created_at" ? (params.sort_dir === "asc" ? " ↑" : " ↓") : ""}
-                </button>
-                <span aria-hidden="true" />
-              </div>
+              <LibraryListHeader
+                allSelected={allPageSelected}
+                sortBy={params.sort_by}
+                sortDirection={params.sort_dir}
+                onToggleAll={toggleSelectAll}
+                onSort={setSort}
+              />
               {data.items.map((v) => (
                 <VideoRow
                   key={v.id}

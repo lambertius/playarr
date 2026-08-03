@@ -9,6 +9,7 @@ journal at startup.
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import os
 import shutil
@@ -44,6 +45,19 @@ class FileWaitingForRelease(RuntimeError):
 
 class FileOperationFailed(RuntimeError):
     pass
+
+
+def _transient_file_lock(exc: BaseException) -> bool:
+    if not isinstance(exc, OSError):
+        return False
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in {32, 33}
+    return (
+        getattr(exc, "errno", None) in {errno.EBUSY, errno.EAGAIN}
+        or "being used by another process" in str(exc).lower()
+        or "sharing violation" in str(exc).lower()
+    )
 
 
 def _utcnow() -> datetime:
@@ -212,6 +226,8 @@ def create_rename_operation(
     video: VideoItem,
     new_folder: str,
     new_base_name: str,
+    *,
+    commit: bool = True,
 ) -> FileOperation:
     operation_id = str(uuid4())
     plan = plan_video_rename(
@@ -234,8 +250,11 @@ def create_rename_operation(
         },
     )
     db.add(operation)
-    db.commit()
-    db.refresh(operation)
+    if commit:
+        db.commit()
+        db.refresh(operation)
+    else:
+        db.flush()
     return operation
 
 
@@ -428,6 +447,7 @@ def execute_file_operation(
     collisions = (operation.plan_json or {}).get("collisions", [])
     if collisions:
         raise FilePlanCollision(collisions)
+    previous_attempts = int((operation.error_json or {}).get("attempts") or 0)
     operation.status = "running"
     operation.started_at = operation.started_at or _utcnow()
     operation.error_json = None
@@ -455,15 +475,30 @@ def execute_file_operation(
     except FileWaitingForRelease as exc:
         db.rollback()
         operation = db.get(FileOperation, operation_id)
+        attempts = previous_attempts + 1
         operation.status = "waiting_for_release"
         operation.error_json = {
             "code": "waiting_for_release", "message": str(exc), "retryable": True,
+            "attempts": attempts,
+            "retry_after": time.time() + min(60.0, 0.5 * (2 ** min(attempts, 7))),
         }
         db.commit()
         return operation
     except Exception as exc:
         db.rollback()
         operation = db.get(FileOperation, operation_id)
+        if _transient_file_lock(exc):
+            attempts = previous_attempts + 1
+            operation.status = "waiting_for_release"
+            operation.error_json = {
+                "code": "external_file_lock",
+                "message": str(exc),
+                "retryable": True,
+                "attempts": attempts,
+                "retry_after": time.time() + min(60.0, 0.5 * (2 ** min(attempts, 7))),
+            }
+            db.commit()
+            return operation
         operation.status = "reconciliation_required"
         operation.error_json = {
             "code": "file_operation_interrupted",
@@ -528,6 +563,9 @@ def retry_waiting_file_operation(db: Session) -> bool:
         FileOperation.status == "waiting_for_release"
     ).order_by(FileOperation.created_at.asc()).first()
     if operation is None:
+        return False
+    retry_after = float((operation.error_json or {}).get("retry_after") or 0)
+    if retry_after > time.time():
         return False
     execute_file_operation(db, operation.id)
     return True

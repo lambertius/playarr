@@ -1,6 +1,7 @@
 import type { JobStatus } from "@/types";
 import { cn } from "@/lib/utils";
 import type { EnrichmentStatus } from "@/types";
+import { ENRICHMENT_STATUS_BY_VALUE, normaliseEnrichmentStatus } from "@/lib/enrichmentStatus";
 
 // ─── Version Badge ────────────────────────────────────────
 const versionConfig: Record<string, { label: string; className: string }> = {
@@ -108,16 +109,6 @@ export function QualityBadge({ resolution, className }: QualityBadgeProps) {
 }
 
 // ─── Enrichment Badge ─────────────────────────────────────
-const enrichmentConfig: Record<string, { label: string; className: string }> = {
-  not_requested: { label: "Not requested", className: "bg-zinc-500/15 text-zinc-400" },
-  queued: { label: "Queued", className: "bg-blue-500/15 text-blue-400" },
-  running: { label: "Running", className: "bg-cyan-500/15 text-cyan-400" },
-  partial: { label: "Partial", className: "bg-yellow-500/15 text-yellow-400" },
-  complete: { label: "Complete", className: "bg-emerald-500/15 text-emerald-400" },
-  failed: { label: "Failed", className: "bg-red-500/15 text-red-400" },
-  stale: { label: "Stale", className: "bg-orange-500/15 text-orange-400" },
-};
-
 interface EnrichmentBadgeProps {
   status?: string;
   detail?: EnrichmentStatus;
@@ -125,18 +116,25 @@ interface EnrichmentBadgeProps {
 }
 
 export function EnrichmentBadge({ status, detail, className }: EnrichmentBadgeProps) {
-  const state = detail?.state ?? (status === "enriched" ? "complete" : status === "pending" ? "not_requested" : status);
+  const state = detail?.state ?? normaliseEnrichmentStatus(status);
   if (!state) return null;
-  const config = enrichmentConfig[state];
+  const config = ENRICHMENT_STATUS_BY_VALUE[state];
   if (!config) return null;
+  const stepLabel = (step: string) => ({
+    ai_enriched: "AI metadata",
+    scenes_analyzed: "scene analysis",
+  }[step] ?? step);
   const explanation = detail ? [
     `State: ${config.label}`,
-    detail.completed_steps.length ? `Completed: ${detail.completed_steps.join(", ")}` : "No completed steps",
-    detail.failed_steps.length ? `Failed: ${detail.failed_steps.map((step) => `${step.step} (${step.message})`).join(", ")}` : "",
+    config.description,
+    detail.requested_steps.length ? `Requested: ${detail.requested_steps.map(stepLabel).join(", ")}` : "No AI tasks requested",
+    detail.completed_steps.length ? `Completed: ${detail.completed_steps.map(stepLabel).join(", ")}` : "",
+    detail.incomplete_steps.length ? `Incomplete: ${detail.incomplete_steps.map(stepLabel).join(", ")}` : "",
+    detail.failed_steps.length ? `Failed: ${detail.failed_steps.map((step) => `${stepLabel(step.step)} (${step.message})`).join(", ")}` : "",
     detail.provider ? `Provider: ${detail.provider}${detail.model ? ` / ${detail.model}` : ""}` : "",
     detail.last_run_at ? `Last attempt: ${detail.last_run_at}` : "",
     detail.stale_reason ? `Stale reason: ${detail.stale_reason}` : "",
-  ].filter(Boolean).join("\n") : config.label;
+  ].filter(Boolean).join("\n") : `${config.label}: ${config.description}`;
   return <span className={cn("badge", config.className, className)} title={explanation}>{config.label}</span>;
 }
 

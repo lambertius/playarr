@@ -6,14 +6,22 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401 - register shared tables
 import app.new_videos.models  # noqa: F401 - register recommendation tables
 from app.database import Base
-from app.models import JobStatus, MutationCommand, ProcessingJob
+from app.models import AppSetting, JobStatus, MutationCommand, ProcessingJob
 from app.new_videos.models import (
     RecommendationSnapshot,
     SuggestedVideo,
     SuggestedVideoDismissal,
 )
 from app.new_videos.recommendation_ranker import RecommendationCandidate
-from app.new_videos.recommendation_service import _diversity_rerank, _serialize_video
+from app.new_videos.recommendation_service import (
+    CATEGORY_GENERATORS,
+    _complete_candidate_metadata,
+    _diversity_rerank,
+    _generate_taste_candidates,
+    _serialize_video,
+    get_feed,
+    refresh_category,
+)
 from app.new_videos.router import CartAddRequest, add_video
 from app.new_videos.failed_additions import list_failed_additions, restore_failed_suggestion
 from app.services.mutation_runtime import process_next_mutation
@@ -88,6 +96,93 @@ def test_incomplete_provider_metadata_is_explicit_in_api_response():
         "artist", "thumbnail_url", "channel", "duration_seconds",
     ]
     assert payload["provider_errors"] == ["provider timed out"]
+
+
+def test_safe_metadata_defaults_fill_the_card_fields():
+    candidate = RecommendationCandidate(
+        provider="youtube", provider_video_id="abc123",
+        title="Artist Name - Track Name", artist="", channel="",
+    )
+
+    _complete_candidate_metadata(candidate)
+
+    assert candidate.artist == "Artist Name"
+    assert candidate.channel == "Artist Name"
+    assert candidate.url.endswith("watch?v=abc123")
+    assert candidate.thumbnail_url.endswith("/abc123/hqdefault.jpg")
+    assert candidate.reasons
+
+
+def test_taste_category_has_an_explained_fallback_for_a_new_library():
+    candidates = _generate_taste_candidates(_session(), limit=3)
+
+    assert len(candidates) == 3
+    assert all(candidate.category == "taste" for candidate in candidates)
+    assert all("learns more" in candidate.reasons[0] for candidate in candidates)
+
+
+def test_pending_action_is_hidden_and_full_reserve_refills_its_slot():
+    db = _session()
+    videos = [
+        SuggestedVideo(
+            provider="youtube", provider_video_id=provider_id,
+            url=f"https://example.invalid/{provider_id}", title=provider_id,
+            artist=artist, category="new", recommendation_score=score,
+        )
+        for provider_id, artist, score in (
+            ("clicked", "Artist A", 1.0),
+            ("visible", "Artist B", 0.9),
+            ("reserve", "Artist C", 0.8),
+        )
+    ]
+    db.add_all(videos)
+    db.flush()
+    db.add(RecommendationSnapshot(category="new", payload_json=[videos[0].id, videos[1].id]))
+    db.add(AppSetting(key="nv_new_count", value="2", value_type="int"))
+    db.add(MutationCommand(
+        idempotency_key="pending-click", command_type="new_videos.add",
+        entity_type="suggested_video", entity_stable_id="youtube:clicked",
+        payload_json={"suggested_video_id": videos[0].id}, status="pending",
+    ))
+    db.commit()
+
+    visible_ids = [
+        item["provider_video_id"] for item in get_feed(db)["categories"]["new"]["videos"]
+    ]
+
+    assert visible_ids == ["visible", "reserve"]
+
+
+def test_fresh_list_replaces_the_visible_snapshot_before_reusing_items(monkeypatch):
+    db = _session()
+    db.add_all([
+        AppSetting(key="nv_new_count", value="2", value_type="int"),
+        AppSetting(key="nv_enable_trusted_source_filtering", value="false", value_type="bool"),
+    ])
+    db.commit()
+
+    def generate(_db, limit):
+        return [
+            RecommendationCandidate(
+                provider="youtube", provider_video_id=f"fresh-{index}",
+                url=f"https://example.invalid/fresh-{index}",
+                title=f"Artist {index} - Track {index}", artist=f"Artist {index}",
+                channel=f"Artist {index}", thumbnail_url=f"https://example.invalid/{index}.jpg",
+                category="new", popularity_score=1 - (index / 10),
+            )
+            for index in range(4)
+        ][:limit]
+
+    monkeypatch.setitem(CATEGORY_GENERATORS, "new", generate)
+    assert refresh_category(db, "new", force=True) == 4
+    first = [item["provider_video_id"] for item in get_feed(db)["categories"]["new"]["videos"]]
+
+    assert refresh_category(db, "new", force=True) == 4
+    second = [item["provider_video_id"] for item in get_feed(db)["categories"]["new"]["videos"]]
+
+    assert first == ["fresh-0", "fresh-1"]
+    assert second == ["fresh-2", "fresh-3"]
+    assert set(first).isdisjoint(second)
 
 
 def test_quick_add_acknowledges_before_actor_commits_and_dispatches(monkeypatch):

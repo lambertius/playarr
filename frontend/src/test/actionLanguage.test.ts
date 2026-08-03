@@ -4,7 +4,7 @@ import aiPanel from "../components/AIPanel.tsx?raw";
 import actionsPanel from "../components/ActionsPanel.tsx?raw";
 import candidateCard from "../components/CandidateCard.tsx?raw";
 import metadataManager from "../pages/MetadataManagerPage.tsx?raw";
-import reviewQueue from "../pages/ReviewQueuePage.tsx?raw";
+import reviewQueue from "../components/review/ReviewCasesPanel.tsx?raw";
 import videoEditor from "../pages/VideoEditorPage.tsx?raw";
 
 
@@ -18,6 +18,6 @@ describe("UI-005 action language", () => {
     }
     expect(aiPanel).toContain("Save all changes");
     expect(videoEditor).toContain("Save edits");
-    expect(reviewQueue).toContain("/> Rename");
+    expect(reviewQueue).toContain("Save changes");
   });
 });

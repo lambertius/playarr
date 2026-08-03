@@ -186,9 +186,9 @@ export function QualityPage() {
           </>
         )}
       </div>
-      <div className="mb-4">
+      {(isLoading || isError || !data || data.length === 0) && (
         <FilterBar filters={filters} onChange={setFilters} hideQuality />
-      </div>
+      )}
 
       {isLoading ? (
         <div className="grid grid-cols-[repeat(auto-fill,150px)] gap-4">
@@ -208,6 +208,7 @@ export function QualityPage() {
           defaultSort="rank"
           defaultDirection="desc"
           empty={<EmptyState icon={<MonitorPlay size={48} />} title="No quality data yet" />}
+          renderFilterTile={(controls) => <FilterBar filters={filters} onChange={setFilters} hideQuality>{controls}</FilterBar>}
           columns={[
             { id: "rank", label: "Quality", width: "minmax(10rem,1fr)", sortValue: (quality) => QUALITY_ORDER.indexOf(quality.quality), render: (quality) => <button className="hover:text-accent" onClick={() => navigate(`/library?quality=${quality.quality}`)}>{quality.quality}</button> },
             { id: "tier", label: "Tier", width: "7rem", sortValue: (quality) => QUALITY_ORDER.indexOf(quality.quality) <= 1 ? "SD" : "HD", render: (quality) => QUALITY_ORDER.indexOf(quality.quality) <= 1 ? "SD" : "HD" },

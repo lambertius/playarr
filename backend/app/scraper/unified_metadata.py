@@ -220,6 +220,17 @@ def _scrape_with_ai_links(
         # so that tasks.py can distinguish scraper art from YouTube thumbnails.
         # The yt-dlp thumbnail fallback in tasks.py handles the YouTube case.
 
+    # Provider-local snapshots let diagnostics show what each provider
+    # returned before values are merged with later stages.
+    metadata["_provider_results"] = {}
+    _provider_field_names = (
+        "artist", "title", "album", "year", "genres", "plot", "image_url",
+        "mb_artist_id", "mb_recording_id", "mb_release_id",
+        "mb_release_group_id", "mb_album_release_id",
+        "mb_album_release_group_id", "imdb_url",
+    )
+    _mb_before = {field: metadata.get(field) for field in _provider_field_names}
+
     has_ai = ai_result is not None
 
     # Ã¢â€â‚¬Ã¢â€â‚¬ MusicBrainz resolution Ã¢â€â‚¬Ã¢â€â‚¬
@@ -730,6 +741,15 @@ def _scrape_with_ai_links(
 
     _mb_resolved = bool(metadata.get("mb_recording_id"))
     logs.append(f"MusicBrainz: resolution complete (resolved={_mb_resolved})")
+
+    if any(str(source).startswith("musicbrainz:") for source in metadata["scraper_sources_used"]):
+        metadata["_provider_results"]["musicbrainz"] = {
+            field: metadata.get(field)
+            for field in _provider_field_names
+            if metadata.get(field) not in (None, "", [])
+            and metadata.get(field) != _mb_before.get(field)
+        }
+    _wiki_before = {field: metadata.get(field) for field in _provider_field_names}
 
     # Ã¢â€â‚¬Ã¢â€â‚¬ Wikipedia resolution Ã¢â€â‚¬Ã¢â€â‚¬
     if not skip_wikipedia:
@@ -1295,6 +1315,14 @@ def _scrape_with_ai_links(
                 logs.append(f"Wikipedia artist art scrape failed: {e}")
 
     # Ã¢â€â‚¬Ã¢â€â‚¬ IMDB resolution Ã¢â€â‚¬Ã¢â€â‚¬
+    if any(str(source).startswith("wikipedia:") for source in metadata["scraper_sources_used"]):
+        metadata["_provider_results"]["wikipedia"] = {
+            field: metadata.get(field)
+            for field in _provider_field_names
+            if metadata.get(field) not in (None, "", [])
+            and metadata.get(field) != _wiki_before.get(field)
+        }
+
     imdb_used_ai_url = False
     if has_ai and ai_result.sources.imdb_url:
         logs.append(f"IMDB: using AI-provided URL: {ai_result.sources.imdb_url}")
@@ -1303,7 +1331,9 @@ def _scrape_with_ai_links(
         imdb_used_ai_url = True
         metadata["scraper_sources_used"].append("imdb:ai_url")
 
-    if not imdb_used_ai_url and not (skip_wikipedia and skip_musicbrainz):
+    # IMDB discovery is part of AI Auto source resolution, not an implicit
+    # third provider in Wiki-only/MusicBrainz-only/manual scraper modes.
+    if has_ai and not imdb_used_ai_url and not (skip_wikipedia and skip_musicbrainz):
         try:
             search_artist = artist
             search_title = title
@@ -1320,6 +1350,11 @@ def _scrape_with_ai_links(
                 logs.append(f"IMDB: search match Ã¢â‚¬â€ {imdb_url}")
         except Exception as e:
             logs.append(f"IMDB: search failed: {e}")
+
+    if any(str(source).startswith("imdb:") for source in metadata["scraper_sources_used"]):
+        metadata["_provider_results"]["imdb"] = {
+            "imdb_url": metadata.get("imdb_url"),
+        }
 
     # Use AI-resolved identity if scraper didn't find better data
     if has_ai and ai_result.confidence.identity >= 0.7:

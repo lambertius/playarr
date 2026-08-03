@@ -19,6 +19,8 @@ completion within the timeout proves the writes are serialised and there is no
 deadlock.
 """
 import os
+import inspect
+import re
 import threading
 import time
 
@@ -140,6 +142,8 @@ def test_request_writes_serialise_against_write_queue(tmp_path):
     telemetry = transaction_stats()
     assert telemetry["count"] >= REQ_THREADS * REQ_WRITES
     assert telemetry["p99_ms"] >= telemetry["p50_ms"] >= 0
+    assert telemetry["wait_count"] >= REQ_THREADS * REQ_WRITES
+    assert telemetry["wait_p99_ms"] >= telemetry["wait_p50_ms"] >= 0
 
     # Lock must be fully released at the end (no leak).
     got = _apply_lock.acquire(timeout=1)
@@ -150,3 +154,14 @@ def test_request_writes_serialise_against_write_queue(tmp_path):
 
     pipeline_eng.dispose()
     request_eng.dispose()
+
+
+def test_durable_reconcilers_use_the_serialized_session_boundary():
+    from app.database import SerializedSessionLocal
+    from app.services import mutation_runtime, reconciliation_runtime
+
+    assert mutation_runtime.process_next_mutation.__defaults__[0] is SerializedSessionLocal
+    assert mutation_runtime.recover_mutation_queue.__defaults__[0] is SerializedSessionLocal
+    source = inspect.getsource(reconciliation_runtime)
+    assert "from app.database import SerializedSessionLocal" in source
+    assert not re.search(r"(?<!Serialized)SessionLocal\(", source)

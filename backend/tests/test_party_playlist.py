@@ -1,8 +1,7 @@
 """
 Party Mode playlist override — the server /party-mode endpoint must honour the
 `partyPlaylist` preference so the chosen playlist plays everywhere Party Mode
-runs (web, TV, Cast, and — the reason for this — the Kodi add-on, which reaches
-Party Mode only through this endpoint).
+runs (web, TV and Cast).
 """
 import json
 

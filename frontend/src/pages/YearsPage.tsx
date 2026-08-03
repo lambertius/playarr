@@ -5,6 +5,7 @@ import { useYears, useRescanBatch, useNormalize, useDeleteBatch } from "@/hooks/
 import { EmptyState, ErrorState, Skeleton } from "@/components/Feedback";
 import { RecordStack } from "@/components/RecordStack";
 import { DataView } from "@/components/DataView";
+import { GroupedSection } from "@/components/GroupedSection";
 import { FilterBar } from "@/components/FilterBar";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { RescanOptionsDialog } from "@/components/RescanOptionsDialog";
@@ -15,6 +16,32 @@ import type { FacetFilterParams } from "@/types";
 import { usePartyMode } from "@/hooks/usePartyMode";
 
 type YearEntry = { year: number | null; count: number; video_ids: number[] };
+
+interface DecadeGroup {
+  decade: string;
+  decadeStart: number;
+  items: Array<YearEntry & { year: number }>;
+  allVideoIds: number[];
+  totalCount: number;
+}
+
+/** Preserve the supplied year order while collecting each decade. */
+function groupByDecade(years: Array<YearEntry & { year: number }>): DecadeGroup[] {
+  const groups = new Map<number, Array<YearEntry & { year: number }>>();
+  for (const year of years) {
+    const decadeStart = Math.floor(year.year / 10) * 10;
+    const group = groups.get(decadeStart) ?? [];
+    group.push(year);
+    groups.set(decadeStart, group);
+  }
+  return [...groups.entries()].map(([decadeStart, items]) => ({
+    decade: `${decadeStart}s`,
+    decadeStart,
+    items,
+    allVideoIds: items.flatMap((item) => item.video_ids),
+    totalCount: items.reduce((total, item) => total + item.count, 0),
+  }));
+}
 
 export function YearsPage() {
   const [filters, setFilters] = useState<FacetFilterParams>({});
@@ -37,7 +64,15 @@ export function YearsPage() {
 
   const yearMap = useMemo(() => {
     const m = new Map<string, number[]>();
-    if (data) for (const y of data) if (y.year != null) m.set(String(y.year), y.video_ids);
+    if (data) {
+      const byDecade = new Map<number, number[]>();
+      for (const y of data) if (y.year != null) {
+        m.set(String(y.year), y.video_ids);
+        const decade = Math.floor(y.year / 10) * 10;
+        byDecade.set(decade, [...(byDecade.get(decade) ?? []), ...y.video_ids]);
+      }
+      for (const [decade, ids] of byDecade) m.set(`${decade}s`, ids);
+    }
     return m;
   }, [data]);
 
@@ -47,7 +82,7 @@ export function YearsPage() {
       const vids = yearMap.get(key);
       if (vids) ids.push(...vids);
     }
-    return ids;
+    return [...new Set(ids)];
   }, [selectedYears, yearMap]);
 
   const toggleSelect = useCallback((key: string, sel: boolean) => {
@@ -152,9 +187,9 @@ export function YearsPage() {
           </>
         )}
       </div>
-      <div className="mb-4">
+      {(isLoading || isError || !filtered || filtered.length === 0) && (
         <FilterBar filters={filters} onChange={setFilters} hideYearRange />
-      </div>
+      )}
 
       {isLoading ? (
         <div className="grid grid-cols-[repeat(auto-fill,150px)] gap-4">
@@ -174,6 +209,8 @@ export function YearsPage() {
           defaultSort="year"
           defaultDirection="desc"
           empty={<EmptyState icon={<CalendarDays size={48} />} title="No years yet" />}
+          renderFilterTile={(controls) => <FilterBar filters={filters} onChange={setFilters} hideYearRange>{controls}</FilterBar>}
+          paginateGrid={false}
           columns={[
             { id: "year", label: "Year", width: "minmax(10rem,1fr)", sortValue: (year) => year.year, render: (year) => <button className="hover:text-accent" onClick={() => navigate(`/library?year=${year.year}`)}>{year.year}</button> },
             { id: "decade", label: "Decade", width: "8rem", sortValue: (year) => Math.floor(year.year / 10) * 10, render: (year) => `${Math.floor(year.year / 10) * 10}s` },
@@ -189,6 +226,37 @@ export function YearsPage() {
                 onSelect={(sel) => toggleSelect(String(y.year), sel)}
                 onContextAction={handleContextAction}
               />
+          )}
+          renderGrid={(orderedYears) => (
+            <div>
+              {groupByDecade(orderedYears).map(({ decade, decadeStart, items, allVideoIds, totalCount }) => (
+                <GroupedSection key={decade} heading={decade}>
+                  <div className="col-span-2 row-span-2 flex items-center justify-center">
+                    <RecordStack
+                      videoIds={allVideoIds}
+                      label={decade}
+                      subLabel={`${totalCount} video${totalCount !== 1 ? "s" : ""}`}
+                      onClick={() => navigate(`/library?year_from=${decadeStart}&year_to=${decadeStart + 9}`)}
+                      selected={selectedYears.has(decade)}
+                      onSelect={(selected) => toggleSelect(decade, selected)}
+                      onContextAction={handleContextAction}
+                    />
+                  </div>
+                  {items.map((year) => (
+                    <RecordStack
+                      key={year.year}
+                      videoIds={year.video_ids}
+                      label={String(year.year)}
+                      subLabel={`${year.count} video${year.count !== 1 ? "s" : ""}`}
+                      onClick={() => navigate(`/library?year=${year.year}`)}
+                      selected={selectedYears.has(String(year.year))}
+                      onSelect={(selected) => toggleSelect(String(year.year), selected)}
+                      onContextAction={handleContextAction}
+                    />
+                  ))}
+                </GroupedSection>
+              ))}
+            </div>
           )}
         />
       )}

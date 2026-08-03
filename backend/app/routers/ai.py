@@ -295,6 +295,7 @@ def run_scene_analysis(
         threshold=request.threshold,
         max_thumbnails=request.max_thumbnails,
         force=request.force,
+        commit=False,
     )
 
     if not analysis:
@@ -307,12 +308,9 @@ def run_scene_analysis(
     from app.models import clear_stale_enrichment_review
     clear_stale_enrichment_review(video, db=db)
 
-    db.commit()
-
-    # Persist the authoritative sidecar intent before best-effort thumbnail
-    # materialisation. A scheduling failure is surfaced to the caller.
-    from app.services.playarr_xml import write_playarr_xml
-    write_playarr_xml(video, db)
+    video.revision = int(video.revision or 1) + 1
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    schedule_sidecar_write(db, video)
     db.commit()
 
     # Copy generated thumbnail derivatives to the video folder.
@@ -950,7 +948,7 @@ def _batch_scenes_task(video_ids: List[int], force: bool):
     try:
         for vid in video_ids:
             try:
-                analyze_scenes(db, vid, force=force)
+                analyze_scenes(db, vid, force=force, commit=False)
 
                 # Clear missing_artwork review flag if the artwork issue is resolved
                 try:
@@ -958,7 +956,6 @@ def _batch_scenes_task(video_ids: List[int], force: bool):
                     video = db.query(VideoItem).get(vid)
                     if video:
                         clear_stale_enrichment_review(video, db=db)
-                        db.commit()
                 except Exception:
                     pass
 
@@ -966,8 +963,9 @@ def _batch_scenes_task(video_ids: List[int], force: bool):
                 # failures remain isolated to this batch item.
                 video = db.query(VideoItem).get(vid)
                 if video and video.folder_path and os.path.isdir(video.folder_path):
-                    from app.services.playarr_xml import write_playarr_xml
-                    write_playarr_xml(video, db)
+                    video.revision = int(video.revision or 1) + 1
+                    from app.services.sidecar_outbox import schedule_sidecar_write
+                    schedule_sidecar_write(db, video)
                     db.commit()
                     try:
                         import shutil as _shutil

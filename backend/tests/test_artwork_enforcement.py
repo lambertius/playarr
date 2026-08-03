@@ -110,7 +110,6 @@ class TestNoRawHttpxImageFetch:
 
 _PIL_SAVE_ALLOWLIST = {
     _ARTWORK_SERVICE,
-    str((_APP_DIR / "services" / "theatre_backdrop.py").resolve()),  # generated collage
     str((_APP_DIR / "ai" / "scene_analysis.py").resolve()),  # ffmpeg → PIL thumb extraction
 }
 

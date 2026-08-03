@@ -52,6 +52,7 @@ def build_trace(
         json.dumps(safe_input, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
     logs = metadata.get("pipeline_log") or []
+    structured = metadata.get("structured_trace") or []
     sources = metadata.get("scraper_sources_used") or []
     failures = metadata.get("pipeline_failures") or []
     output_fields = sorted(
@@ -66,6 +67,8 @@ def build_trace(
         "status": "succeeded",
         "input_hash": input_hash,
         "input": safe_input,
+        "request": safe_input,
+        "response": {"effective_policy": redact(policy)},
         "policy": redact(policy),
         "source_kind": source_kind,
         "provider": None,
@@ -76,6 +79,39 @@ def build_trace(
     }]
     stage_events: dict[str, dict] = {}
     decisions: list[dict] = []
+    for record in structured:
+        if not isinstance(record, dict) or record.get("step") == "result":
+            continue
+        step = str(record.get("step") or "unknown")
+        record_decisions = [
+            decision if isinstance(decision, dict) else {
+                "field": None, "action": "decision", "reason": str(decision),
+            }
+            for decision in (record.get("decisions") or [])
+        ]
+        response = redact(record.get("response") or {})
+        response_fields = response.get("fields", response) if isinstance(response, dict) else {}
+        stage_events[step] = {
+            "run_id": run_id,
+            "step": f"metadata.{step}",
+            "status": record.get("status") or "recorded",
+            "input_hash": input_hash,
+            "input": redact(record.get("request") or {}),
+            "request": redact(record.get("request") or {}),
+            "response": response,
+            "policy": redact(policy),
+            "source_kind": source_kind,
+            "provider": record.get("provider"),
+            "output_fields": sorted(response_fields) if isinstance(response_fields, dict) else [],
+            "decisions": record_decisions,
+            "duration_ms": record.get("duration_ms"),
+            "exception": redact(record.get("exception")),
+        }
+        decisions.extend(record_decisions)
+
+    # Older jobs only have the textual pipeline log.  Continue converting it
+    # so their diagnostic bundles remain useful after the structured contract
+    # is introduced.
     for raw in logs:
         line = redact(str(raw))
         if line.startswith("stage:"):
@@ -93,6 +129,8 @@ def build_trace(
                 "status": status,
                 "input_hash": input_hash,
                 "input": {},
+                "request": {},
+                "response": {},
                 "policy": redact(policy),
                 "source_kind": source_kind,
                 "provider": None,
@@ -110,6 +148,7 @@ def build_trace(
             stage_events.setdefault("scraper_fetch", {
                 "run_id": run_id, "step": "metadata.scraper_fetch", "status": "succeeded",
                 "input_hash": input_hash, "input": {}, "policy": redact(policy),
+                "request": {}, "response": {},
                 "source_kind": source_kind, "provider": provider, "output_fields": [],
                 "decisions": [], "duration_ms": None, "exception": None,
             })["provider"] = provider
@@ -128,6 +167,8 @@ def build_trace(
         "status": "failed" if failures else "succeeded",
         "input_hash": input_hash,
         "input": {},
+        "request": {},
+        "response": _result_response(metadata),
         "policy": redact(policy),
         "source_kind": source_kind,
         "provider": ", ".join(sources) if sources else None,
@@ -137,6 +178,19 @@ def build_trace(
         "exception": redact(failures) if failures else None,
     })
     return run_id, events
+
+
+def _result_response(metadata: dict) -> dict:
+    """Return a redacted final value snapshot for reproducible diagnostics."""
+    return redact({
+        key: metadata.get(key)
+        for key in (
+            "artist", "title", "album", "year", "genres", "plot",
+            "image_url", "mb_artist_id", "mb_recording_id", "mb_release_id",
+            "mb_release_group_id", "imdb_url", "scraper_sources_used",
+        )
+        if metadata.get(key) not in (None, "", [])
+    })
 
 
 def persist_trace(db: Session, run_id: str, events: list[dict]) -> None:

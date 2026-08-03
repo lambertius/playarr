@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
-from xml.etree.ElementTree import parse
+from xml.etree.ElementTree import Element, fromstring, parse, tostring
 
 
 class SidecarValidationError(ValueError):
@@ -22,6 +22,27 @@ class SidecarValidationError(ValueError):
 def sidecar_content_hash(payload: bytes) -> str:
     """Return the portable, explicitly-labelled digest used by sidecar v2."""
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def sidecar_root_hash(root: Element) -> str:
+    """Hash the parser-normalised document with the digest removed.
+
+    XML 1.0 normalises literal CRLF text to LF while parsing.  Hashing a tree
+    populated directly from database strings therefore produced a digest that
+    could differ from the same document immediately after it was written and
+    parsed.  A serialize/parse round-trip makes the digest portable and stable.
+    """
+    claimed = root.attrib.pop("contentHash", None)
+    try:
+        payload = tostring(root, encoding="utf-8", xml_declaration=True)
+        normalised_root = fromstring(payload)
+        normalised_payload = tostring(
+            normalised_root, encoding="utf-8", xml_declaration=True,
+        )
+        return sidecar_content_hash(normalised_payload)
+    finally:
+        if claimed is not None:
+            root.set("contentHash", claimed)
 
 
 def validate_playarr_sidecar(path: Path) -> None:
@@ -67,6 +88,12 @@ def validate_playarr_sidecar(path: Path) -> None:
         if missing:
             raise SidecarValidationError(
                 "sidecar v2 missing attributes: " + ", ".join(missing)
+            )
+        claimed_hash = root.get("contentHash")
+        computed_hash = sidecar_root_hash(root)
+        if claimed_hash != computed_hash:
+            raise SidecarValidationError(
+                f"sidecar contentHash mismatch: expected {claimed_hash}, computed {computed_hash}"
             )
 
 
@@ -115,11 +142,15 @@ def atomic_write_sidecar(
 
         if destination.exists():
             # Never preserve a corrupt file as the recovery copy.
-            validator(destination)
-            shutil.copy2(destination, backup)
-            with backup.open("rb+") as stream:
-                stream.flush()
-                os.fsync(stream.fileno())
+            try:
+                validator(destination)
+            except SidecarValidationError:
+                pass
+            else:
+                shutil.copy2(destination, backup)
+                with backup.open("rb+") as stream:
+                    stream.flush()
+                    os.fsync(stream.fileno())
 
         os.replace(temporary, destination)
         _fsync_directory(destination.parent)

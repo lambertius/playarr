@@ -10,7 +10,13 @@ import subprocess
 import pytest
 
 from app.services.sidecar_store import SidecarValidationError, validate_playarr_sidecar
-from app.services.video_editor import detect_letterbox, probe_file, resolve_encode_plan, validate_encoded_output
+from app.services.video_editor import (
+    detect_letterbox,
+    encode_video,
+    probe_file,
+    resolve_encode_plan,
+    validate_encoded_output,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "media"
@@ -86,7 +92,8 @@ def test_fixture_driven_hdr_plan_and_staged_decode_validation(tmp_path):
     hdr_plan = resolve_encode_plan(hdr_path, profile="source_fidelity", probe=probe_file(hdr_path))
     assert hdr_plan["source"]["hdr"] is True
     assert hdr_plan["output"]["pixel_format"] == "yuv420p10le"
-    assert hdr_plan["output"]["maxrate"] is None
+    assert hdr_plan["output"]["target_video_bitrate"]
+    assert hdr_plan["output"]["maxrate"] == hdr_plan["output"]["target_video_bitrate"] * 2
 
     sdr_path = str(FIXTURES / "sdr_16x9.mp4")
     sdr_plan = resolve_encode_plan(sdr_path, profile="source_fidelity", probe=probe_file(sdr_path))
@@ -98,3 +105,32 @@ def test_fixture_driven_hdr_plan_and_staged_decode_validation(tmp_path):
     corrupt.write_bytes((FIXTURES / "sdr_16x9.mp4").read_bytes()[:128])
     with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
         validate_encoded_output(sdr_path, str(corrupt), sdr_plan)
+
+
+def test_source_fidelity_default_encode_passes_quality_gate(tmp_path):
+    source = str(FIXTURES / "sdr_16x9.mp4")
+    output = str(tmp_path / "source-fidelity.mp4")
+
+    stats = encode_video(source, output)
+    checks = validate_encoded_output(source, output, stats["encode_plan"])
+
+    assert stats["encode_plan"]["output"]["crf"] == 14
+    assert stats["encode_plan"]["output"]["preset"] == "slow"
+    assert checks["dimensions"] == "320x180"
+    assert checks["frame_rate_relative_error"] <= 0.002
+    assert checks["ssim"] >= 0.98
+
+
+def test_trimmed_source_fidelity_audio_is_lossless_and_keeps_layout(tmp_path):
+    source = str(FIXTURES / "sdr_16x9.mp4")
+    output = str(tmp_path / "trimmed-source-fidelity.mp4")
+
+    stats = encode_video(source, output, trim_start=0.1)
+    checks = validate_encoded_output(source, output, stats["encode_plan"])
+    output_probe = probe_file(output)
+    output_audio = next(stream for stream in output_probe["streams"] if stream["codec_type"] == "audio")
+
+    assert stats["encode_plan"]["output"]["audio_codec"] == "alac"
+    assert output_audio["codec_name"] == "alac"
+    assert checks["audio_sample_rate"] == "48000"
+    assert checks["audio_channels"] == "1"

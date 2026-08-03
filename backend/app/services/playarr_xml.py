@@ -11,7 +11,6 @@ The Kodi .nfo is left untouched — this is a separate, Playarr-specific file.
 
 import logging
 import os
-import hashlib
 import json
 from pathlib import Path
 from datetime import datetime, timezone
@@ -58,6 +57,23 @@ def _rel_path(file_path: str, folder_path: str) -> str:
     if os.path.isabs(relative) or relative == ".." or relative.startswith(f"..{os.sep}"):
         return Path(file_path).name
     return Path(relative).as_posix()
+
+
+def _portable_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "value"):
+        return value.value
+    return value
+
+
+def _row_state(row: Any, *excluded: str) -> dict[str, Any]:
+    blocked = {"id", "video_id", *excluded}
+    return {
+        column.name: _portable_value(getattr(row, column.name))
+        for column in row.__table__.columns
+        if column.name not in blocked
+    }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -210,6 +226,8 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
             _opt(s, "provenance", src.provenance)
             _opt(s, "channel_name", src.channel_name)
             _opt(s, "platform_title", src.platform_title)
+            _opt(s, "platform_description", src.platform_description)
+            _opt(s, "platform_tags", json.dumps(src.platform_tags) if src.platform_tags else None)
             _opt(s, "upload_date", src.upload_date)
 
     # ── quality signature ──
@@ -265,10 +283,17 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
             if asset.file_path:
                 _txt(a, "file", _rel_path(asset.file_path, folder_path))
             _opt(a, "source_url", asset.source_url)
+            _opt(a, "resolved_url", asset.resolved_url)
             _opt(a, "provenance", asset.provenance)
             _opt(a, "source_provider", asset.source_provider)
+            _opt(a, "content_type", asset.content_type)
             _opt(a, "file_hash", asset.file_hash)
             _opt(a, "status", asset.status)
+            _opt(a, "validation_error", asset.validation_error)
+            _opt(a, "last_validated_at", asset.last_validated_at.isoformat() if asset.last_validated_at else None)
+            _opt(a, "created_at", asset.created_at.isoformat() if asset.created_at else None)
+            _opt(a, "file_size_bytes", asset.file_size_bytes)
+            _opt(a, "crop_position", asset.crop_position)
             if asset.width:
                 _txt(a, "width", asset.width)
             if asset.height:
@@ -356,7 +381,6 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
     if getattr(video, "editor_edit_type", None):
         _txt(flags, "editor_edit_type", video.editor_edit_type)
     if video.locked_fields:
-        import json
         locked = video.locked_fields if isinstance(video.locked_fields, list) else json.loads(video.locked_fields)
         if locked:
             lf = SubElement(flags, "locked_fields")
@@ -521,6 +545,82 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
                 node.text = json.dumps(event.verification_json, sort_keys=True)
 
     # ── timestamps ──
+    from app.ai.models import AIMetadataResult, AISceneAnalysis, AIThumbnail
+    from app.models import MetadataSnapshot, NormalizationHistory, ContributionLog, VideoEditorQueueEntry
+    from app.matching.models import MatchResult, NormalizationResult, UserPinnedMatch
+    from sqlalchemy import inspect
+    matching_available = inspect(db.connection()).has_table(MatchResult.__tablename__)
+    portable_state: dict[str, Any] = {
+        "schema_version": 1,
+        "attribution": {
+            "field_provenance_users": video.field_provenance_users,
+            "field_provenance_at": video.field_provenance_at,
+            "field_verifications": video.field_verifications,
+            "last_edited_by": video.last_edited_by,
+            "song_rating_by": video.song_rating_by,
+            "song_rating_at": _portable_value(video.song_rating_at),
+            "video_rating_by": video.video_rating_by,
+            "video_rating_at": _portable_value(video.video_rating_at),
+        },
+        "ai_metadata_results": [
+            _row_state(row) for row in db.query(AIMetadataResult).filter(
+                AIMetadataResult.video_id == video.id,
+            ).order_by(AIMetadataResult.created_at).all()
+        ],
+        "scene_analyses": [],
+        "metadata_snapshots": [
+            _row_state(row) for row in db.query(MetadataSnapshot).filter(
+                MetadataSnapshot.video_id == video.id,
+            ).order_by(MetadataSnapshot.created_at).all()
+        ],
+        "normalization_history": [
+            _row_state(row) for row in db.query(NormalizationHistory).filter(
+                NormalizationHistory.video_id == video.id,
+            ).order_by(NormalizationHistory.created_at).all()
+        ],
+        "contribution_history": [
+            _row_state(row) for row in db.query(ContributionLog).filter(
+                ContributionLog.video_id == video.id,
+            ).order_by(ContributionLog.created_at).all()
+        ],
+        "editor_queue_entries": [
+            _row_state(row) for row in db.query(VideoEditorQueueEntry).filter(
+                VideoEditorQueueEntry.video_id == video.id,
+            ).order_by(VideoEditorQueueEntry.position).all()
+        ],
+        "matching_results": [],
+        "normalization_results": [
+            _row_state(row) for row in db.query(NormalizationResult).filter(
+                NormalizationResult.video_id == video.id,
+            ).order_by(NormalizationResult.created_at).all()
+        ] if matching_available else [],
+        "pinned_matches": [
+            _row_state(row, "candidate_id") for row in db.query(UserPinnedMatch).filter(
+                UserPinnedMatch.video_id == video.id,
+            ).order_by(UserPinnedMatch.pinned_at).all()
+        ] if matching_available else [],
+    }
+    for match in (db.query(MatchResult).filter(MatchResult.video_id == video.id).all() if matching_available else []):
+        match_state = _row_state(match)
+        match_state["candidates"] = [_row_state(candidate, "match_result_id") for candidate in match.candidates]
+        portable_state["matching_results"].append(match_state)
+    for scene in db.query(AISceneAnalysis).filter(
+        AISceneAnalysis.video_id == video.id,
+    ).order_by(AISceneAnalysis.created_at).all():
+        scene_state = _row_state(scene)
+        scene_state["thumbnails"] = []
+        for thumb in db.query(AIThumbnail).filter(
+            AIThumbnail.scene_analysis_id == scene.id,
+        ).order_by(AIThumbnail.created_at).all():
+            thumb_state = _row_state(thumb, "scene_analysis_id")
+            if thumb_state.get("file_path"):
+                thumb_state["file_path"] = _rel_path(thumb_state["file_path"], folder_path)
+            scene_state["thumbnails"].append(thumb_state)
+        portable_state["scene_analyses"].append(scene_state)
+    state_node = SubElement(root, "portable_state")
+    state_node.set("schemaVersion", "1")
+    state_node.text = json.dumps(portable_state, sort_keys=True, separators=(",", ":"))
+
     ts = SubElement(root, "timestamps")
     _txt(ts, "created_at", video.created_at.isoformat() if video.created_at else "")
     _txt(ts, "updated_at", video.updated_at.isoformat() if video.updated_at else "")
@@ -528,8 +628,9 @@ def build_playarr_xml(video, db: Session, archive_filename: str | None = None) -
 
     # contentHash covers the complete logical document before the hash
     # attribute itself is attached, avoiding a recursive digest definition.
-    canonical_payload = tostring(root, encoding="utf-8", xml_declaration=True)
-    root.set("contentHash", f"sha256:{hashlib.sha256(canonical_payload).hexdigest()}")
+    indent(root, space="    ")
+    from app.services.sidecar_store import sidecar_root_hash
+    root.set("contentHash", sidecar_root_hash(root))
     return root
 
 
@@ -550,8 +651,6 @@ def _write_playarr_xml_now(video, db: Session) -> Optional[str]:
     archive_filename = os.path.basename(archive_file) if archive_file else None
 
     root = build_playarr_xml(video, db, archive_filename=archive_filename)
-    indent(root, space="    ")
-
     # Name it after the video file: "Artist - Title [1080p].playarr.xml"
     if video.file_path:
         base = os.path.splitext(os.path.basename(video.file_path))[0]
@@ -766,6 +865,11 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
                 "provenance": _text(s.find("provenance")) or None,
                 "channel_name": _text(s.find("channel_name")) or None,
                 "platform_title": _text(s.find("platform_title")) or None,
+                "platform_description": _text(s.find("platform_description")) or None,
+                "platform_tags": (
+                    json.loads(_text(s.find("platform_tags")))
+                    if _text(s.find("platform_tags")) else None
+                ),
                 "upload_date": _text(s.find("upload_date")) or None,
             })
 
@@ -821,10 +925,17 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
                 "asset_type": _text(a.find("type")),
                 "file_path": asset_file,
                 "source_url": _text(a.find("source_url")) or None,
+                "resolved_url": _text(a.find("resolved_url")) or None,
                 "provenance": _text(a.find("provenance")) or None,
                 "source_provider": _text(a.find("source_provider")) or None,
+                "content_type": _text(a.find("content_type")) or None,
                 "file_hash": _text(a.find("file_hash")) or None,
                 "status": _text(a.find("status"), "valid"),
+                "validation_error": _text(a.find("validation_error")) or None,
+                "last_validated_at": _text(a.find("last_validated_at")) or None,
+                "created_at": _text(a.find("created_at")) or None,
+                "file_size_bytes": _int(a.find("file_size_bytes")),
+                "crop_position": _text(a.find("crop_position")) or None,
                 "width": _int(a.find("width")),
                 "height": _int(a.find("height")),
             })
@@ -1052,6 +1163,16 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
             })
 
     # ── timestamps ──
+    state_node = root.find("portable_state")
+    if state_node is not None and state_node.text:
+        try:
+            state = json.loads(state_node.text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid portable_state JSON: {exc}") from exc
+        if int(state.get("schema_version") or state_node.get("schemaVersion") or 0) != 1:
+            raise ValueError("unsupported portable_state schema version")
+        result["portable_state"] = state
+
     ts = root.find("timestamps")
     if ts is not None:
         result["original_created_at"] = _text(ts.find("created_at")) or None
@@ -1062,7 +1183,7 @@ def parse_playarr_xml(xml_path: str) -> Optional[Dict[str, Any]]:
         "artists", "artist_consolidation", "sources", "quality", "artwork",
         "scene_analysis", "file", "ratings", "archive", "processing_state",
         "flags", "related_versions", "entity_refs", "field_provenance",
-        "provenance_events", "timestamps",
+        "provenance_events", "portable_state", "timestamps",
     }
     known_attributes = {
         "version", "schemaVersion", "playarrVersion", "sidecarRevision",

@@ -15,12 +15,33 @@ export function sortPlaylistDraft(
     return reverse ? -result : result;
   };
   const next = [...entries];
-  if (!selected.size) return next.sort(compare);
+  // Sorting is deliberately selection-scoped. Never reorganise the entire
+  // playlist because the user forgot to select a bulk-edit target.
+  if (selected.size < 2) return next;
   const positions = next.map((entry, index) => selected.has(entry.occurrence_id) ? index : -1)
     .filter((index) => index >= 0);
   const sorted = positions.map((index) => next[index]).sort(compare);
   positions.forEach((position, index) => { next[position] = sorted[index]; });
   return next;
+}
+
+export function filterPlaylistEntries(entries: PlaylistEntry[], query: string): PlaylistEntry[] {
+  const term = query.trim().toLocaleLowerCase();
+  if (!term) return entries;
+  return entries.filter((entry) => [entry.artist, entry.title, entry.album, entry.year]
+    .some((value) => String(value ?? "").toLocaleLowerCase().includes(term)));
+}
+
+export function removePlaylistDraftEntries(
+  entries: PlaylistEntry[], selected: ReadonlySet<string>,
+): { entries: PlaylistEntry[]; removedOccurrenceIds: string[] } {
+  const removedOccurrenceIds = entries
+    .filter((entry) => selected.has(entry.occurrence_id))
+    .map((entry) => entry.occurrence_id);
+  return {
+    entries: entries.filter((entry) => !selected.has(entry.occurrence_id)),
+    removedOccurrenceIds,
+  };
 }
 
 export function movePlaylistEntry(

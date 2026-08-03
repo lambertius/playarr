@@ -40,15 +40,12 @@ from app.services.file_organizer import (
 )
 from app.services.metadata_resolver import (
     resolve_metadata, extract_artist_title, download_image, clean_title,
-    search_wikipedia, scrape_wikipedia_page, detect_article_mismatch,
-    search_imdb_music_video, search_musicbrainz,
+    search_musicbrainz,
     search_wikipedia_artist, search_wikipedia_album,
     _find_parent_album, _init_musicbrainz,
 )
-from app.scraper.unified_metadata import resolve_metadata_unified
 from app.services.normalizer import normalize_video
 from app.services.preview_generator import generate_preview
-from app.services.ai_summary import generate_ai_summary
 from app.services.artwork_manager import process_artist_album_artwork
 from app.services.telemetry import telemetry_store
 from app.services.retry_policy import decide_retry, should_auto_retry, MAX_ATTEMPTS
@@ -177,30 +174,32 @@ def _update_job_raw_fallback(job_id: int, **kwargs):
     if not sets:
         return
 
-    # Guard: check if already cancelled before writing
+    # This emergency path must still share the one-writer boundary. Bypassing
+    # it here used to turn a status fallback into a fresh source of contention.
+    from app.db_lock import _apply_lock
     wc = None
     for attempt in range(5):
         try:
-            wc = _sqlite3.connect(_db_path, timeout=30)
-            wc.execute("PRAGMA journal_mode=WAL")
-            wc.execute("PRAGMA busy_timeout=30000")
-            cur_status = wc.execute(
-                "SELECT status FROM processing_jobs WHERE id=?", (job_id,)
-            ).fetchone()
-            if cur_status and cur_status[0] in ("cancelling", "cancelled"):
-                new_status = kwargs.get("status")
-                if hasattr(new_status, "value"):
-                    new_status = new_status.value
-                if new_status not in (None, "cancelling", "cancelled", "failed"):
-                    return
-            sets.append("updated_at=?")
-            vals.append(datetime.now(timezone.utc).isoformat())
-            vals.append(job_id)
-            wc.execute(
-                f"UPDATE processing_jobs SET {', '.join(sets)} WHERE id=?",
-                tuple(vals),
-            )
-            wc.commit()
+            with _apply_lock:
+                wc = _sqlite3.connect(_db_path, timeout=30)
+                wc.execute("PRAGMA journal_mode=WAL")
+                wc.execute("PRAGMA busy_timeout=30000")
+                cur_status = wc.execute(
+                    "SELECT status FROM processing_jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if cur_status and cur_status[0] in ("cancelling", "cancelled"):
+                    new_status = kwargs.get("status")
+                    if hasattr(new_status, "value"):
+                        new_status = new_status.value
+                    if new_status not in (None, "cancelling", "cancelled", "failed"):
+                        return
+                attempt_sets = [*sets, "updated_at=?"]
+                attempt_vals = [*vals, datetime.now(timezone.utc).isoformat(), job_id]
+                wc.execute(
+                    f"UPDATE processing_jobs SET {', '.join(attempt_sets)} WHERE id=?",
+                    tuple(attempt_vals),
+                )
+                wc.commit()
             logger.info(f"_update_job(job={job_id}) raw fallback succeeded")
             return
         except Exception as exc:
@@ -899,6 +898,7 @@ def redownload_video_task(self, job_id: int, video_id: int, format_spec: str = N
                         _existing_file_path,
                         _rdl_settings.library_dir,
                         video_id=video_item.id,
+                        video_stable_id=video_item.stable_id,
                         playarr_video_id=_archive_portable_id, operation_id=f"redownload:{job_id}",
                         artist=video_item.artist or "",
                         title=video_item.title or "",
@@ -1659,8 +1659,11 @@ def _rescan_from_disk(job_id: int, video_id: int,
 
 @celery_app.task(bind=True, max_retries=2)
 def rescan_metadata_task(self, job_id: int, video_id: int,
+                         artist_override: str | None = None,
+                         title_override: str | None = None,
                          scrape_wikipedia: bool = True,
                          scrape_musicbrainz: bool = True,
+                         scrape_tmvdb: bool = False,
                          ai_auto: bool = False,
                          ai_only: bool = False,
                          hint_cover: bool = False,
@@ -1755,6 +1758,10 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                             break
                 if not ctx_artist:
                     ctx_artist = ctx_channel_name or video_item.artist or ""
+            if artist_override and artist_override.strip():
+                ctx_artist = artist_override.strip()
+            if title_override and title_override.strip():
+                ctx_title = title_override.strip()
         finally:
             rd.close()
 
@@ -1816,6 +1823,7 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
             scrape_musicbrainz=scrape_musicbrainz,
             ai_auto=ai_auto,
             ai_only=ai_only,
+            tmvdb_pull=scrape_tmvdb,
             normalise_audio=normalize,
         )
         _skip_wiki = import_policy.skip_wikipedia
@@ -1823,11 +1831,19 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
         _skip_ai = import_policy.skip_ai
         _append_job_log(job_id, f"Import policy: {import_policy.model_dump_json()}")
 
-        # resolve_metadata_unified only reads settings from its db param
+        # The rescan uses the same typed context and metadata stage as URL,
+        # disk-import and Scraper Tester pathways.
         settings_db = SessionLocal()
         try:
             _update_job(job_id, current_step="Resolving metadata", progress_percent=20)
-            metadata = resolve_metadata_unified(
+            from app.pipeline.import_context import ImportContext, run_metadata_stage
+            context = ImportContext(
+                pathway="rescan",
+                source=ctx_source_url or ctx_file_path or f"video:{video_id}",
+                policy=import_policy,
+            )
+            metadata = run_metadata_stage(
+                context,
                 artist=ctx_artist,
                 title=ctx_title,
                 db=settings_db,
@@ -1840,9 +1856,6 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                 filename=os.path.basename(ctx_file_path) if ctx_file_path else "",
                 folder_name=os.path.basename(ctx_folder_path) if ctx_folder_path else "",
                 duration_seconds=ctx_duration,
-                skip_wikipedia=_skip_wiki,
-                skip_musicbrainz=_skip_mb,
-                skip_ai=_skip_ai,
                 log_callback=lambda msg: _append_job_log(job_id, msg),
             )
         finally:
@@ -1870,9 +1883,10 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
         if not all_locked and "year" not in locked and metadata.get("year"):
             new_year = metadata["year"]
         if not all_locked and "plot" not in locked and metadata.get("plot"):
-            plot = metadata["plot"]
-            ai = generate_ai_summary(plot)
-            new_plot = ai if ai else plot
+            # AI Auto's final review already owns plot proof-reading.  Running
+            # a second untraced summary request here made production diverge
+            # from Scraper Tester and could invoke AI in scraper-only modes.
+            new_plot = metadata["plot"]
 
         # MB IDs: use scraped values with existing as fallback
         new_mb_artist_id = metadata.get("mb_artist_id") or ctx_mb_artist_id
@@ -1958,13 +1972,6 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
                     }
 
             # IMDB
-            if not metadata.get("imdb_url") and not (_skip_wiki and _skip_mb):
-                try:
-                    imdb_url = search_imdb_music_video(new_artist, new_title)
-                    if imdb_url:
-                        metadata["imdb_url"] = imdb_url
-                except Exception:
-                    pass
             if metadata.get("imdb_url"):
                 m = _re.search(r"(tt\d+|nm\d+)", metadata["imdb_url"])
                 source_links["imdb"] = {
@@ -2427,6 +2434,18 @@ def rescan_metadata_task(self, job_id: int, video_id: int,
         _update_job(job_id, status=JobStatus.finalizing, progress_percent=90,
                     current_step="Finalizing")
         _append_job_log(job_id, "Rescan complete — dispatching deferred tasks")
+
+        if scrape_tmvdb:
+            tmvdb_db = SessionLocal()
+            try:
+                from app.routers.tmvdb import TMVDBPullRequest, pull_metadata
+                pull_metadata(TMVDBPullRequest(video_id=video_id), db=tmvdb_db)
+                _append_job_log(job_id, "TMVDB candidates retrieved")
+            except Exception as tmvdb_error:
+                tmvdb_db.rollback()
+                _append_job_log(job_id, f"TMVDB retrieval failed: {tmvdb_error}")
+            finally:
+                tmvdb_db.close()
 
         # ── Stage D: Deferred tasks (AI enrichment, artwork, scenes, etc.) ──
         # Mirrors the import pipeline's advanced-mode deferred task list.
@@ -3137,7 +3156,15 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                 if video_item.quality_signature:
                     _duration = video_item.quality_signature.duration_seconds
 
-                metadata = resolve_metadata_unified(
+                from app.pipeline.import_context import ImportContext, run_metadata_stage
+                from app.services.import_policy import ImportPolicy
+                context = ImportContext(
+                    pathway="metadata_action",
+                    source=source_url or video_item.file_path or f"video:{video_id}",
+                    policy=ImportPolicy.from_legacy(ai_auto=True),
+                )
+                metadata = run_metadata_stage(
+                    context,
                     artist=_pipeline_artist,
                     title=_pipeline_title,
                     db=db,
@@ -3150,9 +3177,6 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                     duration_seconds=_duration,
                     filename=os.path.basename(video_item.file_path) if video_item.file_path else "",
                     folder_name=os.path.basename(video_item.folder_path) if video_item.folder_path else "",
-                    skip_wikipedia=False,
-                    skip_musicbrainz=False,
-                    skip_ai=False,
                     log_callback=lambda msg: _append_job_log(job_id, msg),
                 )
 
@@ -3306,20 +3330,53 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             _update_job(job_id, current_step="Running AI-only enrichment", progress_percent=max(progress, 10))
             _append_job_log(job_id, "Running AI-only enrichment (no MusicBrainz/Wikipedia)...")
             try:
-                ai_result = enrich_video_metadata(
-                    db, video_id,
-                    auto_apply=False,
-                    force=True,
+                from app.pipeline.import_context import ImportContext, run_metadata_stage
+                from app.services.import_policy import ImportPolicy
+                yt_source = db.query(Source).filter(
+                    Source.video_id == video_id,
+                    Source.provider.in_([SourceProvider.youtube, SourceProvider.vimeo]),
+                ).first()
+                source_url = yt_source.canonical_url if yt_source else ""
+                ai_metadata = run_metadata_stage(
+                    ImportContext(
+                        pathway="metadata_action",
+                        source=source_url or video_item.file_path or f"video:{video_id}",
+                        policy=ImportPolicy.from_legacy(ai_only=True),
+                    ),
+                    artist=video_item.artist or "",
+                    title=video_item.title or "",
+                    db=db,
+                    source_url=source_url,
+                    platform_title=(yt_source.platform_title or "") if yt_source else "",
+                    channel_name=(yt_source.channel_name or "") if yt_source else "",
+                    platform_description=(yt_source.platform_description or "")[:3000] if yt_source else "",
+                    platform_tags=(yt_source.platform_tags or []) if yt_source else [],
+                    upload_date=(yt_source.upload_date or "") if yt_source else "",
+                    filename=os.path.basename(video_item.file_path) if video_item.file_path else "",
+                    folder_name=os.path.basename(video_item.folder_path) if video_item.folder_path else "",
+                    duration_seconds=(
+                        video_item.quality_signature.duration_seconds
+                        if video_item.quality_signature else None
+                    ),
+                    log_callback=lambda msg: _append_job_log(job_id, msg),
                 )
-                if ai_result:
-                    _append_job_log(job_id, f"AI enrichment complete: confidence={ai_result.confidence_score:.2f}")
-                    updated_fields.append("ai_enrichment")
+                for field_name in ("artist", "title", "album", "year", "plot", "genres"):
+                    value = ai_metadata.get(field_name)
+                    if value not in (None, "", []) and field_name not in locked:
+                        proposed[field_name] = value
+                        updated_fields.append(field_name)
+                if ai_metadata.get("ai_final_review"):
+                    confidence = ai_metadata["ai_final_review"].get("confidence")
+                    _append_job_log(
+                        job_id,
+                        f"AI-only enrichment complete: confidence={confidence if confidence is not None else 'n/a'}",
+                    )
                     _set_processing_flag(db, video_item, "ai_enriched", method="ai_enrichment")
                     db.commit()
                     _set_pipeline_step(job_id, "AI enrichment", "success")
                 else:
-                    _append_job_log(job_id, "AI enrichment skipped (provider not configured)")
-                    _set_pipeline_step(job_id, "AI enrichment", "skipped")
+                    _append_job_log(job_id, "AI-only enrichment returned no final review")
+                    _set_pipeline_step(job_id, "AI enrichment", "failed")
             except Exception as e:
                 db.rollback()
                 _append_job_log(job_id, f"AI enrichment failed: {e}")
@@ -3339,14 +3396,19 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             # identical MusicBrainz resolution (supports recording URLs,
             # release-group URLs, and search fallback).
             try:
-                _mb_metadata = resolve_metadata_unified(
+                from app.pipeline.import_context import ImportContext, run_metadata_stage
+                from app.services.import_policy import ImportPolicy
+                context = ImportContext(
+                    pathway="metadata_action",
+                    source=video_item.file_path or f"video:{video_id}",
+                    policy=ImportPolicy.from_legacy(scrape_musicbrainz=True),
+                    musicbrainz_url=musicbrainz_url,
+                )
+                _mb_metadata = run_metadata_stage(
+                    context,
                     artist=video_item.artist or "",
                     title=video_item.title or "",
                     db=db,
-                    skip_wikipedia=True,
-                    skip_musicbrainz=False,
-                    skip_ai=True,
-                    musicbrainz_url=musicbrainz_url,
                     log_callback=lambda msg: _append_job_log(job_id, msg),
                 )
 
@@ -3415,26 +3477,48 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
             _check_cancelled(job_id)
             _update_job(job_id, current_step="Scraping Wikipedia", progress_percent=max(progress, 40))
 
-            if wikipedia_url and wikipedia_url.strip():
-                wiki_url = wikipedia_url.strip()
-                _append_job_log(job_id, f"Using provided Wikipedia URL: {wiki_url}")
-            else:
-                _append_job_log(job_id, f"Searching Wikipedia for: {video_item.artist} - {video_item.title}")
-                wiki_url = search_wikipedia(video_item.title, video_item.artist)
+            from app.pipeline.import_context import ImportContext, run_metadata_stage
+            from app.services.import_policy import ImportPolicy
+            context = ImportContext(
+                pathway="metadata_action",
+                source=video_item.file_path or f"video:{video_id}",
+                policy=ImportPolicy.from_legacy(scrape_wikipedia=True),
+                wikipedia_url=wikipedia_url,
+            )
+            _wiki_metadata = run_metadata_stage(
+                context,
+                artist=video_item.artist or "",
+                title=video_item.title or "",
+                db=db,
+                log_callback=lambda msg: _append_job_log(job_id, msg),
+            )
+            wiki_url = (_wiki_metadata.get("_source_urls") or {}).get("wikipedia")
+            wiki = {
+                "artist": _wiki_metadata.get("artist"),
+                "title": _wiki_metadata.get("title"),
+                "album": _wiki_metadata.get("album"),
+                "year": _wiki_metadata.get("year"),
+                "genres": _wiki_metadata.get("genres"),
+                "plot": _wiki_metadata.get("plot"),
+                "image_url": _wiki_metadata.get("image_url"),
+                "imdb_url": _wiki_metadata.get("imdb_url"),
+                "page_type": _wiki_metadata.get("wiki_page_type", "single"),
+            }
+            _wiki_failures = [
+                failure for failure in (_wiki_metadata.get("pipeline_failures") or [])
+                if str(failure.get("code", "")).startswith("WIKI_")
+            ]
+            mismatch_reason = _wiki_failures[0].get("description") if _wiki_failures else None
 
             if not wiki_url:
                 _append_job_log(job_id, "No Wikipedia article found")
             else:
                 _append_job_log(job_id, f"Found: {wiki_url}")
-                _update_job(job_id, current_step="Scraping Wikipedia page", progress_percent=max(progress, 50))
-                wiki = scrape_wikipedia_page(wiki_url)
 
                 _append_job_log(job_id, f"Scraped — album: {wiki.get('album')}, year: {wiki.get('year')}, "
                                 f"genres: {wiki.get('genres')}, has_plot: {bool(wiki.get('plot'))}, "
                                 f"has_image: {bool(wiki.get('image_url'))}")
 
-                # Mismatch detection
-                mismatch_reason = detect_article_mismatch(wiki, video_item.artist, video_item.title)
                 if mismatch_reason:
                     _append_job_log(job_id,
                         f"⚠ Article mismatch: {mismatch_reason}. Metadata will NOT be applied.")
@@ -3475,13 +3559,6 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                         updated_fields.append("year")
                     if wiki.get("plot") and "plot" not in locked:
                         plot = wiki["plot"]
-                        try:
-                            ai_sum = generate_ai_summary(plot)
-                            if ai_sum:
-                                plot = ai_sum
-                                _append_job_log(job_id, "AI summary generated for plot")
-                        except Exception:
-                            pass
                         proposed["plot"] = plot
                         updated_fields.append("plot")
                     if wiki.get("genres") and "genres" not in locked:
@@ -3546,10 +3623,9 @@ def scrape_metadata_task(self, job_id: int, video_id: int,
                         })
                     source_log.append(f"Wikipedia source found ({_wiki_source_type}): {wiki_url}")
 
-                # IMDB source (from Wikipedia or direct search)
+                # Record an IMDB link only when the selected provider returned
+                # one. Wiki-only must not launch a separate IMDB search.
                 imdb_url = wiki.get("imdb_url")
-                if not imdb_url:
-                    imdb_url = search_imdb_music_video(video_item.artist, video_item.title)
                 if imdb_url:
                     existing_imdb_src = db.query(Source).filter(
                         Source.video_id == video_id,
@@ -5824,15 +5900,19 @@ def library_scan_task(self, job_id: int, import_new: bool = True,
                 # Flag tracks with incomplete AI enrichment for the review queue
                 ps = video_item.processing_state or {}
                 _ps_done = lambda step: ps.get(step, {}).get("completed", False)
-                ai_done = _ps_done("ai_enriched")
-                scenes_done = _ps_done("scenes_analyzed")
-                if not (ai_done and scenes_done):
-                    _enrich_cat = "ai_partial" if (ai_done or scenes_done) else "ai_pending"
-                    _missing = []
-                    if not ai_done:
-                        _missing.append("AI metadata")
-                    if not scenes_done:
-                        _missing.append("scene analysis")
+                _requested_ai_steps = [
+                    ("ai_enriched", "AI metadata"),
+                    ("scenes_analyzed", "scene analysis"),
+                ]
+                _requested_ai_steps = [
+                    (step, label) for step, label in _requested_ai_steps if step in ps
+                ]
+                _missing = [
+                    label for step, label in _requested_ai_steps if not _ps_done(step)
+                ]
+                if _missing:
+                    _any_done = any(_ps_done(step) for step, _label in _requested_ai_steps)
+                    _enrich_cat = "ai_partial" if _any_done else "ai_pending"
                     video_item.review_status = "needs_human_review"
                     video_item.review_category = _enrich_cat
                     video_item.review_reason = f"Missing {', '.join(_missing)}"

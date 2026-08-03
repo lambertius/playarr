@@ -52,16 +52,21 @@ def _read_folder_manifest(folder: str) -> Optional[dict]:
         return None
 
 def _manifest_matches(manifest: dict, rel_norm: str, video_id: Optional[int] = None,
-                      playarr_video_id: Optional[str] = None) -> bool:
+                      playarr_video_id: Optional[str] = None,
+                      entity_id: Optional[str] = None) -> bool:
     """True if an archive manifest describes the given library file / video.
 
     Matches on video_id when available, otherwise on original_relative_path —
     ignoring the extension, which may change across an encode (.mkv → .mp4).
     """
-    manifest_stable_id = manifest.get("playarr_video_id") or manifest.get("video_stable_id")
-    if playarr_video_id and manifest_stable_id:
-        return playarr_video_id == manifest_stable_id
-    if video_id is not None and not manifest_stable_id and manifest.get("video_id") == video_id:
+    manifest_entity_id = manifest.get("entity_id") or manifest.get("video_stable_id")
+    if entity_id and manifest_entity_id:
+        return entity_id == manifest_entity_id
+    manifest_video_id = manifest.get("playarr_video_id")
+    if playarr_video_id and manifest_video_id:
+        return playarr_video_id == manifest_video_id
+    if (video_id is not None and not manifest_entity_id and not manifest_video_id
+            and manifest.get("video_id") == video_id):
         return True
     m_rel = os.path.normcase(os.path.normpath(manifest.get("original_relative_path") or ""))
     r_rel = os.path.normcase(os.path.normpath(rel_norm))
@@ -126,7 +131,7 @@ def write_archive_manifest(
 
         existing = _read_folder_manifest(archive_folder)
         if (existing and _manifest_matches(
-                existing, os.path.normpath(rel_path), video_id, video_stable_id)
+                existing, os.path.normpath(rel_path), video_id, playarr_video_id, video_stable_id)
                 and _manifest_video_path(archive_folder, existing)):
             logger.info(
                 "Archive manifest already records the true original for "
@@ -135,12 +140,13 @@ def write_archive_manifest(
             )
             return
 
-        portable_id = playarr_video_id or video_stable_id
-        if not portable_id:
-            raise ValueError("archive manifest requires playarr_video_id")
+        portable_id = playarr_video_id
+        if not portable_id and not video_stable_id:
+            raise ValueError("archive manifest requires entity_id or playarr_video_id")
         manifest = {
             "schema_version": 2,
             "playarr_video_id": portable_id,
+            "entity_id": video_stable_id,
             "operation_id": operation_id or str(__import__("uuid").uuid4()),
             "checksum_sha256": _file_checksum(archive_video_path, "sha256"),
             "original_relative_path": rel_path,
@@ -449,14 +455,14 @@ class EncodeRequest(BaseModel):
     crop_x: Optional[int] = None
     crop_y: Optional[int] = None
     target_dar: Optional[str] = None  # e.g. "16:9", "4:3" — sets display aspect ratio without cropping
-    crf: int = Field(default=18, ge=0, le=51)
-    preset: str = "medium"
+    crf: int = Field(default=14, ge=0, le=51)
+    preset: str = "slow"
     audio_passthrough: bool = True
     # Trim (seconds from start / before end)
     trim_start: Optional[float] = None
     trim_end: Optional[float] = None
     # Audio re-encode settings (used when trim is active or audio_passthrough=False)
-    audio_codec: Optional[str] = None   # "aac", "opus", "flac" or None for auto
+    audio_codec: Optional[str] = None   # "aac", "opus", "flac", "alac" or None for profile-aware auto
     audio_bitrate: Optional[str] = None  # e.g. "192k", "128k", None = match source
 
 
@@ -1058,12 +1064,14 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
         _v_artist = ""
         _v_title = ""
         _v_stable_id = None
+        _v_entity_id = None
         sdb = SessionLocal()
         try:
             v_pre = sdb.query(VideoItem).get(video_id)
             if v_pre:
                 _v_artist = v_pre.artist or ""
                 _v_title = v_pre.title or ""
+                _v_entity_id = v_pre.stable_id
                 _v_stable_id = v_pre.playarr_video_id
                 if not _v_stable_id:
                     from app.services.content_id import compute_ids_for_video
@@ -1125,6 +1133,7 @@ def _run_encode_job(job_id: int, video_id: int, input_path: str, crop_params, ta
             original_library_path=norm_input,
             library_dir=_lib_root,
             video_id=video_id,
+            video_stable_id=_v_entity_id,
             playarr_video_id=_v_stable_id,
             operation_id=_file_operation_id,
             artist=_v_artist,

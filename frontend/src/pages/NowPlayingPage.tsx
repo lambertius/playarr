@@ -10,9 +10,9 @@ import { useUpdateVideo } from "@/hooks/queries";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { addToVideoEditorQueue } from "@/pages/VideoEditorPage";
 import { useToast } from "@/components/Toast";
-import { FullscreenControls } from "@/components/FullscreenControls";
+import { FullscreenControls, RemoteTransportControls } from "@/components/FullscreenControls";
 import type { VideoItemDetail } from "@/types";
-import { PlaybackSessionGuard } from "@/lib/playbackSession";
+import { classifyFullscreenChange, PlaybackSessionGuard } from "@/lib/playbackSession";
 
 // ── Animated artwork grid background ──────────────────────
 type TransitionKind = "fade" | "flip" | "spin";
@@ -446,6 +446,11 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
   const fullscreenMode = usePlaybackStore((s) => s.fullscreenMode);
   const setFullscreenMode = usePlaybackStore((s) => s.setFullscreenMode);
   const setNativeFullscreen = usePlaybackStore((s) => s.setNativeFullscreen);
+  // Chromium can leave the decoded video layer detached after exiting native
+  // fullscreen while the desktop audio master continues normally. Remounting
+  // only the lightweight muted video surface reacquires that layer without
+  // interrupting audio or replacing the queue.
+  const [videoSurfaceEpoch, setVideoSurfaceEpoch] = useState(0);
 
   // TV/kiosk mode: the <video> plays a single combined stream (its own audio),
   // is its own master clock, and advances the queue itself.
@@ -549,7 +554,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       el.removeEventListener("ended", onEnded);
       el.removeEventListener("error", onError);
     };
-  }, [tvMode, track?.queueEntryId, track?.videoId, transcode]);
+  }, [tvMode, track?.queueEntryId, track?.videoId, transcode, videoSurfaceEpoch]);
 
   const [videoHovered, setVideoHovered] = useState(false);
   const [, setVideoAspect] = useState("16 / 9");
@@ -631,12 +636,25 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
 
   // ── Sync store when native fullscreen is exited via Escape / browser chrome ──
   useEffect(() => {
+    let wasFullscreen = Boolean(document.fullscreenElement);
     const onFsChange = () => {
-      setNativeFullscreen(Boolean(document.fullscreenElement));
+      const isNativeFullscreen = Boolean(document.fullscreenElement);
+      setNativeFullscreen(isNativeFullscreen);
+      const transition = classifyFullscreenChange(wasFullscreen, isNativeFullscreen, profile);
+      if (transition.exited) {
+        // Escape/browser chrome must leave both native fullscreen and Playarr's
+        // presentation layout. Otherwise the PC remains on a stale video-only
+        // compositor surface until the route is remounted.
+        if (usePlaybackStore.getState().fullscreenMode !== "off") {
+          setFullscreenMode("off");
+        }
+        if (transition.recoverVideoSurface) setVideoSurfaceEpoch((value) => value + 1);
+      }
+      wasFullscreen = isNativeFullscreen;
     };
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, [setNativeFullscreen]);
+  }, [profile, setFullscreenMode, setNativeFullscreen]);
 
   // Presentation mode and browser-native fullscreen are separate states. Escape
   // may leave native fullscreen without remounting or changing the video layout.
@@ -825,6 +843,7 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
           >
             {track ? (
               <video
+                key={videoSurfaceEpoch}
                 ref={videoRef}
                 className="w-full h-full object-contain"
                 autoPlay={isPlaying}
@@ -854,7 +873,12 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
                 overlaySize={overlaySize}
                 overlayDuration={overlayDuration}
                 allowBlur={allowBlur}
+                reserveRemoteTransport={tvMode}
               />
+            )}
+
+            {tvMode && (
+              <RemoteTransportControls visible={queueVisible} onActivity={scheduleQueueHide} />
             )}
 
             {(playbackState === "loading" || playbackState === "buffering") && track && (
@@ -951,8 +975,8 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
       {tvGate}
 
       {/* Fullscreen hover controls (theater mode only) */}
-      {(isFullscreen || tvMode) && (
-        <FullscreenControls visible={queueVisible} profile={profile} onActivity={scheduleQueueHide} />
+      {isFullscreen && !tvMode && (
+        <FullscreenControls visible={queueVisible} onActivity={scheduleQueueHide} />
       )}
     </div>
   );
@@ -1065,6 +1089,7 @@ function MetadataOverlay({
   overlaySize,
   overlayDuration,
   allowBlur = true,
+  reserveRemoteTransport = false,
 }: {
   detail: VideoItemDetail;
   track: PlaybackTrack;
@@ -1073,6 +1098,7 @@ function MetadataOverlay({
   overlaySize: number;
   overlayDuration: number;
   allowBlur?: boolean;
+  reserveRemoteTransport?: boolean;
 }) {
   const artUrl = getOverlayArtworkUrl(detail);
   const genres = detail.genres?.map((g) => g.name) ?? [];
@@ -1102,7 +1128,7 @@ function MetadataOverlay({
         fading ? "opacity-0" : "opacity-100"
       }`}
       style={{
-        bottom: 0,
+        bottom: reserveRemoteTransport ? "12%" : 0,
         left: 0,
         right: 0,
         height: `${overlaySize}%`,

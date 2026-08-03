@@ -1,24 +1,28 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useMemo, useCallback, useRef, useEffect, useDeferredValue } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import axios from "axios";
 import {
   Archive, Trash2, RotateCcw, Search, ChevronLeft, ChevronRight,
   Scissors, Film, Download, RefreshCw, Play, Pause, Volume2, VolumeX,
   X, Maximize2, ArrowRight, FolderOpen,
-  LayoutGrid, List,
 } from "lucide-react";
 import { useArchiveItems, useArchiveRestore, useArchiveDelete, useArchiveClear } from "@/hooks/queries";
 import { settingsApi, playbackApi } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { Tooltip } from "@/components/Tooltip";
+import { ErrorState, Skeleton } from "@/components/Feedback";
 import { cn, formatBytes, timeAgo } from "@/lib/utils";
 import { getPref, setPref } from "@/lib/preferences";
+import { ARCHIVE_REASON_TABS } from "@/lib/archiveTaxonomy";
 import type { ArchiveItem } from "@/types";
+import { ViewToggle } from "@/components/ViewToggle";
 
 // ── Archive page preferences (server-backed) ─────────────
 interface ArchivePrefs {
   pageSize: number;
   view: "list" | "grid";
+  reasonFilter: ArchiveReason;
 }
 
 const K_ARCHIVE_PAGE_SIZE = "archive_page_size";
@@ -26,7 +30,7 @@ const K_ARCHIVE_PAGE_SIZE = "archive_page_size";
 function archiveLegacy(): ArchivePrefs {
   let pageSize = 25;
   try { const n = Number(localStorage.getItem(K_ARCHIVE_PAGE_SIZE)); if (n) pageSize = n; } catch { /* ignore */ }
-  return { pageSize, view: "list" };
+  return { pageSize, view: "list", reasonFilter: "all" };
 }
 
 function getArchivePrefs(): ArchivePrefs {
@@ -39,7 +43,7 @@ function patchArchivePrefs(patch: Partial<ArchivePrefs>): void {
 }
 
 // ── Reason config ───────────────────────────────────────
-type ArchiveReason = "all" | "edit" | "redownload" | "trim" | "crop" | "both" | "restore_conflict" | "orphaned";
+type ArchiveReason = (typeof ARCHIVE_REASON_TABS)[number];
 
 const REASON_CONFIG: Record<string, { label: string; icon: React.ReactNode; color: string; badgeColor: string }> = {
   edit: { label: "Edit", icon: <Film size={12} />, color: "bg-cyan-500/10 text-cyan-400", badgeColor: "bg-cyan-500/15 text-cyan-400 border-cyan-500/20" },
@@ -66,34 +70,6 @@ function ReasonBadge({ reason }: { reason: string }) {
 }
 
 // ── Filter pill (matches queue style) ────────────────────
-function FilterPill({ icon, label, value, active, color, onClick, selected }: {
-  icon: React.ReactNode; label: string; value: number; active?: boolean; color: string;
-  onClick?: () => void; selected?: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border text-xs font-medium transition-all duration-150 cursor-pointer whitespace-nowrap",
-        selected
-          ? `${color} border-current/30 ring-1 ring-current/20 shadow-md`
-          : active
-            ? `border-surface-border text-text-secondary hover:border-current/40 hover:shadow-sm`
-            : "bg-surface/40 border-surface-border text-text-muted/50 hover:border-text-muted/30 hover:bg-surface-hover/40",
-      )}
-    >
-      <span className="opacity-70">{icon}</span>
-      <span>{label}</span>
-      <span className={cn(
-        "min-w-[1.25rem] px-1 py-0.5 rounded-full text-[10px] font-bold tabular-nums leading-none text-center",
-        selected ? "bg-current/20" : active ? `${color}` : "bg-surface-border/50",
-      )}>
-        {value}
-      </span>
-    </button>
-  );
-}
-
 // ── Pagination ──────────────────────────────────────────
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 
@@ -153,14 +129,14 @@ function ComparisonPlayer({ archiveItem, onClose }: { archiveItem: ArchiveItem; 
   const rafRef = useRef<number>(0);
 
   // Continuous sync loop — keeps library video locked to archive video
-  const syncLoop = useCallback(() => {
+  const syncLoop = useCallback(function frame() {
     if (!archiveRef.current || !libraryRef.current) return;
     const drift = libraryRef.current.currentTime - archiveRef.current.currentTime;
     if (Math.abs(drift) > 0.05) {
       libraryRef.current.currentTime = archiveRef.current.currentTime;
     }
     setCurrentTime(archiveRef.current.currentTime);
-    rafRef.current = requestAnimationFrame(syncLoop);
+    rafRef.current = requestAnimationFrame(frame);
   }, []);
 
   // Sync playback: use archive video as master
@@ -303,27 +279,40 @@ function ComparisonPlayer({ archiveItem, onClose }: { archiveItem: ArchiveItem; 
 
 export function ArchivePage() {
   const navigate = useNavigate();
+  const [routeParams, setRouteParams] = useSearchParams();
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
   const restoreMutation = useArchiveRestore();
   const deleteMutation = useArchiveDelete();
   const clearMutation = useArchiveClear();
 
-  const [reasonFilter, setReasonFilter] = useState<ArchiveReason>("all");
-  const [searchQuery, setSearchQuery] = useState("");
+  const initialFocusVideoId = Number(routeParams.get("focus_video_id"));
+  const [focusVideoId, setFocusVideoId] = useState<number | null>(() =>
+    Number.isInteger(initialFocusVideoId) && initialFocusVideoId > 0 ? initialFocusVideoId : null,
+  );
+  const [reasonFilter, setReasonFilter] = useState<ArchiveReason>(() =>
+    focusVideoId ? "all" : getArchivePrefs().reasonFilter,
+  );
+  const [searchQuery, setSearchQuery] = useState(() => routeParams.get("search") ?? "");
+  const deferredSearch = useDeferredValue(searchQuery.trim());
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
   const [comparisonItem, setComparisonItem] = useState<ArchiveItem | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(() => getArchivePrefs().pageSize);
   const [viewMode, setViewMode] = useState<"list" | "grid">(() => getArchivePrefs().view);
-  const { data: archivePage, isLoading, refetch } = useArchiveItems({
+  const focusedEntryRef = useRef<HTMLDivElement>(null);
+  const scrolledFocusRef = useRef<number | null>(null);
+  const archiveQuery = useArchiveItems({
     reason: reasonFilter === "all" ? undefined : reasonFilter,
-    search: searchQuery.trim() || undefined, page, page_size: pageSize,
+    search: focusVideoId ? undefined : deferredSearch || undefined,
+    video_id: focusVideoId ?? undefined,
+    page, page_size: pageSize,
   });
+  const { data: archivePage, isLoading, isError, isFetching, refetch } = archiveQuery;
   const items = archivePage?.items;
 
   // Filtered items
-  const filtered = items ?? [];
+  const filtered = useMemo(() => items ?? [], [items]);
 
   // Reason and maintenance counts.
   const reasonCounts = useMemo(() => {
@@ -350,9 +339,16 @@ export function ArchivePage() {
     return Array.from(map.values());
   }, [filtered]);
 
-  const allCount = archivePage?.total ?? 0;
+  const archiveCount = reasonCounts.all ?? archivePage?.total ?? 0;
+  const matchingCount = archivePage?.total ?? 0;
   const totalPages = archivePage?.total_pages ?? 1;
   const pagedGroups = grouped;
+
+  useEffect(() => {
+    if (!focusVideoId || scrolledFocusRef.current === focusVideoId || !focusedEntryRef.current) return;
+    focusedEntryRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    scrolledFocusRef.current = focusVideoId;
+  }, [focusVideoId, grouped]);
 
   // Selection helpers
   const pagedFolders = useMemo(() => pagedGroups.flatMap(g => g.items.map(i => i.folder)), [pagedGroups]);
@@ -404,8 +400,11 @@ export function ArchivePage() {
       });
       toast({ type: "success", title: `Restored from archive (${result.operation_id})` });
       setSelectedFolders((prev) => { const n = new Set(prev); n.delete(item.folder); return n; });
-    } catch (e: any) {
-      toast({ type: "error", title: e?.response?.data?.detail || "Restore failed" });
+    } catch (error: unknown) {
+      const detail = axios.isAxiosError<{ detail?: string }>(error)
+        ? error.response?.data?.detail
+        : undefined;
+      toast({ type: "error", title: detail || "Restore failed" });
     }
   }, [restoreMutation, toast, confirm]);
 
@@ -464,7 +463,7 @@ export function ArchivePage() {
   const handleClearAll = useCallback(async () => {
     const ok = await confirm({
       title: "Clear entire archive?",
-      description: `This will permanently delete all ${allCount} archived item(s). This cannot be undone.`,
+      description: `This will permanently delete all ${archiveCount} archived item(s). This cannot be undone.`,
     });
     if (!ok) return;
     try {
@@ -474,9 +473,10 @@ export function ArchivePage() {
       toast({ type: "error", title: "Clear failed" });
     }
     setSelectedFolders(new Set());
-  }, [clearMutation, toast, confirm, allCount]);
+  }, [clearMutation, toast, confirm, archiveCount]);
 
   const handleReasonChange = useCallback((reason: ArchiveReason) => {
+    patchArchivePrefs({ reasonFilter: reason });
     setReasonFilter(reason);
     setPage(1);
     setSelectedFolders(new Set());
@@ -486,79 +486,88 @@ export function ArchivePage() {
     patchArchivePrefs({ pageSize: size });
     setPageSize(size);
     setPage(1);
+    setSelectedFolders(new Set());
   }, []);
 
   return (
-    <div className="p-4 md:p-6 max-w-5xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-5">
-        <div>
-          <h1 className="text-2xl font-bold text-text-primary">Archive</h1>
-          <p className="text-sm text-text-secondary mt-0.5">
-            {allCount} archived item{allCount !== 1 ? "s" : ""}
-          </p>
+    <div className="mx-auto max-w-6xl p-4 md:p-6">
+      <div className="mb-4">
+        <h1 className="text-2xl font-bold text-text-primary">Archive</h1>
+        <p className="mt-0.5 text-sm text-text-secondary">
+          {archiveCount} recoverable version{archiveCount !== 1 ? "s" : ""}
+        </p>
+      </div>
+
+      <div className="mb-3 border-b border-surface-border">
+        <div className="flex overflow-x-auto" role="tablist" aria-label="Archive reason">
+          {ARCHIVE_REASON_TABS.map((reason) => {
+            const config = reason === "all"
+              ? { label: "All", icon: <Archive size={14} /> }
+              : REASON_CONFIG[reason];
+            const count = reason === "all" ? archiveCount : (reasonCounts[reason] ?? 0);
+            return (
+              <button
+                key={reason}
+                onClick={() => handleReasonChange(reason)}
+                role="tab"
+                aria-selected={reasonFilter === reason}
+                className={cn(
+                  "relative flex shrink-0 items-center gap-1.5 px-3 py-2.5 text-sm font-medium",
+                  reasonFilter === reason ? "text-accent" : "text-text-muted hover:text-text-secondary",
+                )}
+              >
+                {config.icon} {config.label}
+                <span className="rounded-full bg-surface-lighter px-1.5 text-[10px] tabular-nums">{count}</span>
+                {reasonFilter === reason && <span className="absolute inset-x-0 bottom-0 h-0.5 rounded-t bg-accent" />}
+              </button>
+            );
+          })}
         </div>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-end gap-2 rounded-lg border border-surface-border bg-surface/40 p-3">
+        <label className="min-w-56 flex-1 text-[10px] uppercase tracking-wide text-text-muted">
+          Search
+          <span className="relative mt-1 block">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Search artist, title…"
+              placeholder="Artist or title"
               value={searchQuery}
-              onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }}
-              className="input-field pl-8 pr-3 py-1.5 text-sm w-56"
+              onChange={(event) => {
+                const nextSearch = event.target.value;
+                setSearchQuery(nextSearch);
+                setFocusVideoId(null);
+                setRouteParams((previous) => {
+                  const next = new URLSearchParams(previous);
+                  next.delete("focus_video_id");
+                  if (nextSearch.trim()) next.set("search", nextSearch);
+                  else next.delete("search");
+                  return next;
+                }, { replace: true });
+                setPage(1);
+                setSelectedFolders(new Set());
+              }}
+              className="input-field w-full py-1.5 pl-8 text-sm normal-case tracking-normal"
             />
-          </div>
-          <button onClick={() => refetch()} className="btn-ghost btn-sm gap-1.5">
-            <RefreshCw size={14} /> Refresh
-          </button>
-          <div className="flex rounded border border-surface-border" aria-label="Archive view">
-            <button aria-pressed={viewMode === "list"} className={cn("btn-ghost p-1.5", viewMode === "list" && "text-accent")} onClick={() => { setViewMode("list"); patchArchivePrefs({ view: "list" }); }}><List size={14} /></button>
-            <button aria-pressed={viewMode === "grid"} className={cn("btn-ghost p-1.5", viewMode === "grid" && "text-accent")} onClick={() => { setViewMode("grid"); patchArchivePrefs({ view: "grid" }); }}><LayoutGrid size={14} /></button>
-          </div>
-          {allCount > 0 && (
-            <Tooltip content="Permanently delete all items in the archive">
-              <button onClick={handleClearAll} disabled={clearMutation.isPending}
-                className="btn-ghost btn-sm gap-1.5 text-red-400 hover:text-red-300">
-                <Trash2 size={14} /> Clear All
-              </button>
-            </Tooltip>
-          )}
-        </div>
+          </span>
+        </label>
+        <ViewToggle value={viewMode} label="Archive layout" onChange={(next) => { setViewMode(next); patchArchivePrefs({ view: next }); }} />
+        <button onClick={() => refetch()} className="btn-ghost btn-sm gap-1.5">
+          <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} /> Refresh
+        </button>
+        {archiveCount > 0 && (
+          <Tooltip content="Permanently delete every item in the archive">
+            <button onClick={handleClearAll} disabled={clearMutation.isPending}
+              className="btn-ghost btn-sm gap-1.5 text-red-400 hover:text-red-300">
+              <Trash2 size={14} /> Clear archive…
+            </button>
+          </Tooltip>
+        )}
       </div>
 
-      {/* Reason filter pills */}
-      <div className="flex flex-wrap gap-1.5 mb-5">
-        <FilterPill
-          icon={<Archive size={14} />}
-          label="All"
-          value={allCount}
-          active={allCount > 0}
-          color="bg-blue-500/10 text-blue-400"
-          onClick={() => handleReasonChange("all")}
-          selected={reasonFilter === "all"}
-        />
-        {(["edit", "redownload", "trim", "crop", "both", "restore_conflict", "orphaned"] as const).map((reason) => {
-          const config = REASON_CONFIG[reason];
-          const count = reasonCounts[reason] ?? 0;
-          return (
-            <FilterPill
-              key={reason}
-              icon={config.icon}
-              label={config.label}
-              value={count}
-              active={count > 0}
-              color={config.color}
-              onClick={() => handleReasonChange(reason)}
-              selected={reasonFilter === reason}
-            />
-          );
-        })}
-      </div>
-
-      {/* Bulk action bar */}
-      {someSelected && (
-        <div className="flex items-center gap-3 bg-surface-secondary/50 border border-surface-border rounded-lg px-4 py-2 mb-3">
+      {filtered.length > 0 && (
+        <div className="mb-3 flex items-center gap-3 rounded-lg border border-surface-border bg-surface/50 px-3 py-2">
           <input
             type="checkbox"
             checked={allSelected}
@@ -566,36 +575,28 @@ export function ArchivePage() {
               if (el) el.indeterminate = someSelected && !allSelected;
             }}
             onChange={toggleSelectAll}
-            className="accent-accent w-4 h-4 cursor-pointer"
+            className="h-4 w-4 cursor-pointer accent-accent"
+            aria-label="Select this page"
           />
-          <span className="text-sm text-text-secondary flex-1">
-            {selectedFolders.size} selected
+          <span className="flex-1 text-sm text-text-secondary">
+            {someSelected ? `${selectedFolders.size} selected on this page` : "Select this page"}
           </span>
-          <Tooltip content="Restore all selected items from archive back to the library">
-            <button onClick={handleBulkRestore} disabled={restoreMutation.isPending}
-              className="btn-ghost btn-sm gap-1 text-emerald-400 hover:text-emerald-300 text-xs">
-              <RotateCcw size={13} /> Restore
-            </button>
-          </Tooltip>
-          <Tooltip content="Permanently delete all selected items from the archive">
-            <button onClick={handleBulkDelete} disabled={deleteMutation.isPending}
-              className="btn-ghost btn-sm gap-1 text-red-400 hover:text-red-300 text-xs">
-              <Trash2 size={13} /> Delete
-            </button>
-          </Tooltip>
-        </div>
-      )}
-
-      {/* Select all header (when no selection) */}
-      {!someSelected && filtered.length > 0 && (
-        <div className="flex items-center gap-3 bg-surface-secondary/50 border border-surface-border rounded-lg px-4 py-2 mb-3">
-          <input
-            type="checkbox"
-            checked={false}
-            onChange={toggleSelectAll}
-            className="accent-accent w-4 h-4 cursor-pointer"
-          />
-          <span className="text-sm text-text-secondary flex-1">Select all</span>
+          {someSelected && (
+            <>
+              <Tooltip content="Restore all selected items from archive back to the library">
+                <button onClick={handleBulkRestore} disabled={restoreMutation.isPending}
+                  className="btn-secondary btn-sm gap-1.5 text-emerald-400">
+                  <RotateCcw size={13} /> Restore selected
+                </button>
+              </Tooltip>
+              <Tooltip content="Permanently delete all selected items from the archive">
+                <button onClick={handleBulkDelete} disabled={deleteMutation.isPending}
+                  className="btn-ghost btn-sm gap-1.5 text-red-400 hover:text-red-300">
+                  <Trash2 size={13} /> Delete selected
+                </button>
+              </Tooltip>
+            </>
+          )}
         </div>
       )}
 
@@ -603,9 +604,11 @@ export function ArchivePage() {
       {isLoading ? (
         <div className="space-y-3">
           {[...Array(3)].map((_, i) => (
-            <div key={i} className="card h-32 animate-pulse bg-surface-lighter rounded-lg" />
+            <Skeleton key={i} className="h-32 rounded-xl" />
           ))}
         </div>
+      ) : isError ? (
+        <ErrorState message="Failed to load the archive" onRetry={refetch} />
       ) : grouped.length === 0 ? (
         <div className="card text-center py-12">
           <Archive className="w-12 h-12 mx-auto mb-3 opacity-30" />
@@ -620,7 +623,16 @@ export function ArchivePage() {
         <>
           <div className={cn(viewMode === "grid" ? "grid gap-3 xl:grid-cols-2" : "space-y-3")}>
             {pagedGroups.map((group) => (
-              <div key={group.key} className="card p-0 overflow-hidden">
+              <div
+                key={group.key}
+                ref={group.video_id === focusVideoId ? focusedEntryRef : undefined}
+                className={cn(
+                  "overflow-hidden rounded-xl border bg-surface/70",
+                  group.video_id === focusVideoId
+                    ? "border-accent/70 ring-1 ring-accent/30"
+                    : "border-surface-border",
+                )}
+              >
                 <div className="flex">
                   {/* Large poster — clickable to library */}
                   <div
@@ -755,8 +767,8 @@ export function ArchivePage() {
             page={page}
             totalPages={totalPages}
             pageSize={pageSize}
-            total={allCount}
-            onPageChange={setPage}
+            total={matchingCount}
+            onPageChange={(next) => { setPage(next); setSelectedFolders(new Set()); }}
             onPageSizeChange={handlePageSizeChange}
           />
         </>

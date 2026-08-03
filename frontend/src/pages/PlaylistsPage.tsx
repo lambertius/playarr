@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { ListMusic, Plus, Trash2, Play, Shuffle as ShuffleIcon, ChevronUp, ChevronDown, ArrowDownAZ, ArrowUpAZ, GripVertical, Pencil, Check, X } from "lucide-react";
 import { Tooltip } from "@/components/Tooltip";
 import { EmptyState } from "@/components/Feedback";
@@ -7,8 +7,15 @@ import { usePlaylists, usePlaylist, useCreatePlaylist, useUpdatePlaylist, useDel
 import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { playbackApi } from "@/lib/api";
 import { shuffle } from "@/lib/shuffle";
-import { movePlaylistEntry, sortPlaylistDraft } from "@/lib/playlistDraft";
+import {
+  filterPlaylistEntries,
+  movePlaylistEntry,
+  removePlaylistDraftEntries,
+  sortPlaylistDraft,
+} from "@/lib/playlistDraft";
 import type { PlaylistEntry, PlaylistSortField } from "@/types";
+import { getPref, setPref } from "@/lib/preferences";
+import { ViewToggle } from "@/components/ViewToggle";
 
 type SortDir = "asc" | "desc";
 type SortBy = "name" | "entry_count" | "created_at" | "updated_at";
@@ -21,12 +28,17 @@ const SORT_OPTIONS: { value: SortBy; label: string }[] = [
 ];
 
 export function PlaylistsPage() {
+  const workspace = getPref<Record<string, unknown>>("workspace", {});
   const { data: playlists } = usePlaylists();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
-  const [sortBy, setSortBy] = useState<SortBy>("name");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [view, setView] = useState<"grid" | "list">((workspace.playlistView as "grid" | "list") ?? "grid");
+  const [sortBy, setSortBy] = useState<SortBy>((workspace.playlistSort as SortBy) ?? "name");
+  const [sortDir, setSortDir] = useState<SortDir>((workspace.playlistDirection as SortDir) ?? "asc");
+  useEffect(() => {
+    setPref("workspace", { ...getPref("workspace", {}), playlistView: view, playlistSort: sortBy, playlistDirection: sortDir });
+  }, [view, sortBy, sortDir]);
 
   const createMutation = useCreatePlaylist();
   const deleteMutation = useDeletePlaylist();
@@ -65,7 +77,7 @@ export function PlaylistsPage() {
   };
 
   return (
-    <div className="p-4 md:p-6 max-w-7xl">
+    <div className="p-4 md:p-6 max-w-[1600px]">
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <h1 className="text-xl font-bold text-text-primary flex items-center gap-2">
           <ListMusic size={22} /> Playlists
@@ -94,6 +106,7 @@ export function PlaylistsPage() {
         >
           <Plus size={14} /> New
         </button>
+        <div className="ml-auto"><ViewToggle value={view} onChange={setView} label="Playlist layout" /></div>
       </div>
 
       {/* Create row */}
@@ -124,14 +137,14 @@ export function PlaylistsPage() {
           description="Click 'New' to create your first playlist, or add songs from the library."
         />
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className={`grid grid-cols-1 gap-4 ${view === "list" ? "lg:grid-cols-[15rem_minmax(0,1fr)]" : ""}`}>
           {/* Left: playlist list */}
-          <div className="space-y-1">
+          <div className={view === "grid" ? "grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3" : "space-y-1"}>
             {sortedPlaylists.map((pl) => (
               <button
                 key={pl.id}
                 onClick={() => setSelectedId(pl.id)}
-                className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
+                className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${view === "grid" ? "card min-h-20" : ""} ${
                   selectedId === pl.id
                     ? "bg-accent/10 text-accent"
                     : "text-text-secondary hover:bg-surface-lighter hover:text-text-primary"
@@ -144,7 +157,7 @@ export function PlaylistsPage() {
           </div>
 
           {/* Right: selected playlist detail */}
-          <div className="md:col-span-2">
+          <div className={view === "list" ? "min-w-0" : "mt-2"}>
             {selectedId ? (
               <PlaylistDetail
                 key={selectedId}
@@ -173,14 +186,18 @@ const TRACK_SORT_FIELDS: { value: PlaylistSortField; label: string }[] = [
   { value: "year", label: "Year" },
 ];
 
-function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete: () => void }) {
+export function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete: () => void }) {
   const { data: playlist } = usePlaylist(playlistId);
   const batchEditMutation = useBatchEditPlaylist();
   const updateMutation = useUpdatePlaylist();
   const replaceQueue = usePlaybackStore((s) => s.replaceQueue);
   const { toast } = useToast();
-  const [sortField, setSortField] = useState<PlaylistSortField>("artist");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const detailPrefs = getPref<Record<string, unknown>>("workspace", {});
+  const [sortField, setSortField] = useState<PlaylistSortField>((detailPrefs.playlistEntrySort as PlaylistSortField) ?? "artist");
+  const [sortDir, setSortDir] = useState<SortDir>((detailPrefs.playlistEntryDirection as SortDir) ?? "asc");
+  useEffect(() => {
+    setPref("workspace", { ...getPref("workspace", {}), playlistEntrySort: sortField, playlistEntryDirection: sortDir });
+  }, [sortField, sortDir]);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   // Local draft order: null = clean (render server order). Set on the first
@@ -189,6 +206,7 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
   const [draft, setDraft] = useState<PlaylistEntry[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [pendingRemovals, setPendingRemovals] = useState<Set<string>>(() => new Set());
+  const [trackFilter, setTrackFilter] = useState("");
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [reorderAnnouncement, setReorderAnnouncement] = useState("");
@@ -206,6 +224,7 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
     );
   // While dirty render the draft; otherwise always render fresh server data.
   const entries = draft ?? serverEntries.filter((entry) => !pendingRemovals.has(entry.occurrence_id));
+  const visibleEntries = filterPlaylistEntries(entries, trackFilter);
   const canReorder = entries.length > 1 && !batchEditMutation.isPending;
 
   const startRename = () => { setNameDraft(playlist.name); setEditingName(true); };
@@ -305,9 +324,31 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
     setDraft(entries.filter((item) => item.occurrence_id !== entry.occurrence_id));
   };
 
+  const removeSelected = () => {
+    const result = removePlaylistDraftEntries(entries, selected);
+    if (!result.removedOccurrenceIds.length) return;
+    setPendingRemovals((current) => new Set([...current, ...result.removedOccurrenceIds]));
+    setDraft(result.entries);
+    setSelected(new Set());
+    setReorderAnnouncement(`${result.removedOccurrenceIds.length} selected tracks staged for removal`);
+  };
+
   const applySort = () => {
+    if (selected.size < 2) return;
     setDraft(sortPlaylistDraft(entries, selected, sortField, sortDir));
-    setReorderAnnouncement(selected.size ? `${selected.size} selected tracks sorted` : "Playlist sorted");
+    setReorderAnnouncement(`${selected.size} selected tracks sorted by ${sortField} ${sortDir === "asc" ? "ascending" : "descending"}`);
+  };
+
+  const sortFromHeader = (field: PlaylistSortField) => {
+    const direction: SortDir = sortField === field && sortDir === "asc" ? "desc" : "asc";
+    setSortField(field);
+    setSortDir(direction);
+    if (selected.size < 2) {
+      setReorderAnnouncement(`Select at least two tracks to sort by ${field}`);
+      return;
+    }
+    setDraft(sortPlaylistDraft(entries, selected, field, direction));
+    setReorderAnnouncement(`${selected.size} selected tracks sorted by ${field} ${direction === "asc" ? "ascending" : "descending"}`);
   };
 
   const toggleSelected = (occurrenceId: string) => {
@@ -382,61 +423,86 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
         <p className="text-xs text-text-muted mb-3">{playlist.description}</p>
       )}
 
-      {/* Reorganise controls */}
-      {serverEntries.length > 1 && (
-        <div className="flex flex-wrap items-center gap-2 mb-3 pb-3 border-b border-surface-border">
-          <span className="text-[11px] text-text-muted">Sort by</span>
-          <select
-            value={sortField}
-            onChange={(e) => setSortField(e.target.value as PlaylistSortField)}
-            className="input-field w-auto py-1 text-xs"
-            aria-label="Sort tracks by"
-          >
-            {TRACK_SORT_FIELDS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
+      {/* One persistent library-style filter and bulk-edit surface. */}
+      {serverEntries.length > 0 && (
+        <div className="flex flex-wrap items-end gap-3 mb-3 rounded-lg bg-surface-secondary/50 border border-border p-3">
+          <label className="flex flex-col gap-1 text-xs text-text-muted">
+            Filter tracks
+            <input
+              type="search"
+              value={trackFilter}
+              onChange={(event) => setTrackFilter(event.target.value)}
+              placeholder="Artist, title, album or year…"
+              className="input-field w-56 py-1 text-xs"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-text-muted">
+            Sort selected by
+            <select
+              value={sortField}
+              onChange={(event) => setSortField(event.target.value as PlaylistSortField)}
+              className="input-field w-auto py-1 text-xs"
+              aria-label="Sort selected tracks by"
+            >
+              {TRACK_SORT_FIELDS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
           <Tooltip content={sortDir === "asc" ? "Ascending (A→Z / oldest first)" : "Descending (Z→A / newest first)"}>
             <button
-              onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+              type="button"
+              onClick={() => setSortDir((direction) => direction === "asc" ? "desc" : "asc")}
               className="btn-ghost btn-sm text-xs"
               aria-label="Toggle sort direction"
             >
               {sortDir === "asc" ? <ArrowDownAZ size={14} /> : <ArrowUpAZ size={14} />}
             </button>
           </Tooltip>
-          <Tooltip content={selected.size > 0 ? "Sort only selected tracks within their current positions" : "Sort the whole playlist"}>
+          <Tooltip content={selected.size >= 2 ? "Sort selected tracks within their occupied positions" : "Select at least two tracks to sort"}>
             <button
+              type="button"
               onClick={applySort}
+              disabled={selected.size < 2 || batchEditMutation.isPending}
               className="btn-secondary btn-sm text-xs"
+              aria-label="Sort selected"
             >
-              {selected.size > 0 ? `Sort selected (${selected.size})` : "Sort all"}
+              Sort selected{selected.size > 0 ? ` (${selected.size})` : ""}
             </button>
           </Tooltip>
-          <span className="text-[10px] text-text-muted ml-auto">Or drag tracks (or use ↑ ↓) to reorder manually</span>
-        </div>
-      )}
-
-      {/* Unsaved order bar */}
-      {dirty && (
-        <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-accent/10 border border-accent/30">
-          <span className="text-xs text-text-primary flex-1 min-w-0">
-            Unsaved playlist changes{pendingRemovals.size > 0 ? ` · ${pendingRemovals.size} to remove` : ""}
-          </span>
           <button
-            onClick={saveChanges}
-            disabled={batchEditMutation.isPending}
-            className="btn-primary btn-sm"
+            type="button"
+            onClick={removeSelected}
+            disabled={selected.size === 0 || batchEditMutation.isPending}
+            className="btn-ghost btn-sm text-xs text-danger hover:bg-danger/10"
           >
-            {batchEditMutation.isPending ? "Saving…" : "Save changes"}
+            <Trash2 size={13} /> Remove selected{selected.size > 0 ? ` (${selected.size})` : ""}
           </button>
-          <button
-            onClick={undoChanges}
-            disabled={batchEditMutation.isPending}
-            className="btn-ghost btn-sm"
-          >
-            Undo changes
-          </button>
+          <div className="ml-auto flex flex-col items-end gap-1">
+            <span className={`text-[11px] ${dirty ? "text-accent" : "text-text-muted"}`}>
+              {dirty
+                ? `Unsaved changes${pendingRemovals.size ? ` · ${pendingRemovals.size} to remove` : ""}`
+                : `${selected.size} selected · drag rows to reorder`}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={undoChanges}
+                disabled={!dirty || batchEditMutation.isPending}
+                className="btn-ghost btn-sm"
+              >
+                Undo changes
+              </button>
+              <button
+                type="button"
+                onClick={saveChanges}
+                disabled={!dirty || batchEditMutation.isPending}
+                className="btn-primary btn-sm"
+              >
+                {batchEditMutation.isPending ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -453,26 +519,42 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
       ) : (
         <div className="overflow-x-auto">
           <p className="sr-only" aria-live="polite">{reorderAnnouncement}</p>
-          <div className="grid grid-cols-[1.5rem_1.5rem_2rem_minmax(9rem,1fr)_minmax(10rem,1.4fr)_minmax(8rem,1fr)_4rem_4.5rem] gap-2 items-center min-w-[760px] px-2 py-2 text-[10px] uppercase tracking-wide text-text-muted border-b border-surface-border">
+          <div className="grid grid-cols-[1.5rem_1.5rem_2rem_2.5rem_minmax(9rem,1fr)_minmax(10rem,1.4fr)_minmax(8rem,1fr)_4rem_4.5rem] gap-2 items-center min-w-[900px] px-2 py-2 text-[10px] uppercase tracking-wide text-text-muted border-b border-surface-border">
             <input
               type="checkbox"
-              checked={entries.length > 0 && selected.size === entries.length}
-              onChange={() => setSelected(
-                selected.size === entries.length
-                  ? new Set()
-                  : new Set(entries.map((entry) => entry.occurrence_id)),
-              )}
-              aria-label="Select all playlist tracks"
+              checked={visibleEntries.length > 0 && visibleEntries.every((entry) => selected.has(entry.occurrence_id))}
+              onChange={() => setSelected((current) => {
+                const next = new Set(current);
+                const allVisibleSelected = visibleEntries.every((entry) => next.has(entry.occurrence_id));
+                visibleEntries.forEach((entry) => allVisibleSelected
+                  ? next.delete(entry.occurrence_id)
+                  : next.add(entry.occurrence_id));
+                return next;
+              })}
+              aria-label="Select all visible playlist tracks"
             />
             <span aria-hidden />
-            <span aria-hidden />
-            <span>Artist</span>
-            <span>Title</span>
-            <span>Album</span>
-            <span>Year</span>
+            <span>#</span>
+            <span aria-label="Artwork">Art</span>
+            {TRACK_SORT_FIELDS.map(({ value, label }) => (
+              <button
+                type="button"
+                key={value}
+                onClick={() => sortFromHeader(value)}
+                className={`hover:text-text-primary rounded focus-visible:ring-2 focus-visible:ring-accent ${value === "year" ? "text-center" : "text-left"}`}
+                aria-sort={sortField === value ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
+                title="Sort the selected tracks by this column"
+              >
+                {label}{sortField === value ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
+              </button>
+            ))}
             <span className="text-right">Actions</span>
           </div>
-          {entries.map((entry, idx) => {
+          {visibleEntries.length === 0 && (
+            <p className="py-8 text-center text-sm text-text-muted">No tracks match “{trackFilter}”.</p>
+          )}
+          {visibleEntries.map((entry) => {
+            const idx = entries.findIndex((candidate) => candidate.occurrence_id === entry.occurrence_id);
             const isDragging = dragIndex === idx;
             const isDropTarget = dragOverIndex === idx && dragIndex !== null && dragIndex !== idx;
             // The dragged row lands AT the target index: dragging down inserts
@@ -499,9 +581,9 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
                   if (event.key === "End") { event.preventDefault(); moveEntry(idx, 0, "end"); }
                 }}
                 aria-label={`${entry.artist} — ${entry.title}. Hold Alt and use arrows, Home, or End to reorder.`}
-                className={`grid grid-cols-[1.5rem_1.5rem_2rem_minmax(9rem,1fr)_minmax(10rem,1.4fr)_minmax(8rem,1fr)_4rem_4.5rem] gap-2 items-center min-w-[760px] px-2 py-1.5 rounded hover:bg-surface-lighter group border-y-2 border-transparent ${indicator} ${
+                className={`grid grid-cols-[1.5rem_1.5rem_2rem_2.5rem_minmax(9rem,1fr)_minmax(10rem,1.4fr)_minmax(8rem,1fr)_4rem_4.5rem] gap-2 items-center min-w-[900px] px-2 py-1.5 rounded hover:bg-surface-lighter group border-y-2 border-transparent ${indicator} ${
                   isDragging ? "opacity-40" : ""
-                } ${isDropTarget ? "bg-surface-lighter" : ""}`}
+                } ${isDropTarget ? "bg-surface-lighter" : ""} ${selected.has(entry.occurrence_id) ? "bg-accent/5" : ""}`}
               >
                 <input
                   type="checkbox"
@@ -517,6 +599,7 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
                   />
                 )}
                 {!canReorder && <span aria-hidden />}
+                <span className="text-[11px] text-text-muted tabular-nums">{idx + 1}</span>
                 {entry.has_poster ? (
                   <img
                     src={playbackApi.posterUrl(entry.video_id)}
@@ -529,7 +612,7 @@ function PlaylistDetail({ playlistId, onDelete }: { playlistId: number; onDelete
                 <p className="text-xs font-medium text-text-primary truncate">{entry.artist}</p>
                 <p className="text-xs text-text-primary truncate">{entry.title}</p>
                 <p className="text-[11px] text-text-secondary truncate">{entry.album || "—"}</p>
-                <p className="text-[11px] text-text-secondary">{entry.year ?? "—"}</p>
+                <p className="text-[11px] text-text-secondary text-center">{entry.year ?? "—"}</p>
                 {/* Manual move up/down — edits the local draft until saved */}
                 <div className="flex items-center justify-end gap-0.5 opacity-70 group-hover:opacity-100 transition-all">
                   <Tooltip content="Move up">

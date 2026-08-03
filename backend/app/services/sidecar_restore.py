@@ -19,6 +19,10 @@ from app.models import (
     GenreConsolidation,
     GenreConsolidationMember,
     MediaAsset,
+    MetadataSnapshot,
+    NormalizationHistory,
+    ContributionLog,
+    VideoEditorQueueEntry,
     Playlist,
     PlaylistEntry,
     QualitySignature,
@@ -27,6 +31,7 @@ from app.models import (
     ReviewCase,
     ReviewCaseEdge,
     ReviewCaseItem,
+    ReviewActionPlan,
 )
 from app.services.playarr_xml import parse_playarr_xml
 from app.services.sidecar_store import SidecarValidationError, validate_playarr_sidecar
@@ -47,20 +52,19 @@ RESTORED_FIELDS = frozenset({
     "review_status", "review_reason", "review_category", "review_history",
     "dismissed_duplicate_refs", "rename_dismissed", "related_versions",
     "parent_video_ref", "canonical_provenance", "canonical_confidence",
-    "entity_refs", "field_provenance", "provenance_events",
+    "entity_refs", "field_provenance", "provenance_events", "portable_state",
+    "scene_analysis", "original_created_at", "original_updated_at",
     "version_type", "alternate_version_label", "original_artist", "original_title",
 })
 DERIVED_FIELDS = frozenset({"xml_version", "playarr_version", "content_hash", "exported_at"})
 EXCLUDED_FIELDS = frozenset({
-    # Scene analysis is a regenerable cache whose files may not survive a move.
-    "scene_analysis",
     # Numeric relationships are v1 compatibility inputs and are never portable.
     "legacy_parent_video_id", "legacy_dismissed_duplicate_ids",
     # Report metadata describes parsing rather than library state.
     "validation_report",
     # These fields are forensic inputs only. Archive identity comes from the
     # archive manifest, and source timestamps are not written onto new rows.
-    "archive_original_filename", "original_created_at", "original_updated_at",
+    "archive_original_filename",
 })
 
 
@@ -96,6 +100,13 @@ def parse_restore_document(path: str | Path) -> dict[str, Any]:
 
 def _video_path(data: dict[str, Any], library_root: Path) -> Path:
     source = Path(data["_source_path"])
+    candidates: list[Path] = []
+    stem = source.name.removesuffix(".playarr.xml")
+    for item in source.parent.glob(f"{stem}.*"):
+        if item.is_file() and item.suffix.lower() in {
+            ".mkv", ".mp4", ".webm", ".avi", ".mov", ".mpg", ".mpeg", ".m4v",
+        }:
+            candidates.append(item.resolve())
     relative = data.get("relative_path")
     if relative:
         candidate = (library_root / relative).resolve()
@@ -103,10 +114,39 @@ def _video_path(data: dict[str, Any], library_root: Path) -> Path:
             candidate.relative_to(library_root.resolve())
         except ValueError as exc:
             raise SidecarValidationError(f"relative_path escapes library root: {relative}") from exc
-        return candidate
-    stem = source.name.removesuffix(".playarr.xml")
-    matches = [item for item in source.parent.glob(f"{stem}.*") if not item.name.endswith((".xml", ".nfo", ".bak"))]
-    return matches[0] if matches else source.parent / stem
+        if candidate.is_file() and candidate not in candidates:
+            candidates.append(candidate)
+    expected_size = data.get("file_size_bytes")
+    if expected_size:
+        candidates = [item for item in candidates if item.stat().st_size == int(expected_size)]
+    expected_checksum = data.get("file_checksum")
+    if expected_checksum:
+        from app.services.content_id import compute_file_signature
+        matched = [item for item in candidates if compute_file_signature(str(item)) == expected_checksum]
+        if not matched:
+            media_extensions = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".mpg", ".mpeg", ".m4v"}
+            for item in library_root.rglob("*"):
+                if not item.is_file() or item.suffix.lower() not in media_extensions:
+                    continue
+                if expected_size and item.stat().st_size != int(expected_size):
+                    continue
+                resolved = item.resolve()
+                if compute_file_signature(str(resolved)) == expected_checksum:
+                    matched.append(resolved)
+        if not matched:
+            raise SidecarValidationError(
+                f"media checksum mismatch for {source}: no candidate matches {expected_checksum}"
+            )
+        candidates = matched
+    if not candidates:
+        detail = "matching size" if expected_size else ""
+        raise SidecarValidationError(f"media file is missing {detail} for {source}".replace("  ", " "))
+    unique = {str(item): item for item in candidates}
+    if len(unique) != 1:
+        raise SidecarValidationError(
+            f"ambiguous media files for {source}: {', '.join(sorted(unique))}"
+        )
+    return next(iter(unique.values()))
 
 
 def _set_if_present(target: Any, data: dict[str, Any], fields: Iterable[str]) -> list[str]:
@@ -121,12 +161,181 @@ def _set_if_present(target: Any, data: dict[str, Any], fields: Iterable[str]) ->
     return changed
 
 
+def _parsed_time(value: Any) -> datetime | None:
+    if not value or isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _portable_file_path(folder: Path, value: str) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    resolved = (folder / path).resolve()
+    try:
+        resolved.relative_to(folder.resolve())
+    except ValueError as exc:
+        raise SidecarValidationError(f"portable path escapes sidecar folder: {value}") from exc
+    return str(resolved)
+
+
+def _model_values(model: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    columns = {column.name: column for column in model.__table__.columns}
+    for name, value in payload.items():
+        column = columns.get(name)
+        if column is None or name in {"id", "video_id"}:
+            continue
+        if value is not None and column.type.__class__.__name__ == "DateTime":
+            value = _parsed_time(value)
+        enum_class = getattr(column.type, "enum_class", None)
+        if value is not None and enum_class is not None:
+            value = enum_class(value)
+        values[name] = value
+    return values
+
+
+def _restore_portable_state(
+    db: Session,
+    video: VideoItem,
+    data: dict[str, Any],
+    sidecar_folder: Path,
+    *,
+    replace_existing: bool,
+) -> None:
+    state = data.get("portable_state")
+    legacy_scene = data.get("scene_analysis")
+    if not state and not legacy_scene:
+        return
+    state = state or {}
+    if state and int(state.get("schema_version") or 0) != 1:
+        raise SidecarValidationError("unsupported portable_state schema version")
+    attribution = state.get("attribution") or {}
+    for field in (
+        "field_provenance_users", "field_provenance_at", "field_verifications",
+        "last_edited_by", "song_rating_by", "video_rating_by",
+    ):
+        if field in attribution:
+            setattr(video, field, attribution[field])
+    for field in ("song_rating_at", "video_rating_at"):
+        if field in attribution:
+            setattr(video, field, _parsed_time(attribution[field]))
+
+    from app.ai.models import AIMetadataResult, AISceneAnalysis, AIThumbnail
+    if "ai_metadata_results" in state:
+        if replace_existing:
+            db.query(AIMetadataResult).filter(AIMetadataResult.video_id == video.id).delete(synchronize_session=False)
+        for payload in state.get("ai_metadata_results") or []:
+            db.add(AIMetadataResult(video_id=video.id, **_model_values(AIMetadataResult, payload)))
+    if "scene_analyses" in state or legacy_scene:
+        if replace_existing:
+            db.query(AIThumbnail).filter(AIThumbnail.video_id == video.id).delete(synchronize_session=False)
+            db.query(AISceneAnalysis).filter(AISceneAnalysis.video_id == video.id).delete(synchronize_session=False)
+        for payload in state.get("scene_analyses") or []:
+            thumbnails = payload.get("thumbnails") or []
+            scene = AISceneAnalysis(
+                video_id=video.id,
+                **_model_values(AISceneAnalysis, {key: value for key, value in payload.items() if key != "thumbnails"}),
+            )
+            db.add(scene)
+            db.flush()
+            for thumb_payload in thumbnails:
+                values = _model_values(AIThumbnail, thumb_payload)
+                stored_path = values.get("file_path")
+                if stored_path and not Path(stored_path).is_absolute():
+                    values["file_path"] = _portable_file_path(sidecar_folder, stored_path)
+                db.add(AIThumbnail(
+                    video_id=video.id, scene_analysis_id=scene.id, **values,
+                ))
+
+    for model, key in (
+        (MetadataSnapshot, "metadata_snapshots"),
+        (NormalizationHistory, "normalization_history"),
+        (ContributionLog, "contribution_history"),
+    ):
+        if key in state:
+            if replace_existing:
+                db.query(model).filter(model.video_id == video.id).delete(synchronize_session=False)
+            for payload in state.get(key) or []:
+                db.add(model(video_id=video.id, **_model_values(model, payload)))
+
+    if "editor_queue_entries" in state:
+        if replace_existing:
+            db.query(VideoEditorQueueEntry).filter(VideoEditorQueueEntry.video_id == video.id).delete(synchronize_session=False)
+        for payload in state.get("editor_queue_entries") or []:
+            db.add(VideoEditorQueueEntry(video_id=video.id, **_model_values(VideoEditorQueueEntry, payload)))
+
+    from app.matching.models import MatchCandidate, MatchResult, NormalizationResult, UserPinnedMatch
+    from sqlalchemy import inspect
+    matching_available = inspect(db.connection()).has_table(MatchResult.__tablename__)
+    matching_payload_present = any(state.get(key) for key in (
+        "matching_results", "normalization_results", "pinned_matches",
+    ))
+    if matching_payload_present and not matching_available:
+        raise SidecarValidationError("matching tables are unavailable for portable state restore")
+    if "matching_results" in state and matching_available:
+        if replace_existing:
+            db.query(UserPinnedMatch).filter(UserPinnedMatch.video_id == video.id).delete(synchronize_session=False)
+            db.query(MatchResult).filter(MatchResult.video_id == video.id).delete(synchronize_session=False)
+            db.flush()
+        for payload in state.get("matching_results") or []:
+            candidates = payload.get("candidates") or []
+            match = MatchResult(
+                video_id=video.id,
+                **_model_values(MatchResult, {key: value for key, value in payload.items() if key != "candidates"}),
+            )
+            db.add(match); db.flush()
+            for candidate in candidates:
+                db.add(MatchCandidate(match_result_id=match.id, **_model_values(MatchCandidate, candidate)))
+    if "normalization_results" in state and matching_available:
+        if replace_existing:
+            db.query(NormalizationResult).filter(NormalizationResult.video_id == video.id).delete(synchronize_session=False)
+        for payload in state.get("normalization_results") or []:
+            db.add(NormalizationResult(video_id=video.id, **_model_values(NormalizationResult, payload)))
+    if "pinned_matches" in state and matching_available:
+        if replace_existing:
+            db.query(UserPinnedMatch).filter(UserPinnedMatch.video_id == video.id).delete(synchronize_session=False)
+        for payload in state.get("pinned_matches") or []:
+            db.add(UserPinnedMatch(video_id=video.id, candidate_id=None, **_model_values(UserPinnedMatch, payload)))
+
+    # v2 documents written before portable_state carried completed scene data
+    # in the human-readable XML section. Preserve it as a restored analysis.
+    if legacy_scene and not (state.get("scene_analyses") or []):
+        scene = AISceneAnalysis(
+            video_id=video.id, status="complete",
+            total_scenes=int(legacy_scene.get("total_scenes") or 0),
+            duration_seconds=legacy_scene.get("duration_seconds"),
+            config={"restored_from": "legacy_scene_analysis"},
+        )
+        db.add(scene); db.flush()
+        for thumb_payload in legacy_scene.get("thumbnails") or []:
+            restored_thumb_path = thumb_payload.get("file_path") or ""
+            if restored_thumb_path:
+                restored_thumb_path = _portable_file_path(sidecar_folder, restored_thumb_path)
+            db.add(AIThumbnail(
+                video_id=video.id, scene_analysis_id=scene.id,
+                timestamp_sec=float(thumb_payload.get("timestamp_sec") or 0),
+                file_path=restored_thumb_path,
+                score_sharpness=float(thumb_payload.get("score_sharpness") or 0),
+                score_contrast=float(thumb_payload.get("score_contrast") or 0),
+                score_color_variance=float(thumb_payload.get("score_color_variance") or 0),
+                score_composition=float(thumb_payload.get("score_composition") or 0),
+                score_overall=float(thumb_payload.get("score_overall") or 0),
+                is_selected=bool(thumb_payload.get("is_selected")),
+                provenance=thumb_payload.get("provenance") or "sidecar_restore",
+            ))
+
+
 def apply_sidecar_data(
     db: Session,
     video: VideoItem,
     data: dict[str, Any],
     *,
     library_root: str | Path,
+    replace_existing: bool = True,
 ) -> list[str]:
     """Apply pass-1 scalar/entity state without committing the transaction."""
     root = Path(library_root).resolve()
@@ -153,6 +362,11 @@ def apply_sidecar_data(
         video.sidecar_revision = max(1, int(data["sidecar_revision"]))
     video.folder_path = str(source.parent)
     video.file_path = str(media_path)
+    if data.get("original_created_at"):
+        video.created_at = _parsed_time(data["original_created_at"]) or video.created_at
+    if data.get("original_updated_at"):
+        video.updated_at = _parsed_time(data["original_updated_at"]) or video.updated_at
+    _restore_portable_state(db, video, data, source.parent, replace_existing=replace_existing)
 
     for payload in data.get("provenance_events") or []:
         event_id = payload.get("id")
@@ -205,24 +419,32 @@ def apply_sidecar_data(
             if value is not None and hasattr(quality, field):
                 setattr(quality, field, value)
 
-    db.query(Source).filter(Source.video_id == video.id).delete(synchronize_session=False)
-    db.flush()
+    if replace_existing:
+        db.query(Source).filter(Source.video_id == video.id).delete(synchronize_session=False)
+        db.flush()
     for source_data in data.get("sources") or []:
         _upsert_source(db, video.id, source_data)
 
-    db.query(MediaAsset).filter(MediaAsset.video_id == video.id).delete(synchronize_session=False)
+    if replace_existing:
+        db.query(MediaAsset).filter(MediaAsset.video_id == video.id).delete(synchronize_session=False)
     for asset in data.get("artwork") or []:
         db.add(MediaAsset(
             video_id=video.id,
             asset_type=asset.get("asset_type") or "other",
             file_path=asset.get("file_path") or "",
             source_url=asset.get("source_url"),
+            resolved_url=asset.get("resolved_url"),
             provenance=asset.get("provenance") or "sidecar_restore",
             source_provider=asset.get("source_provider"),
+            content_type=asset.get("content_type"),
             file_hash=asset.get("file_hash"),
             status=asset.get("status") or "valid",
+            validation_error=asset.get("validation_error"),
+            file_size_bytes=asset.get("file_size_bytes"),
+            crop_position=asset.get("crop_position"),
             width=asset.get("width"), height=asset.get("height"),
-            last_validated_at=datetime.now(timezone.utc),
+            last_validated_at=_parsed_time(asset.get("last_validated_at")) or datetime.now(timezone.utc),
+            created_at=_parsed_time(asset.get("created_at")) or datetime.now(timezone.utc),
         ))
 
     _restore_entities(db, video, data.get("entity_refs") or {})
@@ -322,6 +544,7 @@ def rebuild_from_sidecars(
     """Rebuild an empty database using explicit validate/create and resolve passes."""
     report: dict[str, Any] = {
         "restored": [], "migrated": [], "ambiguous": [], "missing": [], "rejected": [],
+        "recovered": [], "incomplete": [],
     }
     parsed: list[dict[str, Any]] = []
     seen_refs: dict[str, str] = {}
@@ -342,32 +565,54 @@ def rebuild_from_sidecars(
     videos_by_ref: dict[str, VideoItem] = {}
     for data in parsed:
         ref = data["playarr_video_id"]
-        video = db.query(VideoItem).filter(VideoItem.playarr_video_id == ref).one_or_none()
-        if video is None:
-            video = VideoItem(artist=data.get("artist") or "Unknown Artist", title=data.get("title") or "Unknown Title")
-            db.add(video)
-            db.flush()
-        apply_sidecar_data(db, video, data, library_root=library_root)
-        db.flush()
+        try:
+            with db.begin_nested():
+                video = db.query(VideoItem).filter(VideoItem.playarr_video_id == ref).one_or_none()
+                created = video is None
+                if video is None:
+                    video = VideoItem(artist=data.get("artist") or "Unknown Artist", title=data.get("title") or "Unknown Title")
+                    db.add(video)
+                    db.flush()
+                apply_sidecar_data(
+                    db, video, data, library_root=library_root,
+                    replace_existing=not created,
+                )
+                db.flush()
+        except Exception as exc:
+            report["rejected"].append({"path": data["_source_path"], "reason": str(exc)})
+            continue
         videos_by_ref[ref] = video
         if data.get("entity_stable_id"):
             videos_by_ref[data["entity_stable_id"]] = video
         report["restored"].append({"path": data["_source_path"], "playarr_video_id": ref})
 
     for data in parsed:
-        video = videos_by_ref[data["playarr_video_id"]]
+        video = videos_by_ref.get(data["playarr_video_id"])
+        if video is None:
+            continue
         for ref in apply_sidecar_relationships(db, video, data, videos_by_ref):
             report["missing"].append({
                 "path": data["_source_path"], "relationship_ref": ref,
             })
     manifest_path = Path(library_manifest) if library_manifest else Path(library_root) / ".playarr-library-manifest.json"
-    if manifest_path.is_file():
+    manifest_backup = manifest_path.with_name(manifest_path.name + ".bak")
+    if manifest_path.is_file() or manifest_backup.is_file():
         try:
-            _restore_library_manifest(db, json.loads(manifest_path.read_text(encoding="utf-8")), videos_by_ref, report)
+            from app.services.consolidations import load_library_manifest
+            manifest, loaded_path = load_library_manifest(manifest_path)
+            if loaded_path != manifest_path:
+                report["recovered"].append({"path": str(loaded_path), "reason": "primary manifest unavailable or invalid"})
+            _restore_library_manifest(db, manifest, videos_by_ref, report)
         except Exception as exc:
             report["rejected"].append({"path": str(manifest_path), "reason": str(exc)})
+            report["incomplete"].append({"component": "library_manifest", "reason": "global state could not be restored"})
+    else:
+        report["incomplete"].append({"component": "library_manifest", "reason": "global state manifest is missing"})
     db.flush()
-    report["counts"] = {key: len(value) for key, value in report.items() if isinstance(value, list)}
+    report["counts"] = {
+        key: len(value) for key, value in report.items()
+        if isinstance(value, list) and (key not in {"recovered", "incomplete"} or value)
+    }
     return report
 
 
@@ -461,7 +706,7 @@ def _restore_library_manifest(
         case.status = payload.get("status") or "open"
         case.revision = max(1, int(payload.get("revision") or 1))
         case.dismissed_evidence_hash = payload.get("dismissed_evidence_hash")
-        case.items.clear(); case.edges.clear()
+        case.items.clear(); case.edges.clear(); case.plans.clear()
         for item in payload.get("items") or []:
             video = videos_by_ref.get(item.get("video_ref"))
             case.items.append(ReviewCaseItem(
@@ -477,12 +722,23 @@ def _restore_library_manifest(
                 score=float(edge.get("score") or 0), evidence_hash=edge.get("evidence_hash") or "restored",
                 evidence_json=edge.get("evidence") or {}, status=edge.get("status") or "open",
             ))
+        for plan in payload.get("plans") or []:
+            case.plans.append(ReviewActionPlan(
+                id=plan.get("id") or str(uuid4()),
+                expected_revision=int(plan.get("expected_revision") or case.revision),
+                actions_json=plan.get("actions") or [],
+                consequence_json=plan.get("consequences"),
+                status=plan.get("status") or "draft",
+                created_at=_parsed_time(plan.get("created_at")) or datetime.now(timezone.utc),
+                committed_at=_parsed_time(plan.get("committed_at")),
+            ))
     for payload in manifest.get("archive_operations") or []:
         operation_id = payload.get("operation_id")
         if not operation_id or db.get(FileOperation, operation_id):
             continue
         db.add(FileOperation(
-            id=operation_id, entity_stable_id=payload.get("playarr_video_id") or "unknown",
+            id=operation_id,
+            entity_stable_id=payload.get("entity_id") or payload.get("playarr_video_id") or "unknown",
             operation_type=payload.get("operation_type") or "archive",
             status="historical", plan_json={
                 "archive_relative_path": payload.get("archive_relative_path"),

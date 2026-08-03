@@ -2561,6 +2561,47 @@
             "title": "Ai Only",
             "type": "boolean"
           },
+          "artist_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artist Override"
+          },
+          "find_source_video": {
+            "default": false,
+            "title": "Find Source Video",
+            "type": "boolean"
+          },
+          "from_disk": {
+            "default": false,
+            "title": "From Disk",
+            "type": "boolean"
+          },
+          "hint_alternate": {
+            "default": false,
+            "title": "Hint Alternate",
+            "type": "boolean"
+          },
+          "hint_cover": {
+            "default": false,
+            "title": "Hint Cover",
+            "type": "boolean"
+          },
+          "hint_live": {
+            "default": false,
+            "title": "Hint Live",
+            "type": "boolean"
+          },
+          "hint_uncensored": {
+            "default": false,
+            "title": "Hint Uncensored",
+            "type": "boolean"
+          },
           "normalize": {
             "default": false,
             "title": "Normalize",
@@ -2576,10 +2617,26 @@
             "title": "Scrape Musicbrainz",
             "type": "boolean"
           },
+          "scrape_tmvdb": {
+            "default": false,
+            "title": "Scrape Tmvdb",
+            "type": "boolean"
+          },
           "scrape_wikipedia": {
             "default": true,
             "title": "Scrape Wikipedia",
             "type": "boolean"
+          },
+          "title_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title Override"
           },
           "video_ids": {
             "items": {
@@ -3714,6 +3771,19 @@
         "title": "DetectLetterboxResponse",
         "type": "object"
       },
+      "DismissConsolidationSuggestionRequest": {
+        "properties": {
+          "suggestion_id": {
+            "title": "Suggestion Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "suggestion_id"
+        ],
+        "title": "DismissConsolidationSuggestionRequest",
+        "type": "object"
+      },
       "DismissRequest": {
         "properties": {
           "dismissal_type": {
@@ -4328,7 +4398,7 @@
             "type": "boolean"
           },
           "crf": {
-            "default": 18,
+            "default": 14,
             "maximum": 51.0,
             "minimum": 0.0,
             "title": "Crf",
@@ -4379,7 +4449,7 @@
             "title": "Crop Y"
           },
           "preset": {
-            "default": "medium",
+            "default": "slow",
             "title": "Preset",
             "type": "string"
           },
@@ -4476,6 +4546,13 @@
             "title": "Failed Steps",
             "type": "array"
           },
+          "incomplete_steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Incomplete Steps",
+            "type": "array"
+          },
           "last_run_at": {
             "anyOf": [
               {
@@ -4508,6 +4585,13 @@
               }
             ],
             "title": "Provider"
+          },
+          "requested_steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requested Steps",
+            "type": "array"
           },
           "stale_reason": {
             "anyOf": [
@@ -5071,6 +5155,13 @@
             "title": "Blacklisted",
             "type": "boolean"
           },
+          "genre_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Genre Ids",
+            "type": "array"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
@@ -5099,7 +5190,8 @@
           "id",
           "name",
           "blacklisted",
-          "video_count"
+          "video_count",
+          "genre_ids"
         ],
         "title": "GenreBlacklistItem",
         "type": "object"
@@ -5334,9 +5426,14 @@
           "master_name": {
             "title": "Master Name",
             "type": "string"
+          },
+          "suggestion_id": {
+            "title": "Suggestion Id",
+            "type": "string"
           }
         },
         "required": [
+          "suggestion_id",
           "master_name",
           "master_id",
           "aliases"
@@ -14311,7 +14408,7 @@
             }
           },
           {
-            "description": "Filter by enrichment status: enriched, partial, pending",
+            "description": "Filter by AI lifecycle: not_requested, queued, running, partial, complete, failed, stale",
             "in": "query",
             "name": "enrichment",
             "required": false,
@@ -14324,7 +14421,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter by enrichment status: enriched, partial, pending",
+              "description": "Filter by AI lifecycle: not_requested, queued, running, partial, complete, failed, stale",
               "title": "Enrichment"
             }
           },
@@ -14855,7 +14952,7 @@
     },
     "/api/library/bulk-rename/execute": {
       "post": {
-        "description": "Rename/move all videos to match the current naming convention settings.\nRenames folder, video file, NFO, posters, and all associated files.\nUpdates all DB path references.",
+        "description": "Queue durable rename plans for every video that does not match the current\nnaming convention.  The mutation worker performs the filesystem changes,\ncompanion-file renames and database path update as one journalled unit.",
         "operationId": "bulk_rename_execute_api_library_bulk_rename_execute_post",
         "responses": {
           "200": {
@@ -17526,6 +17623,48 @@
         ]
       }
     },
+    "/api/metadata/artist-consolidation-options": {
+      "get": {
+        "description": "Search raw library artist names with their MBID and usage count.",
+        "operationId": "artist_consolidation_options_api_metadata_artist_consolidation_options_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Artist Consolidation Options",
+        "tags": [
+          "Metadata"
+        ]
+      }
+    },
     "/api/metadata/artist-consolidation-suggestions": {
       "get": {
         "operationId": "artist_consolidation_suggestions_api_metadata_artist_consolidation_suggestions_get",
@@ -17986,6 +18125,56 @@
           }
         },
         "summary": "Get Artwork Stats",
+        "tags": [
+          "Metadata"
+        ]
+      }
+    },
+    "/api/metadata/consolidation-suggestions/{kind}/dismiss": {
+      "post": {
+        "operationId": "dismiss_consolidation_suggestion_api_metadata_consolidation_suggestions__kind__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "title": "Kind",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DismissConsolidationSuggestionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Consolidation Suggestion",
         "tags": [
           "Metadata"
         ]
@@ -19878,6 +20067,120 @@
         ]
       }
     },
+    "/api/operations/sidecars/failed": {
+      "get": {
+        "operationId": "failed_sidecars_api_operations_sidecars_failed_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Failed Sidecars Api Operations Sidecars Failed Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Failed Sidecars",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/api/operations/sidecars/{outbox_id}/cancel": {
+      "post": {
+        "operationId": "cancel_sidecar_api_operations_sidecars__outbox_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "outbox_id",
+            "required": true,
+            "schema": {
+              "title": "Outbox Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cancel Sidecar Api Operations Sidecars  Outbox Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Sidecar",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/api/operations/sidecars/{outbox_id}/retry": {
+      "post": {
+        "operationId": "retry_sidecar_api_operations_sidecars__outbox_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "outbox_id",
+            "required": true,
+            "schema": {
+              "title": "Outbox Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retry Sidecar Api Operations Sidecars  Outbox Id  Retry Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Sidecar",
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
     "/api/operations/{operation_id}": {
       "get": {
         "operationId": "operation_status_api_operations__operation_id__get",
@@ -20241,47 +20544,6 @@
         ]
       }
     },
-    "/api/playback/download-audio/{video_id}": {
-      "get": {
-        "description": "Extract audio from a video as a tagged CBR MP3.\nMatches source audio bitrate/channels. Tags with metadata + poster art.",
-        "operationId": "download_audio_api_playback_download_audio__video_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "video_id",
-            "required": true,
-            "schema": {
-              "title": "Video Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Download Audio",
-        "tags": [
-          "Playback"
-        ]
-      }
-    },
     "/api/playback/history/{video_id}": {
       "post": {
         "description": "Record that a video was played.",
@@ -20441,47 +20703,6 @@
         ]
       }
     },
-    "/api/playback/raw/{video_id}": {
-      "get": {
-        "description": "Serve the original video file untouched with HTTP Range support.\n\nUnlike ``/stream/{video_id}`` (which remuxes/transcodes for browsers),\nthis performs NO remux or transcode — intended for native players such\nas the Playarr Kodi add-on that handle MKV and every codec directly,\nso seeking is fast and exact.",
-        "operationId": "stream_raw_api_playback_raw__video_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "video_id",
-            "required": true,
-            "schema": {
-              "title": "Video Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Stream Raw",
-        "tags": [
-          "Playback"
-        ]
-      }
-    },
     "/api/playback/stream-archive": {
       "get": {
         "description": "Stream an archived video file by its direct path (validated to be inside an archive dir).",
@@ -20624,47 +20845,6 @@
           }
         },
         "summary": "Stream Video",
-        "tags": [
-          "Playback"
-        ]
-      }
-    },
-    "/api/playback/theatre/{video_id}": {
-      "get": {
-        "description": "Theatre stream — the source video centred over a pre-rendered artwork-wall\nbackdrop, composited into a single H.264/AAC stream.\n\nThis is how Kodi (a native player that can't draw the web app's artwork wall)\ngets the theatre experience: it just plays this stream full-screen. The\nbackdrop is cached and reused (see services/theatre_backdrop), so the per-track\ncost is a composite + encode, comparable to the compatibility transcode.",
-        "operationId": "stream_theatre_api_playback_theatre__video_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "video_id",
-            "required": true,
-            "schema": {
-              "title": "Video Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Stream Theatre",
         "tags": [
           "Playback"
         ]
@@ -22252,6 +22432,54 @@
           },
           {
             "in": "query",
+            "name": "group",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Group"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "missing",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Missing"
+            }
+          },
+          {
+            "in": "query",
             "name": "page",
             "required": false,
             "schema": {
@@ -22534,6 +22762,50 @@
           }
         },
         "summary": "Scan Enrichment",
+        "tags": [
+          "review"
+        ]
+      }
+    },
+    "/api/review/scan-health": {
+      "post": {
+        "description": "Audit requested processing steps, confidence, and loudness drift.\n\nThe scan uses structured job input and processing-state data. Human-facing\nreason text is output evidence only and is never parsed to classify a case.",
+        "operationId": "scan_review_health_api_review_scan_health_post",
+        "parameters": [
+          {
+            "description": "Re-evaluate items already reviewed",
+            "in": "query",
+            "name": "rescan_all",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Re-evaluate items already reviewed",
+              "title": "Rescan All",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Scan Review Health",
         "tags": [
           "review"
         ]
@@ -23910,6 +24182,23 @@
           },
           {
             "in": "query",
+            "name": "video_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Video Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "page",
             "required": false,
             "schema": {
@@ -24110,20 +24399,8 @@
     },
     "/api/settings/genre-blacklist": {
       "get": {
-        "description": "List resolved mask genres; aliases and unused rows are maintenance data.",
+        "description": "List populated display genres, collapsing every consolidation to its mask.",
         "operationId": "list_genre_blacklist_api_settings_genre_blacklist_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "include_unused",
-            "required": false,
-            "schema": {
-              "default": false,
-              "title": "Include Unused",
-              "type": "boolean"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "content": {
@@ -24138,16 +24415,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "List Genre Blacklist",

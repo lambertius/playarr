@@ -169,9 +169,9 @@ export function ArtistsPage() {
           </>
         )}
       </div>
-      <div className="mb-4">
+      {(isLoading || isError || !filtered || filtered.length === 0) && (
         <FilterBar filters={filters} onChange={setFilters} hideArtist />
-      </div>
+      )}
 
       {isLoading ? (
         <div className="grid grid-cols-[repeat(auto-fill,150px)] gap-4">
@@ -190,6 +190,7 @@ export function ArtistsPage() {
           preferenceKey="artists"
           defaultSort="name"
           empty={<EmptyState icon={<Users size={48} />} title="No artists yet" />}
+          renderFilterTile={(controls) => <FilterBar filters={filters} onChange={setFilters} hideArtist>{controls}</FilterBar>}
           columns={[
             { id: "name", label: "Artist", width: "minmax(12rem,1fr)", sortValue: (artist) => artist.artist, render: (artist) => <button className="truncate hover:text-accent" onClick={() => navigate(`/library?artist=${encodeURIComponent(artist.artist)}`)}>{artist.artist}</button> },
             { id: "count", label: "Videos", width: "6rem", align: "right", sortValue: (artist) => artist.count, render: (artist) => artist.count },

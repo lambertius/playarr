@@ -222,7 +222,9 @@ class EnrichmentFailure(BaseModel):
 
 class EnrichmentStatusOut(BaseModel):
     state: str
+    requested_steps: List[str] = Field(default_factory=list)
     completed_steps: List[str] = Field(default_factory=list)
+    incomplete_steps: List[str] = Field(default_factory=list)
     failed_steps: List[EnrichmentFailure] = Field(default_factory=list)
     provider: Optional[str] = None
     model: Optional[str] = None

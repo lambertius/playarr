@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.attributes import flag_modified
 from app.database import get_db
@@ -38,6 +38,151 @@ QUALITY_BUCKETS = [
     (999999, "4K"),
 ]
 QUALITY_LABELS = [label for _, label in QUALITY_BUCKETS]
+AI_ENRICHMENT_STEPS = ("ai_enriched", "scenes_analyzed")
+
+
+def _enrichment_lifecycle(
+    processing_state: dict | None,
+    review_category: str | None = None,
+) -> tuple[str, list[str], list[str], list[str], list[dict], str | None, str | None, list[str]]:
+    """Return the canonical AI lifecycle and its explainable detail fields.
+
+    Only AI enrichment and scene analysis belong in this status.  Previously,
+    unrelated completed pipeline steps could make an item appear "Partial".
+    """
+    state = processing_state or {}
+    requested_steps: list[str] = []
+    completed_steps: list[str] = []
+    incomplete_steps: list[str] = []
+    failed_steps: list[dict] = []
+    running = False
+    queued = False
+    stale = False
+    provider = None
+    model = None
+    timestamps: list[str] = []
+    for step in AI_ENRICHMENT_STEPS:
+        if step not in state:
+            continue
+        requested_steps.append(step)
+        raw = state.get(step)
+        if isinstance(raw, bool):
+            raw = {"completed": raw}
+        elif not isinstance(raw, dict):
+            raw = {}
+        if raw.get("completed") is True:
+            completed_steps.append(step)
+        else:
+            incomplete_steps.append(step)
+        step_state = str(raw.get("status") or raw.get("state") or "").lower()
+        running = running or step_state == "running"
+        queued = queued or step_state == "queued"
+        stale = stale or step_state == "stale" or raw.get("stale") is True
+        error = raw.get("error") or raw.get("error_message")
+        if error and raw.get("completed") is not True:
+            failed_steps.append({
+                "step": step,
+                "code": raw.get("error_code") or "step_failed",
+                "message": str(error),
+            })
+        provider = provider or raw.get("provider")
+        model = model or raw.get("model")
+        for key in ("completed_at", "updated_at", "started_at", "attempted_at"):
+            if raw.get(key):
+                timestamps.append(str(raw[key]))
+
+    if running:
+        lifecycle = "running"
+    elif queued:
+        lifecycle = "queued"
+    elif stale:
+        lifecycle = "stale"
+    elif requested_steps and not incomplete_steps:
+        lifecycle = "complete"
+    elif failed_steps and not completed_steps:
+        lifecycle = "failed"
+    elif requested_steps:
+        lifecycle = "partial"
+    elif review_category in {"ai_partial", "ai_pending"}:
+        # Legacy review flags can survive an interrupted write of processing
+        # state. Keep them actionable until a review scan reconciles the row.
+        lifecycle = "partial"
+    else:
+        lifecycle = "not_requested"
+    return (
+        lifecycle, requested_steps, completed_steps, incomplete_steps,
+        failed_steps, provider, model, timestamps,
+    )
+
+
+def _enrichment_sql_state():
+    """Build SQL expressions with the same precedence as `_enrichment_lifecycle`."""
+    ps = VideoItem.processing_state
+    ai_done = func.coalesce(func.json_extract(ps, "$.ai_enriched.completed"), 0) == 1
+    sc_done = func.coalesce(func.json_extract(ps, "$.scenes_analyzed.completed"), 0) == 1
+    ai_present = func.json_type(ps, "$.ai_enriched").is_not(None)
+    sc_present = func.json_type(ps, "$.scenes_analyzed").is_not(None)
+    ai_state = func.coalesce(func.json_extract(ps, "$.ai_enriched.status"), "")
+    sc_state = func.coalesce(func.json_extract(ps, "$.scenes_analyzed.status"), "")
+    ai_error = func.coalesce(
+        func.json_extract(ps, "$.ai_enriched.error"),
+        func.json_extract(ps, "$.ai_enriched.error_message"),
+    )
+    sc_error = func.coalesce(
+        func.json_extract(ps, "$.scenes_analyzed.error"),
+        func.json_extract(ps, "$.scenes_analyzed.error_message"),
+    )
+    is_running = or_(ai_state == "running", sc_state == "running")
+    is_queued = or_(ai_state == "queued", sc_state == "queued")
+    is_stale = or_(
+        ai_state == "stale", sc_state == "stale",
+        func.coalesce(func.json_extract(ps, "$.ai_enriched.stale"), 0) == 1,
+        func.coalesce(func.json_extract(ps, "$.scenes_analyzed.stale"), 0) == 1,
+    )
+    review_incomplete = func.coalesce(VideoItem.review_category, "").in_(("ai_partial", "ai_pending"))
+    has_requested = or_(ai_present, sc_present)
+    has_completed = or_(ai_done, sc_done)
+    all_completed = and_(
+        has_requested,
+        or_(~ai_present, ai_done),
+        or_(~sc_present, sc_done),
+    )
+    has_incomplete = or_(and_(ai_present, ~ai_done), and_(sc_present, ~sc_done))
+    has_error = or_(ai_error.is_not(None), sc_error.is_not(None))
+    settled = and_(~is_running, ~is_queued, ~is_stale)
+    return {
+        "running": is_running,
+        "queued": and_(~is_running, is_queued),
+        "stale": and_(~is_running, ~is_queued, is_stale),
+        "partial": and_(
+            settled,
+            or_(and_(has_requested, has_incomplete, or_(has_completed, ~has_error)),
+                and_(~has_requested, review_incomplete)),
+        ),
+        "failed": and_(settled, has_requested, has_error, ~has_completed),
+        "complete": and_(settled, all_completed),
+        "not_requested": and_(settled, ~has_requested, ~review_incomplete),
+    }
+
+
+def _apply_enrichment_filter(query, enrichment: str):
+    states = _enrichment_sql_state()
+    canonical = {"enriched": "complete", "pending": "not_requested"}.get(enrichment, enrichment)
+    condition = states.get(canonical)
+    return query.filter(condition) if condition is not None else query
+
+
+def _enrichment_sort_expression():
+    states = _enrichment_sql_state()
+    return case(
+        (states["queued"], 1),
+        (states["running"], 2),
+        (states["partial"], 3),
+        (states["complete"], 4),
+        (states["failed"], 5),
+        (states["stale"], 6),
+        else_=0,
+    )
 
 
 def _height_to_quality_bucket(height: int | None) -> str | None:
@@ -119,7 +264,7 @@ def list_videos(
     year_to: Optional[int] = Query(None, description="Filter by year <= this value"),
     version_type: Optional[str] = Query(None, description="Filter by version type: normal, cover, live, alternate, uncensored"),
     review_status: Optional[str] = Query(None, description="Filter by review status: none, needs_human_review, needs_ai_review, reviewed"),
-    enrichment: Optional[str] = Query(None, description="Filter by enrichment status: enriched, partial, pending"),
+    enrichment: Optional[str] = Query(None, description="Filter by AI lifecycle: not_requested, queued, running, partial, complete, failed, stale"),
     import_method: Optional[str] = Query(None, description="Filter by import method: url, import, scanned"),
     song_rating: Optional[int] = Query(None, description="Filter by song rating value"),
     video_rating: Optional[int] = Query(None, description="Filter by video rating value"),
@@ -170,32 +315,7 @@ def list_videos(
         query = query.filter(VideoItem.review_status == review_status)
 
     if enrichment:
-        from sqlalchemy import cast, String
-        ps = VideoItem.processing_state
-        ai_done = func.json_extract(ps, "$.ai_enriched.completed")
-        sc_done = func.json_extract(ps, "$.scenes_analyzed.completed")
-        ai_state = func.json_extract(ps, "$.ai_enriched.status")
-        sc_state = func.json_extract(ps, "$.scenes_analyzed.status")
-        ai_error = func.json_extract(ps, "$.ai_enriched.error")
-        sc_error = func.json_extract(ps, "$.scenes_analyzed.error")
-        if enrichment in ("complete", "enriched"):
-            query = query.filter(ai_done == True, sc_done == True)  # noqa: E712
-        elif enrichment == "partial":
-            query = query.filter(
-                or_(
-                    (ai_done == True) & (sc_done != True),   # noqa: E712
-                    (ai_done != True) & (sc_done == True),   # noqa: E712
-                )
-            )
-        elif enrichment in ("not_requested", "pending"):
-            query = query.filter(or_(ai_done != True, ai_done == None))  # noqa: E711, E712
-            query = query.filter(or_(sc_done != True, sc_done == None))  # noqa: E711, E712
-        elif enrichment == "failed":
-            query = query.filter(or_(ai_error.is_not(None), sc_error.is_not(None)))
-        elif enrichment in ("queued", "running"):
-            query = query.filter(or_(ai_state == enrichment, sc_state == enrichment))
-        elif enrichment == "stale":
-            query = query.filter(VideoItem.review_category == "ai_partial")
+        query = _apply_enrichment_filter(query, enrichment)
 
     if import_method:
         if import_method == "scanned":
@@ -224,7 +344,7 @@ def list_videos(
     total_pages = math.ceil(total / page_size) if total > 0 else 1
 
     # Sorting — when the client omits sort, fall back to the saved library
-    # preference so a fresh browser and the Kodi add-on order alike.
+    # preference so fresh browser, TV and Cast clients order alike.
     if sort_by is None or sort_dir is None:
         from app.routers.preferences import get_preference
         _lib = get_preference(db, "library", {}) or {}
@@ -237,9 +357,7 @@ def list_videos(
             query = query.outerjoin(QualitySignature, QualitySignature.video_id == VideoItem.id)
         sort_col = QualitySignature.height
     elif sort_by == "enrichment":
-        ai_done = func.coalesce(func.json_extract(VideoItem.processing_state, "$.ai_enriched.completed"), 0)
-        scenes_done = func.coalesce(func.json_extract(VideoItem.processing_state, "$.scenes_analyzed.completed"), 0)
-        sort_col = ai_done + scenes_done
+        sort_col = _enrichment_sort_expression()
     else:
         sort_col = getattr(VideoItem, sort_by, VideoItem.artist)
     if sort_dir == "desc":
@@ -254,55 +372,12 @@ def list_videos(
     for item in items:
         has_poster = any(a.asset_type == "poster" for a in item.media_assets)
         ps = item.processing_state or {}
-        ai_done = bool(ps.get("ai_enriched", {}).get("completed"))
-        scenes_done = bool(ps.get("scenes_analyzed", {}).get("completed"))
-        if ai_done and scenes_done:
-            e_status = "enriched"
-        elif ai_done or scenes_done:
-            e_status = "partial"
-        else:
-            e_status = "pending"
-        completed_steps = []
-        failed_steps = []
-        running = False
-        queued = False
-        timestamps = []
-        provider = None
-        model = None
-        for step, raw in ps.items():
-            if not isinstance(raw, dict):
-                continue
-            if raw.get("completed") is True:
-                completed_steps.append(step)
-            state = str(raw.get("status") or raw.get("state") or "").lower()
-            running = running or state == "running"
-            queued = queued or state == "queued"
-            error = raw.get("error") or raw.get("error_message")
-            if error:
-                failed_steps.append({
-                    "step": step,
-                    "code": raw.get("error_code") or "step_failed",
-                    "message": str(error),
-                })
-            provider = provider or raw.get("provider")
-            model = model or raw.get("model")
-            for key in ("completed_at", "updated_at", "started_at", "attempted_at"):
-                if raw.get(key):
-                    timestamps.append(str(raw[key]))
-        if running:
-            lifecycle = "running"
-        elif queued:
-            lifecycle = "queued"
-        elif failed_steps and completed_steps:
-            lifecycle = "partial"
-        elif failed_steps:
-            lifecycle = "failed"
-        elif ai_done and scenes_done:
-            lifecycle = "complete"
-        elif completed_steps:
-            lifecycle = "partial"
-        else:
-            lifecycle = "not_requested"
+        (
+            lifecycle, requested_steps, completed_steps, incomplete_steps,
+            failed_steps, provider, model, timestamps,
+        ) = _enrichment_lifecycle(
+            ps, item.review_category,
+        )
         summaries.append(VideoItemSummary(
             id=item.id,
             stable_id=item.stable_id,
@@ -314,15 +389,17 @@ def list_videos(
             has_poster=has_poster,
             version_type=item.version_type or "normal",
             review_status=item.review_status or "none",
-            enrichment_status=e_status,
+            enrichment_status=lifecycle,
             enrichment_detail={
                 "state": lifecycle,
+                "requested_steps": requested_steps,
                 "completed_steps": completed_steps,
+                "incomplete_steps": incomplete_steps,
                 "failed_steps": failed_steps,
                 "provider": provider,
                 "model": model,
                 "last_run_at": max(timestamps) if timestamps else None,
-                "stale_reason": item.review_reason if item.review_category == "ai_partial" else None,
+                "stale_reason": item.review_reason if lifecycle == "stale" else None,
             },
             import_method=item.import_method,
             duration_seconds=item.quality_signature.duration_seconds if item.quality_signature else None,
@@ -470,13 +547,13 @@ def party_mode(
 
     # --- Exclusion filters ---
     # When the client omits an exclusion param, fall back to the saved
-    # party-mode preference so every client (incl. the Kodi add-on) inherits
+    # party-mode preference so every supported playback surface inherits
     # the filters configured in the web UI.  An explicit param always wins.
     from app.routers.preferences import get_preference
     _saved = get_preference(db, "partyExclusions", {}) or {}
 
     # "Party like it's…" — an explicit party_year always wins; otherwise fall
-    # back to the saved partyEra preference so the Kodi add-on inherits it too.
+    # back to the saved partyEra preference so TV and Cast inherit it too.
     eff_party_year = party_year
     if eff_party_year is None:
         _era = get_preference(db, "partyEra", {}) or {}
@@ -1542,7 +1619,13 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
     from app.routers.video_editor import find_archive_file
     _cfg = _get_settings()
     if item.file_path:
-        response.has_archive = find_archive_file(item.file_path, _cfg.library_dir, _cfg.archive_dir) is not None
+        response.has_archive = find_archive_file(
+            item.file_path, _cfg.library_dir, _cfg.archive_dir,
+            video_id=item.id,
+            playarr_video_id=item.playarr_video_id,
+            expected_artist=item.artist,
+            expected_title=item.title,
+        ) is not None
 
     if item.track_entity:
         track = item.track_entity
@@ -1763,30 +1846,32 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
 
         item.last_edited_by = _uid
         record_manual_changes(db, item, _manually_changed, _prior_values, _uid)
-    item.revision += 1
-    db.commit()
-    db.refresh(item)
-
-    # Auto-rename files on disk when identity or version_type changes.
-    # rename_to_expected handles: folder rename, file rename, NFO rewrite,
-    # Playarr XML rewrite, and all DB path updates.
     _needs_rename = (
         (_artist_changed or _title_changed or update.version_type is not None)
         and item.file_path
     )
+    item.revision += 1
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    schedule_sidecar_write(db, item)
+    _rename_queued = False
     if _needs_rename:
         try:
-            rename_to_expected(video_id, db)
-            db.refresh(item)
-        except HTTPException as e:
-            # "already matches" is fine — fall through to NFO/XML rewrite
-            if e.status_code != 400:
-                logger.warning(f"Auto-rename after edit failed for video {video_id}: {e.detail}")
-        except Exception as e:
-            logger.warning(f"Auto-rename after edit failed for video {video_id}: {e}")
+            from app.services.rename_operations import enqueue_expected_rename
+            enqueue_expected_rename(db, item, actor_id=_uid)
+            _rename_queued = True
+        except ValueError:
+            _needs_rename = False
+        except FileNotFoundError as exc:
+            logger.warning("Could not queue auto-rename for video %s: %s", video_id, exc)
+            _needs_rename = False
+    db.commit()
+    db.refresh(item)
+    if _rename_queued:
+        from app.services.rename_operations import notify_expected_rename
+        notify_expected_rename()
 
-    # Rewrite NFO and Playarr XML when metadata changed but rename wasn't
-    # triggered (rename_to_expected already rewrites both).
+    # Rewrite the Kodi NFO immediately when no filesystem rename was queued.
+    # The Playarr sidecar is always materialised by the transactional outbox.
     if not _needs_rename and (_identity_changed or _metadata_changed):
         if item.folder_path and os.path.isdir(item.folder_path):
             # Rewrite NFO
@@ -1812,9 +1897,7 @@ def update_video(video_id: int, update: VideoItemUpdate, db: Session = Depends(g
             except Exception as e:
                 logger.warning(f"NFO rewrite after manual edit failed for video {video_id}: {e}")
 
-            # Rewrite Playarr XML
-            from app.services.playarr_xml import write_playarr_xml
-            write_playarr_xml(item, db)
+            # Playarr XML is materialised by the transactional sidecar outbox.
 
     # Clean up orphaned entities/folders from old entity links
     if _old_artist_entity_id and _old_artist_entity_id != item.artist_entity_id:
@@ -2574,225 +2657,6 @@ def rename_to_expected(video_id: int, db: Session = Depends(get_db)):
         "message": "Use /api/library/{video_id}/rename-preview then rename-commit",
         "video_id": video_id,
     })
-    from app.services.file_organizer import build_folder_name, sanitize_filename, write_nfo_file, build_library_subpath
-    from app.ai.models import AIThumbnail
-    from app.models import Source
-
-    video = db.query(VideoItem).options(
-        joinedload(VideoItem.genres),
-        joinedload(VideoItem.sources),
-    ).get(video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-    if not video.folder_path or not os.path.isdir(video.folder_path):
-        raise HTTPException(status_code=400, detail="Video has no valid folder on disk")
-
-    old_folder = video.folder_path
-    old_folder_name = os.path.basename(old_folder)
-
-    resolution = video.resolution_label or "1080p"
-    if not video.resolution_label:
-        video.resolution_label = resolution
-
-    new_folder_name = build_folder_name(
-        video.artist, video.title, resolution,
-        version_type=video.version_type or "normal",
-        alternate_version_label=video.alternate_version_label or "",
-    )
-
-    # Build expected full path using folder structure setting
-    from app.config import get_settings
-    settings = get_settings()
-    subpath = build_library_subpath(
-        video.artist, video.title, resolution,
-        album=video.album or "",
-        version_type=video.version_type or "normal",
-        alternate_version_label=video.alternate_version_label or "",
-    )
-    new_folder = os.path.join(settings.library_dir, subpath)
-
-    # Check if already matches
-    if os.path.normpath(old_folder).lower() == os.path.normpath(new_folder).lower() and old_folder_name == new_folder_name:
-        raise HTTPException(status_code=400, detail="Filename already matches expected pattern")
-    if os.path.exists(new_folder):
-        raise HTTPException(status_code=409, detail=f"Target folder already exists: {new_folder_name}")
-
-    VIDEO_EXTS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".mpg"}
-    # Sorted longest-first so compound suffixes match before shorter ones
-    SUFFIX_TYPES = sorted(
-        ["-album-thumb", "-artist-thumb", "-poster", "-fanart", "-thumb",
-         "-banner", "-landscape", "-clearart", "-clearlogo", "-discart"],
-        key=len, reverse=True,
-    )
-
-    # --- Rename files inside the folder first (before moving the folder) ---
-    old_to_new_filenames: dict[str, str] = {}
-    try:
-        for entry in os.scandir(old_folder):
-            if not entry.is_file():
-                continue
-            fname = entry.name
-            ext = os.path.splitext(fname)[1].lower()
-            new_fname = None
-
-            # Video files and NFO: direct rename to new base name
-            if ext in VIDEO_EXTS or ext == ".nfo":
-                new_fname = f"{new_folder_name}{ext}"
-            else:
-                # Check for Kodi-style suffixed files like "OldName-poster.jpg"
-                name_no_ext = os.path.splitext(fname)[0]
-                for suffix in SUFFIX_TYPES:
-                    if name_no_ext.endswith(suffix):
-                        new_fname = f"{new_folder_name}{suffix}{ext}"
-                        break
-
-            if new_fname and fname != new_fname:
-                src = os.path.join(old_folder, fname)
-                dst = os.path.join(old_folder, new_fname)
-                if os.path.exists(dst):
-                    logger.warning(f"Skipping rename {fname} -> {new_fname}: target already exists")
-                    continue
-                os.rename(src, dst)
-                old_to_new_filenames[fname] = new_fname
-                logger.info(f"Renamed file: {fname} -> {new_fname}")
-    except OSError as e:
-        # Roll back successful file renames before reporting the error
-        for old_name, new_name in old_to_new_filenames.items():
-            try:
-                os.rename(os.path.join(old_folder, new_name), os.path.join(old_folder, old_name))
-            except OSError:
-                pass
-        raise HTTPException(status_code=500, detail=f"Failed to rename files: {e}")
-
-    # --- Rename the folder ---
-    try:
-        if os.path.exists(new_folder) and os.path.normpath(old_folder).lower() != os.path.normpath(new_folder).lower():
-            raise HTTPException(status_code=409, detail=f"Target folder already exists: {new_folder}")
-        # Create parent directories if needed (for nested folder structures)
-        os.makedirs(os.path.dirname(new_folder), exist_ok=True)
-        os.rename(old_folder, new_folder)
-        logger.info(f"Renamed folder: {old_folder_name} -> {os.path.basename(new_folder)}")
-        # Clean up empty parent dirs
-        _cleanup_empty_parents(old_folder, settings.library_dir)
-    except OSError as e:
-        # Roll back file renames
-        for old_name, new_name in old_to_new_filenames.items():
-            try:
-                os.rename(os.path.join(old_folder, new_name), os.path.join(old_folder, old_name))
-            except OSError:
-                pass
-        raise HTTPException(status_code=500, detail=f"Failed to rename folder: {e}")
-
-    # --- Update DB paths ---
-    video.folder_path = new_folder
-
-    if video.file_path:
-        old_fname = os.path.basename(video.file_path)
-        new_fname = old_to_new_filenames.get(old_fname, old_fname)
-        video.file_path = os.path.join(new_folder, new_fname)
-        # If the file doesn't exist at the computed path (stale DB reference
-        # from a prior partial rename), check for the expected video filename
-        if not os.path.isfile(video.file_path):
-            old_ext = os.path.splitext(old_fname)[1]
-            expected_path = os.path.join(new_folder, f"{new_folder_name}{old_ext}")
-            if os.path.isfile(expected_path):
-                video.file_path = expected_path
-
-    # Update MediaAsset paths (only for assets inside the video folder;
-    # skip artist_thumb/album_thumb that live in _artists/_albums dirs)
-    old_folder_norm = os.path.normpath(old_folder).lower()
-    for asset in db.query(MediaAsset).filter(MediaAsset.video_id == video_id).all():
-        if asset.file_path:
-            asset_dir_norm = os.path.normpath(os.path.dirname(asset.file_path)).lower()
-            if asset_dir_norm != old_folder_norm:
-                continue
-            old_asset_fname = os.path.basename(asset.file_path)
-            new_asset_fname = old_to_new_filenames.get(old_asset_fname, old_asset_fname)
-            asset.file_path = os.path.join(new_folder, new_asset_fname)
-            # Handle prior partial rename: check if the expected suffixed name exists
-            if not os.path.isfile(asset.file_path):
-                asset_stem = os.path.splitext(old_asset_fname)[0]
-                asset_ext = os.path.splitext(old_asset_fname)[1]
-                for suffix in SUFFIX_TYPES:
-                    if asset_stem.endswith(suffix):
-                        expected_name = f"{new_folder_name}{suffix}{asset_ext}"
-                        expected_path = os.path.join(new_folder, expected_name)
-                        if os.path.isfile(expected_path):
-                            asset.file_path = expected_path
-                        break
-
-    # Update AIThumbnail paths — only if they lived inside the old library folder
-    for thumb in db.query(AIThumbnail).filter(AIThumbnail.video_id == video_id).all():
-        if thumb.file_path and os.path.dirname(thumb.file_path) == old_folder:
-            old_thumb_fname = os.path.basename(thumb.file_path)
-            thumb.file_path = os.path.join(new_folder, old_thumb_fname)
-
-    # --- Delete old NFO (if renamed) then rewrite with current metadata ---
-    # First remove the renamed old NFO so write_nfo_file creates a fresh one
-    for old_name, new_name in old_to_new_filenames.items():
-        if new_name.endswith(".nfo"):
-            old_nfo_path = os.path.join(new_folder, new_name)
-            try:
-                os.remove(old_nfo_path)
-            except OSError:
-                pass
-
-    try:
-        source_url = video.sources[0].original_url if video.sources else ""
-        genre_names = [g.name for g in video.genres] if video.genres else []
-        write_nfo_file(
-            folder_path=new_folder,
-            artist=video.artist,
-            title=video.title,
-            album=video.album or "",
-            year=video.year,
-            genres=genre_names,
-            plot=video.plot or "",
-            source_url=source_url,
-            resolution_label=video.resolution_label or "",
-            version_type=video.version_type or "normal",
-            alternate_version_label=video.alternate_version_label or "",
-            original_artist=video.original_artist or "",
-            original_title=video.original_title or "",
-        )
-    except Exception as e:
-        logger.warning(f"NFO rewrite failed (non-fatal): {e}")
-
-    from app.services.playarr_xml import write_playarr_xml
-    write_playarr_xml(video, db)
-
-    # --- Set processing flag ---
-    state = dict(video.processing_state or {})
-    state["filename_checked"] = {
-        "completed": True,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "method": "rename",
-        "version": "1.0",
-    }
-    state["file_organized"] = {
-        "completed": True,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "method": "rename",
-        "version": "1.0",
-    }
-    state["nfo_exported"] = {
-        "completed": True,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "method": "rename",
-        "version": "1.0",
-    }
-    state["xml_exported"] = {
-        "completed": True,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "method": "rename",
-        "version": "1.0",
-    }
-    video.processing_state = state
-    flag_modified(video, "processing_state")
-
-    db.commit()
-    db.refresh(video)
-    return video
 
 
 # ---------------------------------------------------------------------------
@@ -2966,217 +2830,65 @@ def bulk_rename_preview(db: Session = Depends(get_db)):
 @router.post("/bulk-rename/execute", response_model=BulkRenameExecResponse)
 def bulk_rename_execute(db: Session = Depends(get_db)):
     """
-    Rename/move all videos to match the current naming convention settings.
-    Renames folder, video file, NFO, posters, and all associated files.
-    Updates all DB path references.
+    Queue durable rename plans for every video that does not match the current
+    naming convention.  The mutation worker performs the filesystem changes,
+    companion-file renames and database path update as one journalled unit.
     """
-    from app.services.file_organizer import (
-        compute_expected_paths, build_folder_name, write_nfo_file,
+    from app.services.rename_operations import (
+        enqueue_expected_rename,
+        notify_expected_rename,
     )
-    from app.config import get_settings
-    from app.models import Source
+    from app.user_identity import get_instance_user_id
 
-    settings = get_settings()
-    videos = db.query(VideoItem).options(
-        joinedload(VideoItem.genres),
-        joinedload(VideoItem.sources),
-    ).filter(
+    videos = db.query(VideoItem).filter(
         VideoItem.folder_path.isnot(None),
         VideoItem.file_path.isnot(None),
     ).all()
-
-    renamed = 0
+    queued = 0
     failed = 0
-    errors = []
+    errors: list[str] = []
+    actor_id = get_instance_user_id(db)
 
-    VIDEO_EXTS = {".mkv", ".mp4", ".webm", ".avi", ".mov", ".mpg"}
-    SUFFIX_TYPES = sorted(
-        ["-album-thumb", "-artist-thumb", "-poster", "-fanart", "-thumb",
-         "-banner", "-landscape", "-clearart", "-clearlogo", "-discart"],
-        key=len, reverse=True,
-    )
-
-    for v in videos:
-        if not v.folder_path or not v.file_path:
-            continue
-
+    for video in videos:
         try:
-            file_ext = os.path.splitext(v.file_path)[1] or ".mkv"
-            expected = compute_expected_paths(
-                settings.library_dir,
-                v.artist, v.title, v.resolution_label or "1080p",
-                album=v.album or "",
-                version_type=v.version_type or "normal",
-                alternate_version_label=v.alternate_version_label or "",
-                file_ext=file_ext,
-            )
-
-            old_folder = v.folder_path
-            new_folder = expected["folder_path"]
-            new_base_name = expected["file_base_name"]
-            old_folder_name = os.path.basename(old_folder)
-
-            # Check if anything actually needs changing
-            current_norm = os.path.normpath(old_folder).lower()
-            expected_norm = os.path.normpath(new_folder).lower()
-            current_fname = os.path.basename(v.file_path)
-            expected_fname = f"{new_base_name}{file_ext}"
-
-            if current_norm == expected_norm and current_fname.lower() == expected_fname.lower():
-                continue  # Already correct
-
-            if not os.path.isdir(old_folder):
-                errors.append(f"[{v.artist} - {v.title}] Folder missing: {old_folder}")
-                failed += 1
-                continue
-
-            # --- Step 1: Rename files inside the folder ---
-            old_to_new: dict[str, str] = {}
-            for entry in os.scandir(old_folder):
-                if not entry.is_file():
-                    continue
-                fname = entry.name
-                ext = os.path.splitext(fname)[1].lower()
-                new_fname = None
-
-                if ext in VIDEO_EXTS or ext == ".nfo":
-                    new_fname = f"{new_base_name}{ext}"
-                else:
-                    name_no_ext = os.path.splitext(fname)[0]
-                    for suffix in SUFFIX_TYPES:
-                        if name_no_ext.endswith(suffix):
-                            new_fname = f"{new_base_name}{suffix}{ext}"
-                            break
-
-                if new_fname and fname != new_fname:
-                    src = os.path.join(old_folder, fname)
-                    dst = os.path.join(old_folder, new_fname)
-                    if not os.path.exists(dst):
-                        os.rename(src, dst)
-                        old_to_new[fname] = new_fname
-
-            # --- Step 2: Move folder if path changed ---
-            if current_norm != expected_norm:
-                if os.path.exists(new_folder) and current_norm != expected_norm:
-                    errors.append(f"[{v.artist} - {v.title}] Target exists: {new_folder}")
-                    # Roll back file renames
-                    for old_name, new_name in old_to_new.items():
-                        try:
-                            os.rename(os.path.join(old_folder, new_name), os.path.join(old_folder, old_name))
-                        except OSError:
-                            pass
-                    failed += 1
-                    continue
-
-                # Create parent directories for the new location
-                os.makedirs(os.path.dirname(new_folder), exist_ok=True)
-                os.rename(old_folder, new_folder)
-
-                # Clean up empty parent dirs left behind
-                _cleanup_empty_parents(old_folder, settings.library_dir)
-
-                actual_folder = new_folder
-            else:
-                # Folder path is the same, but may need case-fix rename
-                if os.path.basename(old_folder) != os.path.basename(new_folder):
-                    tmp_folder = old_folder + "_tmp_rename"
-                    os.rename(old_folder, tmp_folder)
-                    os.rename(tmp_folder, new_folder)
-                actual_folder = new_folder
-
-            # --- Step 3: Update DB paths ---
-            v.folder_path = actual_folder
-
-            if v.file_path:
-                old_fname = os.path.basename(v.file_path)
-                new_fname = old_to_new.get(old_fname, old_fname)
-                v.file_path = os.path.join(actual_folder, new_fname)
-                if not os.path.isfile(v.file_path):
-                    expected_path = os.path.join(actual_folder, f"{new_base_name}{file_ext}")
-                    if os.path.isfile(expected_path):
-                        v.file_path = expected_path
-
-            old_folder_norm = os.path.normpath(old_folder).lower()
-            for asset in db.query(MediaAsset).filter(MediaAsset.video_id == v.id).all():
-                if asset.file_path:
-                    # Skip assets that live outside the video folder
-                    # (e.g. artist_thumb in _artists/, album_thumb in _albums/)
-                    asset_dir_norm = os.path.normpath(os.path.dirname(asset.file_path)).lower()
-                    if asset_dir_norm != old_folder_norm:
-                        continue
-                    old_asset_fname = os.path.basename(asset.file_path)
-                    new_asset_fname = old_to_new.get(old_asset_fname, old_asset_fname)
-                    asset.file_path = os.path.join(actual_folder, new_asset_fname)
-                    if not os.path.isfile(asset.file_path):
-                        asset_stem = os.path.splitext(old_asset_fname)[0]
-                        asset_ext = os.path.splitext(old_asset_fname)[1]
-                        for suffix in SUFFIX_TYPES:
-                            if asset_stem.endswith(suffix):
-                                expected_name = f"{new_base_name}{suffix}{asset_ext}"
-                                expected_path = os.path.join(actual_folder, expected_name)
-                                if os.path.isfile(expected_path):
-                                    asset.file_path = expected_path
-                                break
-
-            # --- Step 4: Rewrite NFO ---
-            try:
-                # Remove old NFO files
-                for fname in os.listdir(actual_folder):
-                    if fname.endswith(".nfo"):
-                        os.remove(os.path.join(actual_folder, fname))
-
-                source_url = v.sources[0].original_url if v.sources else ""
-                genre_names = [g.name for g in v.genres] if v.genres else []
-                write_nfo_file(
-                    folder_path=actual_folder,
-                    artist=v.artist,
-                    title=v.title,
-                    album=v.album or "",
-                    year=v.year,
-                    genres=genre_names,
-                    plot=v.plot or "",
-                    source_url=source_url,
-                    resolution_label=v.resolution_label or "",
-                    version_type=v.version_type or "normal",
-                    alternate_version_label=v.alternate_version_label or "",
-                    original_artist=v.original_artist or "",
-                    original_title=v.original_title or "",
+            # A savepoint ensures a collision or missing folder for one item
+            # cannot leave a partial operation/command behind or abort the
+            # rest of the batch.
+            with db.begin_nested():
+                operation, _command, created = enqueue_expected_rename(
+                    db,
+                    video,
+                    actor_id=actor_id,
                 )
-            except Exception as e:
-                logger.warning(f"NFO rewrite failed for {v.artist} - {v.title}: {e}")
-
-            # --- Step 4b: Write Playarr XML sidecar ---
-            from app.services.playarr_xml import write_playarr_xml
-            write_playarr_xml(v, db)
-
-            # --- Step 5: Update processing state ---
-            state = dict(v.processing_state or {})
-            state["filename_checked"] = {
-                "completed": True,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "method": "bulk_rename",
-                "version": "1.0",
-            }
-            state["file_organized"] = {
-                "completed": True,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "method": "bulk_rename",
-                "version": "1.0",
-            }
-            v.processing_state = state
-            flag_modified(v, "processing_state")
-
-            renamed += 1
-            logger.info(f"Bulk renamed: {v.artist} - {v.title}")
-
-        except Exception as e:
+                collisions = operation.plan_json.get("collisions") or []
+                if collisions:
+                    raise ValueError(
+                        f"destination has {len(collisions)} collision(s)"
+                    )
+                if created:
+                    queued += 1
+        except ValueError as exc:
+            # An already-correct item is not a failure.  Other validation
+            # errors remain visible to the caller.
+            if "already matches" not in str(exc):
+                failed += 1
+                errors.append(f"[{video.artist} - {video.title}] {exc}")
+        except (FileNotFoundError, OSError) as exc:
             failed += 1
-            errors.append(f"[{v.artist} - {v.title}] {str(e)}")
-            logger.error(f"Bulk rename failed for {v.artist} - {v.title}: {e}")
+            errors.append(f"[{video.artist} - {video.title}] {exc}")
 
     db.commit()
+    if queued:
+        notify_expected_rename()
+    # Keep the existing `renamed` response field for API compatibility.  It
+    # now reports accepted durable operations; completion is observable via
+    # the operations API rather than being performed inside this request.
+    return BulkRenameExecResponse(
+        renamed=queued,
+        failed=failed,
+        errors=errors[:50],
+    )
 
-    return BulkRenameExecResponse(renamed=renamed, failed=failed, errors=errors[:50])
 
 
 def _cleanup_empty_parents(folder_path: str, stop_at: str):

@@ -8,7 +8,7 @@ import {
 import { PieChart, Pie, Cell, Tooltip as RTooltip, ResponsiveContainer } from "recharts";
 import {
   useMbidStats, useArtistConflicts, useConsolidateArtist,
-  useGenreBlacklist, useUpdateGenreBlacklist, useCreateGenre,
+  useGenreBlacklist, useUpdateGenreBlacklist,
   useGenreConsolidations, useGenreSuggestions,
   useConsolidateGenres, useConsolidateGenresManual, useUnconsolidateGenre,
   useAddGenreToTile, useBlacklistTile, useCreateTile,
@@ -16,12 +16,15 @@ import {
   useEntitySources, useUpdateEntitySources,
 } from "@/hooks/queries";
 import { metadataManagerApi } from "@/lib/api";
-import type { GenreSearchResult, ArtworkEntityRow, ArtistConsolidationAggregate } from "@/types";
+import type { GenreSearchResult, ArtworkEntityRow, ArtistConsolidationAggregate, ArtistConsolidationSuggestion } from "@/types";
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
 import { Skeleton } from "@/components/Feedback";
 import { GenreConsolidationEditor } from "@/components/GenreConsolidationEditor";
+import { ConsolidationColumnsEditor } from "@/components/ConsolidationColumnsEditor";
 import { useQueryClient } from "@tanstack/react-query";
+import { getPref, setPref } from "@/lib/preferences";
+import { ViewToggle } from "@/components/ViewToggle";
 
 // ─── Tab definitions ─────────────────────────────────────
 
@@ -335,6 +338,7 @@ function PieStatCard({ label, segments, centerValue, centerSub, alert }: {
 
 type ArtistDraft = {
   stableId?: string;
+  sourceSuggestionId?: string;
   revision: number;
   maskName: string;
   targets: Array<{ rawName: string; mbid: string }>;
@@ -343,14 +347,24 @@ type ArtistDraft = {
 
 function ArtistConsolidation() {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [items, setItems] = useState<ArtistConsolidationAggregate[]>([]);
+  const [suggestions, setSuggestions] = useState<ArtistConsolidationSuggestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState<ArtistDraft | null>(null);
+  const [view, setView] = useState<"in_place" | "suggested">("in_place");
 
   const reload = useCallback(async () => {
     setLoading(true);
-    try { setItems(await metadataManagerApi.artistConsolidationsV2()); }
+    try {
+      const [saved, unresolved] = await Promise.all([
+        metadataManagerApi.artistConsolidationsV2(),
+        metadataManagerApi.artistConsolidationSuggestions(),
+      ]);
+      setItems(saved);
+      setSuggestions(unresolved);
+    }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void reload(); }, [reload]);
@@ -381,6 +395,7 @@ function ArtistConsolidation() {
       }
       setDraft(null);
       await reload();
+      await queryClient.invalidateQueries({ queryKey: ["mbidStats"] });
       toast({ type: "success", title: "Artist consolidation saved" });
     } catch {
       toast({ type: "error", title: "Could not save; reload if another device changed this consolidation" });
@@ -391,8 +406,45 @@ function ArtistConsolidation() {
     try {
       await metadataManagerApi.deleteArtistConsolidationV2(item.stable_id, item.revision);
       await reload();
+      await queryClient.invalidateQueries({ queryKey: ["mbidStats"] });
       toast({ type: "success", title: "Artist consolidation deleted; source names were retained" });
     } catch { toast({ type: "error", title: "Could not delete artist consolidation" }); }
+  };
+
+  const reviewSuggestion = (suggestion: ArtistConsolidationSuggestion) => setDraft({
+    sourceSuggestionId: suggestion.suggestion_id,
+    revision: 0,
+    maskName: suggestion.names[0] ?? "",
+    targets: (suggestion.targets ?? suggestion.names.map(rawName => ({ raw_name: rawName, mb_artist_id: suggestion.mbids.length === 1 ? suggestion.mbids[0] : undefined, video_count: 0 }))).map(target => ({
+      rawName: target.raw_name,
+      mbid: target.mb_artist_id ?? "",
+    })),
+    mbids: [...suggestion.mbids],
+  });
+
+  const acceptSuggestion = async (suggestion: ArtistConsolidationSuggestion) => {
+    const maskName = suggestion.names[0]?.trim();
+    if (!maskName) return;
+    const targets: Array<{ raw_name: string; mb_artist_id?: string | null }> = suggestion.targets
+      ?? suggestion.names.map(raw_name => ({ raw_name }));
+    try {
+      await metadataManagerApi.createArtistConsolidationV2({
+        mask_name: maskName,
+        targets: targets.map(target => ({
+          raw_name: target.raw_name, provenance: "suggestion", mb_artist_id: target.mb_artist_id ?? undefined,
+        })),
+        mbids: suggestion.mbids,
+      });
+      await reload();
+      toast({ type: "success", title: "Suggested artist consolidation accepted" });
+    } catch { toast({ type: "error", title: "Could not accept artist consolidation" }); }
+  };
+
+  const dismissSuggestion = async (suggestion: ArtistConsolidationSuggestion) => {
+    await metadataManagerApi.dismissConsolidationSuggestion("artist", suggestion.suggestion_id);
+    if (draft?.sourceSuggestionId === suggestion.suggestion_id) setDraft(null);
+    await reload();
+    toast({ type: "success", title: "Suggested artist consolidation dissolved" });
   };
 
   if (loading) return <Skeleton className="h-48 rounded-lg" />;
@@ -402,33 +454,40 @@ function ArtistConsolidation() {
         <p className="text-xs text-text-muted">Display masks group raw target names and zero or more MBIDs without rewriting source metadata.</p>
         <button className="btn-primary btn-sm" onClick={() => setDraft({ revision: 0, maskName: "", targets: [], mbids: [] })}><Plus size={13} /> New consolidation</button>
       </div>
+      <div className="flex gap-1 border-b border-surface-border">
+        <button className={`px-4 py-2 text-xs font-medium ${view === "in_place" ? "border-b-2 border-primary text-text-primary" : "text-text-muted"}`} onClick={() => { setView("in_place"); setDraft(null); }}>In place <span className="ml-1 text-text-muted">{items.length}</span></button>
+        <button className={`px-4 py-2 text-xs font-medium ${view === "suggested" ? "border-b-2 border-primary text-text-primary" : "text-text-muted"}`} onClick={() => { setView("suggested"); setDraft(null); }}>Suggested <span className="ml-1 text-text-muted">{suggestions.length}</span></button>
+      </div>
+      {draft && !draft.stableId && !draft.sourceSuggestionId && (
+        <ConsolidationColumnsEditor kind="artist" value={draft} onChange={value => setDraft({ ...draft, ...value, targets: value.targets.map(target => ({ rawName: target.rawName, mbid: target.mbid ?? "" })) })} onSave={() => void save()} onCancel={() => setDraft(null)} saving={saving} search={metadataManagerApi.artistConsolidationOptions} />
+      )}
       <div className="overflow-hidden rounded-lg border border-surface-border">
         <div className="grid grid-cols-[minmax(180px,1fr)_minmax(160px,1fr)_minmax(220px,2fr)_auto] gap-3 bg-surface-dark px-4 py-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
           <span>MBID</span><span>Mask name</span><span>Target names</span><span>Actions</span>
         </div>
-        {items.length === 0 ? <p className="p-6 text-center text-xs text-text-muted">No artist consolidations yet. They can be created without an MBID.</p> : items.map(item => (
-          <div key={item.stable_id} className="grid grid-cols-[minmax(180px,1fr)_minmax(160px,1fr)_minmax(220px,2fr)_auto] gap-3 border-t border-surface-border px-4 py-3 text-xs items-start">
+        {view === "in_place" && items.length === 0 && <p className="p-6 text-center text-xs text-text-muted">No artist consolidations are in place.</p>}
+        {view === "suggested" && suggestions.length === 0 && <p className="p-6 text-center text-xs text-text-muted">No unresolved artist consolidation suggestions.</p>}
+        {view === "in_place" && items.map(item => (<div key={item.stable_id} className="border-t border-surface-border">
+          <div className="grid grid-cols-[minmax(180px,1fr)_minmax(160px,1fr)_minmax(220px,2fr)_auto] gap-3 px-4 py-3 text-xs items-start">
             <div className="space-y-1 font-mono text-[10px] text-text-muted">{item.mbids.length ? item.mbids.map(mbid => <div key={mbid}>{mbid}</div>) : <span>None</span>}</div>
             <span className="font-medium text-text-primary">{item.mask_name}</span>
             <div className="flex flex-wrap gap-1">{item.targets.length ? item.targets.map(target => <span key={target.id} className="rounded bg-surface-light px-2 py-1 text-text-secondary">{target.raw_name}</span>) : <span className="text-text-muted">No targets</span>}</div>
-            <div className="flex gap-1"><button className="btn-ghost btn-xs" onClick={() => edit(item)}><Edit3 size={12} /> Edit</button><button className="btn-ghost btn-xs text-red-400" onClick={() => void remove(item)}><Trash2 size={12} /> Delete</button></div>
+            <div className="flex gap-1"><button className="btn-ghost btn-xs" onClick={() => edit(item)}><Edit3 size={12} /> Edit</button><button className="btn-ghost btn-xs text-red-400" onClick={() => void remove(item)}><Trash2 size={12} /> Dissolve</button></div>
+          </div>
+          {draft?.stableId === item.stable_id && <div className="p-3"><ConsolidationColumnsEditor kind="artist" value={draft} onChange={value => setDraft({ ...draft, ...value, targets: value.targets.map(target => ({ rawName: target.rawName, mbid: target.mbid ?? "" })) })} onSave={() => void save()} onCancel={() => setDraft(null)} saving={saving} search={metadataManagerApi.artistConsolidationOptions} /></div>}
+        </div>))}
+        {view === "suggested" && suggestions.map(suggestion => (
+          <div key={suggestion.suggestion_id} className="border-t border-amber-400/20 bg-amber-400/5">
+          <div className="grid grid-cols-[minmax(180px,1fr)_minmax(160px,1fr)_minmax(220px,2fr)_auto] gap-3 px-4 py-3 text-xs items-start">
+            <div className="space-y-1 font-mono text-[10px] text-text-muted">{suggestion.mbids.length ? suggestion.mbids.map(mbid => <div key={mbid}>{mbid}</div>) : <span>Regex match</span>}</div>
+            <div><span className="rounded bg-amber-400/15 px-2 py-1 text-[10px] text-amber-300">Suggested</span><div className="mt-2 text-[10px] text-text-muted">{Math.round(suggestion.confidence * 100)}% confidence</div></div>
+            <div className="flex flex-wrap gap-1">{suggestion.names.map(name => <span key={name} className="rounded bg-surface-light px-2 py-1 text-text-secondary">{name}</span>)}</div>
+            <div className="flex flex-wrap justify-end gap-1"><button className="btn-ghost btn-xs text-amber-300" onClick={() => reviewSuggestion(suggestion)}><Edit3 size={12} /> Edit</button><button className="btn-ghost btn-xs text-emerald-400" onClick={() => void acceptSuggestion(suggestion)}><Check size={12} /> Accept</button><button className="btn-ghost btn-xs text-red-400" onClick={() => void dismissSuggestion(suggestion)}><Trash2 size={12} /> Dissolve</button></div>
+          </div>
+          {draft?.sourceSuggestionId === suggestion.suggestion_id && <div className="p-3"><ConsolidationColumnsEditor kind="artist" value={draft} onChange={value => setDraft({ ...draft, ...value, targets: value.targets.map(target => ({ rawName: target.rawName, mbid: target.mbid ?? "" })) })} onSave={() => void save()} onCancel={() => setDraft(null)} saving={saving} search={metadataManagerApi.artistConsolidationOptions} /></div>}
           </div>
         ))}
       </div>
-
-      {draft && (
-        <div className="card space-y-4 p-4">
-          <h3 className="text-sm font-semibold">{draft.stableId ? "Edit" : "New"} artist consolidation</h3>
-          <label className="block text-xs text-text-secondary">Mask name<input className="input-field mt-1 w-full" value={draft.maskName} onChange={event => setDraft({ ...draft, maskName: event.target.value })} /></label>
-          <div className="space-y-2"><div className="flex justify-between"><span className="text-xs font-medium text-text-secondary">Target names</span><button className="btn-ghost btn-xs" onClick={() => setDraft({ ...draft, targets: [...draft.targets, { rawName: "", mbid: "" }] })}><Plus size={11} /> Add target</button></div>
-            {draft.targets.map((target, index) => <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2"><input aria-label={`Target name ${index + 1}`} className="input-field" placeholder="Raw target name" value={target.rawName} onChange={event => setDraft({ ...draft, targets: draft.targets.map((value, idx) => idx === index ? { ...value, rawName: event.target.value } : value) })} /><input aria-label={`Target MBID ${index + 1}`} className="input-field font-mono" placeholder="Optional MBID" value={target.mbid} onChange={event => setDraft({ ...draft, targets: draft.targets.map((value, idx) => idx === index ? { ...value, mbid: event.target.value } : value) })} /><button className="btn-ghost btn-xs text-red-400" onClick={() => setDraft({ ...draft, targets: draft.targets.filter((_, idx) => idx !== index) })}><X size={12} /> Remove</button></div>)}
-          </div>
-          <div className="space-y-2"><div className="flex justify-between"><span className="text-xs font-medium text-text-secondary">Additional MBIDs</span><button className="btn-ghost btn-xs" onClick={() => setDraft({ ...draft, mbids: [...draft.mbids, ""] })}><Plus size={11} /> Add MBID</button></div>
-            {draft.mbids.map((mbid, index) => <div key={index} className="flex gap-2"><input aria-label={`MBID ${index + 1}`} className="input-field flex-1 font-mono" value={mbid} onChange={event => setDraft({ ...draft, mbids: draft.mbids.map((value, idx) => idx === index ? event.target.value : value) })} /><button className="btn-ghost btn-xs text-red-400" onClick={() => setDraft({ ...draft, mbids: draft.mbids.filter((_, idx) => idx !== index) })}><X size={12} /> Remove</button></div>)}
-          </div>
-          <div className="flex justify-end gap-2"><button className="btn-ghost btn-sm" onClick={() => setDraft(null)}>Cancel</button><button className="btn-primary btn-sm" disabled={saving || !draft.maskName.trim()} onClick={() => void save()}>{saving && <Loader2 size={13} className="animate-spin" />} Save changes</button></div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1124,21 +1183,16 @@ void GenreConsolidationLegacy;
 function GenreManager() {
   const { data: genres, isLoading } = useGenreBlacklist();
   const updateMutation = useUpdateGenreBlacklist();
-  const createMutation = useCreateGenre();
   const { toast } = useToast();
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<"visible" | "hidden">("visible");
-  const [newGenreName, setNewGenreName] = useState("");
 
   if (isLoading || !genres) {
     return <Skeleton className="h-32 rounded-lg" />;
   }
 
-  // Hide alias genres (those with master_genre_id) — they're managed via the consolidation tab
-  const standalone = genres.filter((g) => g.master_genre_id === null);
-
-  const visible = standalone.filter((g) => !g.blacklisted);
-  const hidden = standalone.filter((g) => g.blacklisted);
+  const visible = genres.filter((g) => !g.blacklisted);
+  const hidden = genres.filter((g) => g.blacklisted);
   const list = tab === "visible" ? visible : hidden;
   const filtered = search
     ? list.filter((g) => g.name.toLowerCase().includes(search.toLowerCase()))
@@ -1158,23 +1212,11 @@ function GenreManager() {
     );
   };
 
-  const handleAddGenre = () => {
-    const name = newGenreName.trim();
-    if (!name) return;
-    createMutation.mutate(name, {
-      onSuccess: () => {
-        toast({ type: "success", title: `Genre "${name}" created` });
-        setNewGenreName("");
-      },
-      onError: () => toast({ type: "error", title: "Failed to create genre (may already exist)" }),
-    });
-  };
-
   return (
     <div>
       <p className="text-xs text-text-muted leading-relaxed mb-3">
-        Hidden genres are still stored on each track but won't appear in the Genres page or on track metadata tiles.
-        Use this to hide noisy or irrelevant genre tags. Consolidated genres are managed in the Genre Consolidation tab.
+        Only genres used by library videos are shown. Consolidated variants appear once under their mask name.
+        Hiding a mask hides all of its source tags from the Genres page and track metadata tiles.
       </p>
 
       {/* Tab toggle */}
@@ -1212,25 +1254,6 @@ function GenreManager() {
         </div>
       </div>
 
-      {/* Add new genre */}
-      <div className="flex items-center gap-2 mb-3">
-        <input
-          type="text"
-          value={newGenreName}
-          onChange={(e) => setNewGenreName(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && newGenreName.trim()) handleAddGenre(); }}
-          placeholder="New genre name…"
-          className="input-field text-xs py-1.5 flex-1"
-        />
-        <button
-          onClick={handleAddGenre}
-          disabled={!newGenreName.trim() || createMutation.isPending}
-          className="btn-sm text-xs px-3 py-1.5 rounded-lg bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 disabled:opacity-40 flex items-center gap-1"
-        >
-          <Plus size={13} /> Add
-        </button>
-      </div>
-
       {/* Genre list */}
       <div className="max-h-[36rem] overflow-y-auto rounded-lg border border-white/5">
         {filtered.length === 0 ? (
@@ -1258,7 +1281,7 @@ function GenreManager() {
                   </span>
                 </div>
                 <button
-                  onClick={() => toggle([g.id], tab === "visible")}
+                  onClick={() => toggle(g.genre_ids, tab === "visible")}
                   disabled={updateMutation.isPending}
                   className={`btn-sm text-[11px] px-2 py-1 rounded flex items-center gap-1 ${
                     tab === "visible"
@@ -1282,13 +1305,19 @@ function GenreManager() {
 
 function ArtworkManager() {
   const { data: stats, isLoading: statsLoading } = useArtworkStats();
-  const [entityType, setEntityType] = useState<"artist" | "album" | "poster">("artist");
+  const workspacePrefs = getPref<Record<string, unknown>>("workspace", {});
+  const [entityType, setEntityType] = useState<"artist" | "album" | "poster">(
+    () => (workspacePrefs.metadataEntityType as "artist" | "album" | "poster") || "artist",
+  );
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [sortOrder, setSortOrder] = useState<string>("name_asc");
+  const [sortOrder, setSortOrder] = useState<string>(() => String(workspacePrefs.metadataSort ?? "name_asc"));
   const [page, setPage] = useState(1);
-  const [perPage, setPerPage] = useState(50);
+  const [perPage, setPerPage] = useState(() => Number(workspacePrefs.metadataPageSize ?? 50));
+  const [view, setView] = useState<"grid" | "list">(
+    () => (workspacePrefs.metadataView as "grid" | "list") || "grid",
+  );
   const [pageInput, setPageInput] = useState("1");
   const { data: entitiesData, isLoading: entitiesLoading, refetch } = useArtworkEntities(
     entityType, statusFilter || undefined, page, perPage, debouncedSearch || undefined, sortOrder,
@@ -1314,6 +1343,16 @@ function ArtworkManager() {
 
   // Reset page when filters change
   useEffect(() => { setPage(1); setPageInput("1"); setSelected(new Set()); }, [entityType, statusFilter, debouncedSearch, sortOrder, perPage]);
+
+  useEffect(() => {
+    setPref("workspace", {
+      ...getPref<Record<string, unknown>>("workspace", {}),
+      metadataEntityType: entityType,
+      metadataSort: sortOrder,
+      metadataPageSize: perPage,
+      metadataView: view,
+    });
+  }, [entityType, sortOrder, perPage, view]);
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -1546,6 +1585,7 @@ function ArtworkManager() {
               <RefreshCw size={14} />
             </button>
           </Tooltip>
+          <ViewToggle value={view} onChange={setView} label="Artwork layout" />
         </div>
 
         {/* Search bar */}
@@ -1622,7 +1662,7 @@ function ArtworkManager() {
           </div>
         ) : (
           <>
-            <div className="space-y-2">
+            <div className={view === "grid" ? "grid gap-3 xl:grid-cols-2" : "space-y-2"}>
               {entitiesData.items.map((entity) => (
                 <ArtworkEntityTile
                   key={entity.id}

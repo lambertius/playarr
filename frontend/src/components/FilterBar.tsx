@@ -7,6 +7,9 @@ const VERSION_TYPES = [
   { value: "cover", label: "Cover" },
   { value: "live", label: "Live" },
   { value: "alternate", label: "Alternate" },
+  { value: "remix", label: "Remix" },
+  { value: "acoustic", label: "Acoustic" },
+  { value: "uncensored", label: "Uncensored" },
   { value: "18+", label: "18+" },
 ] as const;
 
@@ -36,6 +39,10 @@ interface FilterBarProps {
   hideQuality?: boolean;
   /** Page-specific controls that belong to the same canonical filter surface. */
   children?: ReactNode;
+  /** Active filters rendered by page-specific controls. */
+  additionalActiveCount?: number;
+  /** Clears both shared and page-specific filters. */
+  onClearAll?: () => void;
 }
 
 function hasActiveFilters(f: FacetFilterParams): boolean {
@@ -57,14 +64,15 @@ function activeFilterCount(f: FacetFilterParams): number {
 
 export function FilterBar({
   filters, onChange, hideArtist, hideYearRange, hideRatings, hideGenre, hideQuality, children,
+  additionalActiveCount = 0, onClearAll,
 }: FilterBarProps) {
-  const active = hasActiveFilters(filters);
-  const count = activeFilterCount(filters);
+  const active = hasActiveFilters(filters) || additionalActiveCount > 0;
+  const count = activeFilterCount(filters) + additionalActiveCount;
 
   const set = (patch: Partial<FacetFilterParams>) =>
     onChange({ ...filters, ...patch });
 
-  const clear = () => onChange({});
+  const clear = () => onClearAll ? onClearAll() : onChange({});
 
   const chips: Array<{ key: keyof FacetFilterParams; label: string }> = [];
   if (filters.version_type) chips.push({ key: "version_type", label: `Type: ${filters.version_type}` });
@@ -81,7 +89,7 @@ export function FilterBar({
   };
 
   return (
-    <div className="w-full mb-4 rounded-lg bg-surface-secondary/50 border border-border p-3">
+    <div className="w-full mb-4 rounded-lg bg-surface-secondary/50 p-3">
       <div className="flex items-center gap-2 mb-3">
         <span className={`text-xs font-semibold flex items-center gap-1.5 ${active ? "text-accent" : "text-text-secondary"}`}>
           <Filter size={14} />

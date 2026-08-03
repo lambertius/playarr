@@ -28,11 +28,9 @@ const fullscreenLabels: Record<FullscreenMode, string> = {
 
 export function FullscreenControls({
   visible = true,
-  profile = "browser",
   onActivity,
 }: {
   visible?: boolean;
-  profile?: "browser" | "tv" | "cast";
   onActivity?: () => void;
 }) {
   const track = usePlaybackStore((s) => s.currentTrack)();
@@ -46,7 +44,6 @@ export function FullscreenControls({
   const togglePlay = usePlaybackStore((s) => s.togglePlay);
   const stop = usePlaybackStore((s) => s.stop);
   const next = usePlaybackStore((s) => s.next);
-  const random = usePlaybackStore((s) => s.random);
   const prev = usePlaybackStore((s) => s.prev);
   const seekTo = usePlaybackStore((s) => s.seekTo);
   const toggleShuffle = usePlaybackStore((s) => s.toggleShuffle);
@@ -102,16 +99,6 @@ export function FullscreenControls({
   const RepeatIcon = repeatIcon[repeat];
 
   const FullscreenIcon = fullscreenMode === "video" ? Minimize : fullscreenMode === "theater" ? Maximize : Monitor;
-  const navigateTvTransport = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
-    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
-    const current = Math.max(0, buttons.indexOf(document.activeElement as HTMLButtonElement));
-    const delta = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
-    buttons[(current + delta + buttons.length) % buttons.length]?.focus();
-    event.preventDefault();
-    onActivity?.();
-  };
-
   return (
     <div
       ref={containerRef}
@@ -164,20 +151,6 @@ export function FullscreenControls({
           </span>
         </div>
 
-        {/* TV/cast transport is deliberately three large remote targets. */}
-        {profile !== "browser" ? (
-          <div className="flex items-center justify-center gap-8" role="group" aria-label="TV playback transport" onKeyDown={navigateTvTransport}>
-            <button onClick={prev} className="h-[72px] w-[72px] rounded-full bg-white/10 text-white flex items-center justify-center focus:outline-none focus:ring-4 focus:ring-accent" aria-label="Previous track">
-              <SkipBack size={32} />
-            </button>
-            <button onClick={random} className="h-[72px] w-[72px] rounded-full bg-accent text-white flex items-center justify-center focus:outline-none focus:ring-4 focus:ring-white" aria-label="Random track">
-              <Shuffle size={32} />
-            </button>
-            <button onClick={next} className="h-[72px] w-[72px] rounded-full bg-white/10 text-white flex items-center justify-center focus:outline-none focus:ring-4 focus:ring-accent" aria-label="Next track">
-              <SkipForward size={32} />
-            </button>
-          </div>
-        ) : (
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ControlBtn onClick={toggleShuffle} active={shuffle} title="Shuffle">
@@ -211,7 +184,65 @@ export function FullscreenControls({
             </ControlBtn>
           </div>
         </div>
-        )}
+      </div>
+    </div>
+  );
+}
+
+/** Three-target transport for TV remotes and cast controllers.
+ *
+ * It deliberately omits seek, pause, repeat and fullscreen affordances. Those
+ * controls are difficult to target with directional remotes and duplicate the
+ * information card. The transport is mounted beside that card by the player,
+ * so pointer/controller activity reveals them as one surface.
+ */
+export function RemoteTransportControls({
+  visible = true,
+  onActivity,
+}: {
+  visible?: boolean;
+  onActivity?: () => void;
+}) {
+  const prev = usePlaybackStore((s) => s.prev);
+  const random = usePlaybackStore((s) => s.random);
+  const next = usePlaybackStore((s) => s.next);
+
+  const navigate = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+    const focused = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const current = focused < 0 ? 0 : focused;
+    const delta = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+    buttons[(current + delta + buttons.length) % buttons.length]?.focus();
+    event.preventDefault();
+    onActivity?.();
+  };
+
+  const targetClass = "flex h-[84px] min-w-[132px] items-center justify-center rounded-2xl border border-white/20 bg-black/80 text-white shadow-2xl transition-all hover:border-accent hover:bg-black focus:outline-none focus:ring-4 focus:ring-accent focus:scale-105";
+
+  return (
+    <div
+      className={`absolute bottom-[2%] left-1/2 z-40 -translate-x-1/2 transition-all duration-300 ${
+        visible ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0 pointer-events-none"
+      }`}
+      onPointerMove={onActivity}
+      onFocusCapture={onActivity}
+    >
+      <div
+        className="flex items-center justify-center gap-6 rounded-3xl border border-white/10 bg-black/45 p-3"
+        role="group"
+        aria-label="TV playback transport"
+        onKeyDown={navigate}
+      >
+        <button onClick={prev} className={targetClass} aria-label="Previous track">
+          <SkipBack size={42} fill="currentColor" />
+        </button>
+        <button onClick={random} className={`${targetClass} border-accent bg-accent text-white hover:bg-accent/80`} aria-label="Random track">
+          <Shuffle size={42} />
+        </button>
+        <button onClick={next} className={targetClass} aria-label="Next track">
+          <SkipForward size={42} fill="currentColor" />
+        </button>
       </div>
     </div>
   );

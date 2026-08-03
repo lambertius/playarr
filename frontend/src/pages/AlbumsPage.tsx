@@ -173,9 +173,9 @@ export function AlbumsPage() {
           </>
         )}
       </div>
-      <div className="mb-4">
+      {(isLoading || isError || !filtered || filtered.filter((album) => album.album).length === 0) && (
         <FilterBar filters={filters} onChange={setFilters} />
-      </div>
+      )}
 
       {isLoading ? (
         <div className="grid grid-cols-[repeat(auto-fill,150px)] gap-4">
@@ -194,6 +194,7 @@ export function AlbumsPage() {
           preferenceKey="albums"
           defaultSort="name"
           empty={<EmptyState icon={<Disc3 size={48} />} title="No albums yet" />}
+          renderFilterTile={(controls) => <FilterBar filters={filters} onChange={setFilters}>{controls}</FilterBar>}
           columns={[
             { id: "name", label: "Album", width: "minmax(12rem,1fr)", sortValue: (album) => album.album ?? "", render: (album) => <button className="truncate hover:text-accent" onClick={() => navigate(album.album_entity_id ? `/library?album_entity_id=${album.album_entity_id}&album=${encodeURIComponent(album.album!)}` : `/library?album=${encodeURIComponent(album.album!)}`)}>{album.album}</button> },
             { id: "artist", label: "Artist", width: "minmax(10rem,1fr)", sortValue: (album) => album.artist ?? "", render: (album) => album.artist || "—" },

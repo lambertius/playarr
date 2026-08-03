@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import SidecarOutbox, VideoItem
 from app.services.playarr_xml import parse_playarr_xml, write_playarr_xml
-from app.services.sidecar_outbox import process_next_sidecar
+from app.services.sidecar_outbox import process_next_sidecar, schedule_stale_sidecars
 
 
 def _sessions(tmp_path: Path):
@@ -78,3 +78,31 @@ def test_uncommitted_outbox_never_materialises_sidecar(tmp_path: Path):
 
     assert process_next_sidecar(sessions) is False
     assert planned_path and not Path(planned_path).exists()
+
+
+def test_startup_reconciliation_upgrades_legacy_schema_at_current_revision(tmp_path: Path):
+    sessions = _sessions(tmp_path)
+    folder = tmp_path / "legacy"
+    folder.mkdir()
+    media = folder / "track.mp4"
+    media.write_bytes(b"fixture-media")
+    sidecar = folder / "track.playarr.xml"
+    sidecar.write_text(
+        '<playarr version="1" schemaVersion="1" entityRevision="1">'
+        '<identity><artist>A</artist><title>T</title></identity></playarr>',
+        encoding="utf-8",
+    )
+    db = sessions()
+    db.add(VideoItem(
+        artist="A", title="T", folder_path=str(folder), file_path=str(media),
+        revision=1, sidecar_revision=1,
+    ))
+    db.commit()
+
+    assert schedule_stale_sidecars(db) == 1
+    assert db.query(SidecarOutbox).filter_by(status="pending").count() == 1
+    db.close()
+
+    assert process_next_sidecar(sessions) is True
+    parsed = parse_playarr_xml(str(sidecar))
+    assert parsed["xml_version"] == "2"

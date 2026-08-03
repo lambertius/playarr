@@ -1158,6 +1158,11 @@ export function useYtdlpStatus(enabled = true) {
     enabled,
     staleTime: 1000 * 60 * 30,
     refetchOnWindowFocus: false,
+    refetchInterval: (query) => (
+      query.state.data?.latest_version || query.state.data?.last_checked_at
+        ? false
+        : 2000
+    ),
     retry: false,
   });
 }
@@ -1257,7 +1262,7 @@ export function useSetExcludeFromScan() {
 }
 
 // ─── Archive Queries ──────────────────────────────────────
-export function useArchiveItems(params: { reason?: string; search?: string; page: number; page_size: number }) {
+export function useArchiveItems(params: { reason?: string; search?: string; video_id?: number; page: number; page_size: number }) {
   return useQuery({
     queryKey: ["archiveItems", params],
     queryFn: () => settingsApi.archiveItems(params),
@@ -1396,8 +1401,8 @@ export function useNewVideosAddVideo() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (suggested_video_id: number) => newVideosApi.addVideo(suggested_video_id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["newVideosFeed"] });
+    onSuccess: async () => {
+      await qc.refetchQueries({ queryKey: ["newVideosFeed"] });
       qc.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
@@ -1408,8 +1413,8 @@ export function useNewVideosDismiss() {
   return useMutation({
     mutationFn: ({ id, type, reason }: { id: number; type: "temporary" | "permanent"; reason?: string }) =>
       newVideosApi.dismiss(id, type, reason),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["newVideosFeed"] });
+    onSuccess: async () => {
+      await qc.refetchQueries({ queryKey: ["newVideosFeed"] });
     },
   });
 }

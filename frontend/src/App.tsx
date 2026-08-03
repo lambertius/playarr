@@ -1,4 +1,4 @@
-import { lazy, Suspense, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ToastProvider } from "@/components/Toast";
@@ -42,12 +42,22 @@ const queryClient = new QueryClient({
   },
 });
 
+function PreferenceRefreshBoundary({ children }: { children: ReactNode }) {
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    const refresh = () => setRevision(value => value + 1);
+    globalThis.addEventListener("playarr:preference-changed", refresh);
+    return () => globalThis.removeEventListener("playarr:preference-changed", refresh);
+  }, []);
+  return <div key={revision} className="contents">{children}</div>;
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
         <BrowserRouter>
-          <Routes>
+          <PreferenceRefreshBoundary><Routes>
             <Route element={<Layout />}>
               <Route index element={<Navigate to="/library" replace />} />
               <Route path="library" element={page(<LibraryPage />)} />
@@ -74,7 +84,7 @@ function App() {
               <Route path="new-videos" element={page(<NewVideosPage />)} />
               <Route path="*" element={<Navigate to="/library" replace />} />
             </Route>
-          </Routes>
+          </Routes></PreferenceRefreshBoundary>
         </BrowserRouter>
       </ToastProvider>
     </QueryClientProvider>

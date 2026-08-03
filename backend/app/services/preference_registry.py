@@ -104,11 +104,38 @@ _register("queue-v2", {"status": "active", "category": "all", "pageSize": 50}, {
     "status": _enum("active", "complete", "failed", "cancelled", "skipped"),
     "category": _is_str, "pageSize": _int_range(10, 200),
 })
-_register("review", {"categoryFilter": "all", "pageSize": 25}, {
+_register("review", {"categoryFilter": "all", "pageSize": 25, "view": "list"}, {
     "categoryFilter": _nullable_str, "pageSize": _int_range(0, 1000),
+    "view": _enum("grid", "list"),
 })
-_register("archive", {"pageSize": 25, "view": "list"}, {
+_register("archive", {"pageSize": 25, "view": "list", "reasonFilter": "all"}, {
     "pageSize": _int_range(10, 200), "view": _enum("grid", "list"),
+    "reasonFilter": _is_str,
+})
+_register("workspace", {
+    "playlistView": "grid", "playlistSort": "name", "playlistDirection": "asc",
+    "playlistEntrySort": "artist", "playlistEntryDirection": "asc",
+    "videoEditorTagFilter": "all", "videoEditorSort": "editor_order",
+    "videoEditorDirection": "asc", "videoEditorPageSize": 10,
+    "videoEditorProfile": "source_fidelity", "videoEditorCrf": 14,
+    "videoEditorPreset": "slow", "videoEditorAudioPassthrough": True,
+    "videoEditorRatio": "original", "metadataEntityType": "artist",
+    "metadataSort": "name_asc", "metadataPageSize": 50, "metadataView": "grid",
+    "logTailLines": 500,
+}, {
+    "playlistView": _enum("grid", "list"),
+    "playlistSort": _is_str, "playlistDirection": _enum("asc", "desc"),
+    "playlistEntrySort": _is_str, "playlistEntryDirection": _enum("asc", "desc"),
+    "videoEditorTagFilter": _is_str, "videoEditorSort": _is_str,
+    "videoEditorDirection": _enum("asc", "desc"),
+    "videoEditorPageSize": _int_range(5, 200),
+    "videoEditorProfile": _enum("source_fidelity", "balanced", "custom"),
+    "videoEditorCrf": _int_range(0, 51), "videoEditorPreset": _is_str,
+    "videoEditorAudioPassthrough": _is_bool, "videoEditorRatio": _is_str,
+    "metadataEntityType": _enum("artist", "album", "poster"),
+    "metadataSort": _is_str, "metadataPageSize": _int_range(10, 500),
+    "metadataView": _enum("grid", "list"),
+    "logTailLines": _int_range(50, 10000),
 })
 _register("panels", {
     "thumbnailsExpanded": False, "trackHistoryExpanded": False,

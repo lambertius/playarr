@@ -494,7 +494,7 @@ export const settingsApi = {
   openDirectory: (path: string) =>
     api.post<{ ok: boolean; path: string }>("/settings/open-directory", { path }).then(r => r.data),
 
-  archiveItems: (params?: { reason?: string; search?: string; page?: number; page_size?: number }) =>
+  archiveItems: (params?: { reason?: string; search?: string; video_id?: number; page?: number; page_size?: number }) =>
     api.get<{ items: ArchiveItem[]; total: number; page: number; page_size: number; total_pages: number; reason_counts: Record<string, number> }>("/settings/archive-items/page", { params }).then(r => r.data),
 
   archiveDelete: (folders: string[]) =>
@@ -567,7 +567,7 @@ export const resolveApi = {
 
 // ─── Review Queue ────────────────────────────────────────
 export const reviewApi = {
-  cases: (params?: { status?: string; category?: string; page?: number; page_size?: number }) =>
+  cases: (params?: { status?: string; category?: string; group?: string; missing?: string; q?: string; page?: number; page_size?: number }) =>
     api.get<import("@/components/review/ReviewCasesPanel").ReviewCasePage>("/review/cases", { params }).then(r => r.data),
   dismissCase: (stableId: string, expected_revision: number) =>
     api.post(`/review/cases/${stableId}/dismiss`, { expected_revision }).then(r => r.data),
@@ -595,13 +595,17 @@ export const reviewApi = {
     api.post<{ status: string; flagged: number }>(`/review/scan-enrichment?rescan_all=${rescanAll}`).then(r => r.data),
   scanArtwork: (rescanAll: boolean = false) =>
     api.post<{ status: string; flagged: number }>(`/review/scan-artwork?rescan_all=${rescanAll}`).then(r => r.data),
+  scanHealth: (rescanAll: boolean = false) =>
+    api.post<{ status: string; flagged: number; counts: Record<string, number> }>(`/review/scan-health?rescan_all=${rescanAll}`).then(r => r.data),
+  scanUntracked: () =>
+    api.get<{ orphans: Array<Record<string, unknown>> }>("/library/orphans").then(r => r.data),
   applyRename: (videoId: number) =>
     api.post<{ status: string; video_id: number }>(`/review/${videoId}/apply-rename`).then(r => r.data),
   batchApplyRename: (videoIds: number[]) =>
     api.post<{ status: string; renamed: number; failed: number; errors: string[] }>("/review/batch/apply-rename", videoIds).then(r => r.data),
   batchDelete: (videoIds: number[]) =>
     api.post<{ deleted: number[]; errors: number[]; count: number }>("/review/batch/delete", videoIds).then(r => r.data),
-  batchScrape: (videoIds: number[], options?: { scrape_wikipedia?: boolean; scrape_musicbrainz?: boolean; ai_auto?: boolean; ai_only?: boolean; scene_analysis?: boolean; normalize?: boolean }) =>
+  batchScrape: (videoIds: number[], options?: { artist_override?: string; title_override?: string; scrape_wikipedia?: boolean; scrape_musicbrainz?: boolean; scrape_tmvdb?: boolean; ai_auto?: boolean; ai_only?: boolean; hint_cover?: boolean; hint_live?: boolean; hint_alternate?: boolean; hint_uncensored?: boolean; normalize?: boolean; find_source_video?: boolean; from_disk?: boolean; scene_analysis?: boolean }) =>
     api.post<{ job_id: number; message: string }>("/review/batch/scrape", { video_ids: videoIds, ...options }).then(r => r.data),
   batchRepairArtwork: (videoIds: number[]) =>
     api.post<{ job_id: number; status: string; total: number }>("/review/batch/repair-artwork", videoIds).then(r => r.data),
@@ -981,10 +985,7 @@ export const newVideosApi = {
   addVideo: (suggested_video_id: number) =>
     api.post<OperationAccepted>("/new-videos/add", {
       suggested_video_id, idempotency_key: crypto.randomUUID(),
-    }).then(r => waitForOperation<{
-      status: string; job_id: number; category: string;
-      replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean;
-    }>(r.data.operation_id)),
+    }).then(r => r.data),
 
   restoreFailed: (job_id: number) =>
     api.post<{ status: string; suggested_video_id: number; removed: number }>(`/new-videos/failed/${job_id}/restore`).then(r => r.data),
@@ -992,10 +993,7 @@ export const newVideosApi = {
   dismiss: (suggested_video_id: number, dismissal_type: "temporary" | "permanent" = "temporary", reason?: string) =>
     api.post<OperationAccepted>("/new-videos/dismiss", {
       suggested_video_id, dismissal_type, reason, idempotency_key: crypto.randomUUID(),
-    }).then(r => waitForOperation<{
-      status: string; type: string;
-      replacement: import("@/types").SuggestedVideoItem | null; exhausted: boolean;
-    }>(r.data.operation_id)),
+    }).then(r => r.data),
 
   undismiss: (suggested_video_id: number) =>
     api.post<{ status: string }>("/new-videos/undismiss", { suggested_video_id }).then(r => r.data),
@@ -1025,6 +1023,15 @@ export const metadataManagerApi = {
 
   artistConsolidationsV2: () =>
     api.get<import("@/types").ArtistConsolidationAggregate[]>("/metadata/artist-consolidations-v2").then(r => r.data),
+
+  artistConsolidationSuggestions: () =>
+    api.get<import("@/types").ArtistConsolidationSuggestion[]>("/metadata/artist-consolidation-suggestions").then(r => r.data),
+
+  dismissConsolidationSuggestion: (kind: "artist" | "genre", suggestionId: string) =>
+    api.post<{ dismissed: boolean }>(`/metadata/consolidation-suggestions/${kind}/dismiss`, { suggestion_id: suggestionId }).then(r => r.data),
+
+  artistConsolidationOptions: (q: string) =>
+    api.get<import("@/types").ConsolidationNameOption[]>("/metadata/artist-consolidation-options", { params: { q } }).then(r => r.data),
 
   createArtistConsolidationV2: (data: { mask_name: string; targets: Array<{ raw_name: string; provenance?: string; mb_artist_id?: string }>; mbids: string[] }) =>
     api.post<import("@/types").ArtistConsolidationAggregate>("/metadata/artist-consolidations-v2", data).then(r => r.data),

@@ -44,7 +44,6 @@ DEFAULT_SETTINGS = {
     "import_ai_only": ("false", "bool"),
     "import_find_source_video": ("false", "bool"),
     "max_concurrent_downloads": ("4", "int"),
-    "party_mode_exclusions": ('{"version_types":[],"artists":[],"genres":[],"albums":[],"min_song_rating":null,"min_video_rating":null}', "json"),
     "library_naming_pattern": ("{artist} - {title} [{quality}]", "string"),
     "library_folder_structure": ("{artist}/{file_folder}", "string"),
     # TMVDB integration
@@ -59,11 +58,22 @@ DEFAULT_SETTINGS = {
     "auto_open_browser": ("true", "bool"),
     "minimize_to_tray": ("true", "bool"),
     "startup_duplicate_scan": ("false", "bool"),
+    "startup_rename_scan": ("false", "bool"),
 }
 
 SECRET_SETTING_KEYS = {
     "tmvdb_api_key", "openai_api_key", "gemini_api_key", "claude_api_key",
 }
+
+DEPRECATED_SETTING_KEYS = {"party_mode_exclusions"}
+INTERNAL_SETTING_KEYS = {"schema_version"}
+
+
+def _externally_managed_setting_keys() -> set[str]:
+    """Keys owned by dedicated typed settings APIs rather than this router."""
+    from app.new_videos.router import NV_SETTINGS_DEFAULTS
+    from app.routers.ai import _ALL_AI_SETTING_KEYS, _PROMPT_SETTING_KEYS
+    return set(NV_SETTINGS_DEFAULTS) | set(_ALL_AI_SETTING_KEYS) | set(_PROMPT_SETTING_KEYS)
 
 
 def _masked_setting_value(key: str, value: str) -> str:
@@ -88,18 +98,46 @@ def _setting_group(key: str) -> str:
     return "video_editor" if key.startswith(("normalization_", "transcode_", "preferred_container")) else "playback"
 
 
+SETTING_CONSUMERS: dict[str, list[str]] = {
+    "library_dir": ["config.runtime_dirs", "library.import", "pipeline.file_organizer"],
+    "library_source_dirs": ["library.source_directory_sync", "library.scan", "library.cleanup"],
+    "library_naming_pattern": ["pipeline.file_organizer", "library.rename_review", "sidecar.export"],
+    "library_folder_structure": ["pipeline.file_organizer", "library.rename_review", "sidecar.export"],
+    "normalization_target_lufs": ["pipeline.audio_normalization"],
+    "normalization_lra": ["pipeline.audio_normalization"],
+    "normalization_tp": ["pipeline.audio_normalization"],
+    "preview_duration_sec": ["media.preview_generator"],
+    "preview_start_percent": ["media.preview_generator"],
+    "ai_provider": ["ai.provider_selection"],
+    "ai_source_resolution": ["pipeline.source_resolution"],
+    "ai_final_review": ["pipeline.review_policy"],
+    "auto_normalize_on_import": ["pipeline.import", "pipeline.audio_normalization"],
+    "preferred_container": ["pipeline.download_merge"],
+    "transcode_audio_bitrate": ["playback.browser_transcode"],
+    "server.port": ["server.launcher"],
+    "import_scrape_wikipedia": ["frontend.import_defaults", "pipeline.import_policy"],
+    "import_scrape_musicbrainz": ["frontend.import_defaults", "pipeline.import_policy"],
+    "import_ai_auto": ["frontend.import_defaults", "pipeline.import_policy"],
+    "import_ai_only": ["frontend.import_defaults", "pipeline.import_policy"],
+    "import_find_source_video": ["frontend.import_defaults", "pipeline.source_resolution"],
+    "max_concurrent_downloads": ["pipeline.acquire.download_scheduler"],
+    "tmvdb_enabled": ["metadata.tmvdb.provider", "pipeline.tmvdb.policy"],
+    "tmvdb_api_key": ["metadata.tmvdb.provider"],
+    "tmvdb_auto_pull": ["pipeline.tmvdb.pull_outbox"],
+    "tmvdb_auto_push": ["pipeline.tmvdb.push_outbox"],
+    "import_scrape_tmvdb": ["frontend.import_defaults", "pipeline.import_policy"],
+    "startup_with_system": ["desktop.startup_registry"],
+    "startup_delay_seconds": ["desktop.startup_registry"],
+    "auto_open_browser": ["desktop.launcher"],
+    "minimize_to_tray": ["desktop.tray"],
+    "startup_duplicate_scan": ["startup.review_scans"],
+    "startup_rename_scan": ["startup.review_scans"],
+}
+
+
 def _setting_consumers(key: str) -> list[str]:
-    if key.startswith("tmvdb_"):
-        return ["metadata.tmvdb.provider", "pipeline.tmvdb.policy"]
-    if key.startswith("import_"):
-        return ["pipeline.import_policy", "frontend.import_defaults"]
-    if key.startswith("library_") or key in {"library_dir", "library_source_dirs"}:
-        return ["file_organizer", "library_import", "archive_service"]
-    if key.startswith("normalization_") or key == "auto_normalize_on_import":
-        return ["pipeline.normalize"]
-    if key == "max_concurrent_downloads":
-        return ["pipeline.acquire.download_scheduler"]
-    return ["app.runtime"]
+    """Return audited, concrete consumers; unknown settings are deliberately orphaned."""
+    return SETTING_CONSUMERS.get(key, [])
 
 
 @router.get("/", response_model=List[SettingOut])
@@ -198,7 +236,7 @@ def update_setting(update: SettingUpdate, user_id: Optional[str] = None, db: Ses
     db.refresh(setting)
 
     # Sync directory settings to the pydantic config singleton
-    _sync_dir_setting_to_config(update.key, update.value)
+    _sync_setting_to_config(update.key, update.value)
 
     # Ensure critical subdirectories when library_dir changes
     if update.key == "library_dir":
@@ -236,12 +274,15 @@ def settings_catalogue(db: Session = Depends(get_db)):
             "deprecated": False,
             "consumers": _setting_consumers(key),
         })
-    known = set(DEFAULT_SETTINGS)
+    externally_managed = _externally_managed_setting_keys()
+    known = set(DEFAULT_SETTINGS) | externally_managed | INTERNAL_SETTING_KEYS | DEPRECATED_SETTING_KEYS
     database_keys = {key for (key,) in db.query(AppSetting.key).all()}
     return {
         "definitions": definitions,
         "audit": {
             "orphaned_database_keys": sorted(database_keys - known),
+            "externally_managed_keys": sorted(database_keys & externally_managed),
+            "deprecated_database_keys": sorted(database_keys & DEPRECATED_SETTING_KEYS),
             "visible_without_consumers": [row["key"] for row in definitions if not row["consumers"]],
         },
     }
@@ -257,14 +298,28 @@ def get_defaults():
     }
 
 
-def _sync_dir_setting_to_config(key: str, value: str) -> None:
-    """Keep the cached pydantic Settings in sync with DB for directory/naming keys."""
+CONFIG_SETTING_CASTERS = {
+    "library_dir": str,
+    "library_source_dirs": str,
+    "library_naming_pattern": str,
+    "library_folder_structure": str,
+    "normalization_target_lufs": float,
+    "normalization_lra": float,
+    "normalization_tp": float,
+    "preview_duration_sec": int,
+    "preview_start_percent": int,
+    "server.port": int,
+}
+
+
+def _sync_setting_to_config(key: str, value: str) -> None:
+    """Keep DB-backed settings used through the cached config singleton live."""
     from app.config import get_settings
-    _sync_keys = {"library_dir", "library_source_dirs",
-                  "library_naming_pattern", "library_folder_structure"}
-    if key in _sync_keys:
-        settings = get_settings()
-        setattr(settings, key, value)
+    caster = CONFIG_SETTING_CASTERS.get(key)
+    if caster is None:
+        return
+    attribute = "port" if key == "server.port" else key
+    setattr(get_settings(), attribute, caster(value))
 
 
 # ---------------------------------------------------------------------------
@@ -994,6 +1049,7 @@ def list_archive_items(db: Session = Depends(get_db)):
 def list_archive_items_page(
     reason: Optional[str] = Query(None),
     search: Optional[str] = Query(None, max_length=200),
+    video_id: Optional[int] = Query(None, ge=1),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     refresh: bool = Query(False),
@@ -1003,7 +1059,8 @@ def list_archive_items_page(
     from app.services.archive_catalog import query_archive_catalog, sync_archive_catalog
     sync_archive_catalog(db)
     return query_archive_catalog(
-        db, reason=reason, search=search, page=page, page_size=page_size,
+        db, reason=reason, search=search, video_id=video_id,
+        page=page, page_size=page_size,
     )
 
 class DeleteArchiveRequest(BaseModel):
@@ -1153,6 +1210,7 @@ def _archive_current_restore_conflict(video: VideoItem, current_path: str, opera
             current_path,
             library_root,
             video_id=video.id,
+            video_stable_id=video.stable_id,
             playarr_video_id=portable_id,
             operation_id=operation_id,
             artist=video.artist or "",
@@ -1272,6 +1330,7 @@ def _execute_restore_archive_item(body: RestoreArchiveRequest, db: Session):
             write_archive_manifest(
                 conflict_archive, current_library_path,
                 _settings.library_dir, video_id=video.id,
+                video_stable_id=video.stable_id,
                 playarr_video_id=video.playarr_video_id, operation_id=file_operation.id,
                 artist=video.artist or "", title=video.title or "", archive_reason="restore_conflict",
             )
@@ -1503,6 +1562,7 @@ class GenreBlacklistItem(BaseModel):
     video_count: int
     master_genre_id: Optional[int] = None
     alias_count: int = 0
+    genre_ids: List[int]
 
 
 class GenreBlacklistUpdate(BaseModel):
@@ -1511,45 +1571,58 @@ class GenreBlacklistUpdate(BaseModel):
 
 
 @router.get("/genre-blacklist", response_model=List[GenreBlacklistItem])
-def list_genre_blacklist(include_unused: bool = False, db: Session = Depends(get_db)):
-    """List resolved mask genres; aliases and unused rows are maintenance data."""
+def list_genre_blacklist(db: Session = Depends(get_db)):
+    """List populated display genres, collapsing every consolidation to its mask."""
     from app.models import Genre, video_genres
-    from sqlalchemy import func
+    from app.services.consolidations import genre_display_map
 
-    results = (
+    rows = (
         db.query(
             Genre.id,
             Genre.name,
             Genre.blacklisted,
-            func.count(video_genres.c.video_id),
             Genre.master_genre_id,
+            video_genres.c.video_id,
         )
         .outerjoin(video_genres, Genre.id == video_genres.c.genre_id)
-        .group_by(Genre.id, Genre.name, Genre.blacklisted, Genre.master_genre_id)
-        .order_by(Genre.name)
         .all()
     )
-
-    by_id = {r[0]: r for r in results}
-    aggregate_counts: dict[int, int] = {}
-    alias_counts: dict[int, int] = {}
-    for r in results:
-        mid = r[4] or r[0]
-        aggregate_counts[mid] = aggregate_counts.get(mid, 0) + int(r[3] or 0)
-        if mid is not None:
-            if r[4] is not None:
-                alias_counts[mid] = alias_counts.get(mid, 0) + 1
+    names_by_id = {genre_id: name for genre_id, name, *_rest in rows}
+    display_map = genre_display_map(db)
+    groups: dict[str, dict] = {}
+    for genre_id, raw_name, blacklisted, master_genre_id, video_id in rows:
+        # V2 display masks take precedence. Retain the legacy relationship for
+        # databases which still contain a mixture of both representations.
+        display_name = display_map.get(raw_name)
+        if display_name is None and master_genre_id is not None:
+            display_name = names_by_id.get(master_genre_id)
+        display_name = display_name or raw_name
+        group = groups.setdefault(display_name, {
+            "genre_ids": set(), "raw_names": set(), "video_ids": set(),
+            "blacklisted": [], "preferred_id": None,
+        })
+        group["genre_ids"].add(genre_id)
+        group["raw_names"].add(raw_name)
+        group["blacklisted"].append(bool(blacklisted))
+        if video_id is not None:
+            group["video_ids"].add(video_id)
+        if raw_name == display_name:
+            group["preferred_id"] = genre_id
 
     output = []
-    for genre_id, count in aggregate_counts.items():
-        master = by_id.get(genre_id)
-        if master is None or master[4] is not None:
+    for display_name, group in groups.items():
+        # Empty tags are storage debris, not navigable library genres.
+        if not group["video_ids"]:
             continue
-        if count == 0 and not include_unused:
-            continue
+        genre_ids = sorted(group["genre_ids"])
         output.append(GenreBlacklistItem(
-            id=master[0], name=master[1], blacklisted=bool(master[2]), video_count=count,
-            master_genre_id=None, alias_count=alias_counts.get(master[0], 0),
+            id=group["preferred_id"] or genre_ids[0],
+            name=display_name,
+            blacklisted=all(group["blacklisted"]),
+            video_count=len(group["video_ids"]),
+            master_genre_id=None,
+            alias_count=max(0, len(group["raw_names"]) - 1),
+            genre_ids=genre_ids,
         ))
     return sorted(output, key=lambda item: item.name.casefold())
 
@@ -1587,4 +1660,7 @@ def create_genre(body: GenreCreateRequest, db: Session = Depends(get_db)):
     db.add(genre)
     db.commit()
     db.refresh(genre)
-    return GenreBlacklistItem(id=genre.id, name=genre.name, blacklisted=False, video_count=0, master_genre_id=None, alias_count=0)
+    return GenreBlacklistItem(
+        id=genre.id, name=genre.name, blacklisted=False, video_count=0,
+        master_genre_id=None, alias_count=0, genre_ids=[genre.id],
+    )

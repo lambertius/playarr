@@ -22,6 +22,7 @@ import { settingsApi, jobsApi } from "@/lib/api";
 import { Tooltip } from "@/components/Tooltip";
 import type { LogFileEntry } from "@/types";
 import { cn } from "@/lib/utils";
+import { getPref, setPref } from "@/lib/preferences";
 
 
 /* ── helpers ── */
@@ -108,7 +109,9 @@ export function LogViewer() {
 
   const [activeTab, setActiveTab] = useState<LogCategory>("system");
   const [selectedFile, setSelectedFile] = useState<string>("");
-  const [tailLines, setTailLines] = useState<number>(500);
+  const [tailLines, setTailLines] = useState<number>(() => Number(
+    getPref<Record<string, unknown>>("workspace", {}).logTailLines ?? 500,
+  ));
   const [searchTerm, setSearchTerm] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -120,6 +123,13 @@ export function LogViewer() {
     refetch: refetchLog,
     isFetching,
   } = useLogContent(selectedFile, tailLines);
+
+  useEffect(() => {
+    setPref("workspace", {
+      ...getPref<Record<string, unknown>>("workspace", {}),
+      logTailLines: tailLines,
+    });
+  }, [tailLines]);
 
   // Group files by category
   const filesByCategory = useMemo(() => {

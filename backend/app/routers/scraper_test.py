@@ -14,7 +14,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
@@ -23,6 +23,12 @@ from app.services.url_utils import identify_provider, canonicalize_url, is_playl
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/scraper-test", tags=["Scraper Test"])
+
+
+def _validated_provider_url(value: Optional[str], provider: str) -> Optional[str]:
+    """Validate direct scraper targets before any network request is made."""
+    from app.services.import_policy import validate_provider_url
+    return validate_provider_url(value, provider)
 
 
 # â”€â”€ Request / Response schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -38,6 +44,16 @@ class ScraperTestRequest(BaseModel):
     ai_auto: bool = Field(False, description="AI Auto mode (AI + scrapers)")
     ai_only: bool = Field(False, description="AI Only mode (no external scrapers)")
 
+    @field_validator("wikipedia_url")
+    @classmethod
+    def validate_wikipedia_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validated_provider_url(value, "wikipedia")
+
+    @field_validator("musicbrainz_url")
+    @classmethod
+    def validate_musicbrainz_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validated_provider_url(value, "musicbrainz")
+
 
 class ImportTestRequest(BaseModel):
     """Request model for import-mode scraper test."""
@@ -51,6 +67,16 @@ class ImportTestRequest(BaseModel):
     musicbrainz_url: Optional[str] = Field(None, description="Direct MusicBrainz recording URL (bypass search)")
     ai_auto: bool = Field(False, description="AI Auto mode (AI + scrapers)")
     ai_only: bool = Field(False, description="AI Only mode (no external scrapers)")
+
+    @field_validator("wikipedia_url")
+    @classmethod
+    def validate_wikipedia_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validated_provider_url(value, "wikipedia")
+
+    @field_validator("musicbrainz_url")
+    @classmethod
+    def validate_musicbrainz_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validated_provider_url(value, "musicbrainz")
 
 
 class DirectoryScanResult(BaseModel):
@@ -172,6 +198,93 @@ def _typed_policy(req):
     return policy_from_request(req)
 
 
+def _artist_artwork_for_policy(policy, artist: str, mb_artist_id: Optional[str],
+                               wiki_url: Optional[str], log) -> Dict[str, Any]:
+    """Run only the artist providers permitted by the effective policy."""
+    result: Dict[str, Any] = {
+        "image_url": None, "fanart_url": None, "bio": None,
+        "genres": [], "mb_artist_id": mb_artist_id,
+    }
+    if policy.skip_musicbrainz and policy.skip_wikipedia:
+        log("Artist artwork: skipped (no external provider enabled)")
+        return result
+    try:
+        from app.scraper.artist_album_scraper import (
+            get_artist_artwork_musicbrainz,
+            get_artist_artwork_wikipedia,
+        )
+        if not policy.skip_musicbrainz:
+            mb = get_artist_artwork_musicbrainz(artist, mb_artist_id=mb_artist_id)
+            result["mb_artist_id"] = mb.get("mb_artist_id") or result["mb_artist_id"]
+            log("Artist artwork: MusicBrainz stage complete")
+        if not policy.skip_wikipedia:
+            wiki = get_artist_artwork_wikipedia(
+                artist, mb_artist_id=result["mb_artist_id"], wiki_url=wiki_url,
+            )
+            for key in ("image_url", "fanart_url", "bio", "genres"):
+                if wiki.get(key):
+                    result[key] = wiki[key]
+            log("Artist artwork: Wikipedia stage complete")
+    except Exception as exc:
+        log(f"Artist artwork fetch failed: {exc}")
+    return result
+
+
+def _album_artwork_for_policy(policy, album: Optional[str], artist: str,
+                              wiki_url: Optional[str], log) -> List[ArtworkCandidate]:
+    """Collect album candidates without leaking across provider policy."""
+    candidates: List[ArtworkCandidate] = []
+    if not album:
+        log("Album artwork: skipped (no album resolved)")
+        return candidates
+    try:
+        from app.scraper.artist_album_scraper import (
+            get_album_artwork_musicbrainz,
+            get_album_artwork_wikipedia,
+        )
+        if not policy.skip_musicbrainz:
+            mb = get_album_artwork_musicbrainz(album, artist)
+            if mb.get("image_url"):
+                candidates.append(ArtworkCandidate(
+                    url=mb["image_url"], source="album_scraper",
+                    art_type="album", applied=False,
+                ))
+            log("Album artwork: MusicBrainz/CAA stage complete")
+        if not policy.skip_wikipedia:
+            wiki = get_album_artwork_wikipedia(album, artist, wiki_url=wiki_url)
+            if wiki.get("image_url"):
+                candidates.append(ArtworkCandidate(
+                    url=wiki["image_url"], source="album_scraper_wiki",
+                    art_type="album", applied=False,
+                ))
+            log("Album artwork: Wikipedia stage complete")
+        if policy.skip_musicbrainz and policy.skip_wikipedia:
+            log("Album artwork: skipped (no external provider enabled)")
+    except Exception as exc:
+        log(f"Album artwork fetch failed: {exc}")
+    return candidates
+
+
+def _caa_artwork_for_policy(policy, metadata: Dict[str, Any], log):
+    """Cover Art Archive belongs to the MusicBrainz provider boundary."""
+    if policy.skip_musicbrainz:
+        log("CAA artwork: skipped (MusicBrainz disabled)")
+        return None, None, None
+    try:
+        from app.scraper.artwork_selection import fetch_caa_artwork
+        result = fetch_caa_artwork(
+            mb_release_id=metadata.get("mb_release_id"),
+            mb_release_group_id=metadata.get("mb_release_group_id"),
+            mb_album_release_group_id=metadata.get("mb_album_release_group_id"),
+            mb_album_release_id=metadata.get("mb_album_release_id"),
+        )
+        log("CAA artwork: validation complete")
+        return result
+    except Exception as exc:
+        log(f"CAA artwork fetch failed: {exc}")
+        return None, None, None
+
+
 def _attach_structured_trace(
     result: ScraperTestResult,
     db: Session,
@@ -190,6 +303,8 @@ def _attach_structured_trace(
             "file_name": getattr(req, "file_name", None),
             "artist_override": getattr(req, "artist_override", None),
             "title_override": getattr(req, "title_override", None),
+            "wikipedia_url": getattr(req, "wikipedia_url", None),
+            "musicbrainz_url": getattr(req, "musicbrainz_url", None),
         },
         metadata=metadata,
         duration_ms=round((time.monotonic() - started_at) * 1000),
@@ -722,8 +837,10 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
     pre_logs.append(f"[scraper-test] Fetching dedicated artist artwork for: '{resolved_artist_name}' (mb_artist_id={resolved_mb_artist})")
 
     try:
-        from app.scraper.artist_album_scraper import get_artist_artwork
-        artist_art = get_artist_artwork(resolved_artist_name, mb_artist_id=resolved_mb_artist)
+        artist_art = _artist_artwork_for_policy(
+            policy, resolved_artist_name, resolved_mb_artist, _wiki_artist_url,
+            lambda message: pre_logs.append(f"[scraper-test] {message}"),
+        )
         if artist_art.get("image_url"):
             artwork_candidates.append(ArtworkCandidate(
                 url=artist_art["image_url"],
@@ -756,35 +873,15 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
     if resolved_album_name:
         pre_logs.append(f"[scraper-test] Fetching dedicated album artwork for: '{resolved_album_name}' by '{resolved_artist_name}'")
         try:
-            from app.scraper.artist_album_scraper import (
-                get_album_artwork_musicbrainz, get_album_artwork_wikipedia,
+            new_candidates = _album_artwork_for_policy(
+                policy, resolved_album_name, resolved_artist_name, _wiki_album_url,
+                lambda message: pre_logs.append(f"[scraper-test] {message}"),
             )
-            album_art_mb = get_album_artwork_musicbrainz(resolved_album_name, resolved_artist_name)
-            if album_art_mb.get("image_url"):
-                artwork_candidates.append(ArtworkCandidate(
-                    url=album_art_mb["image_url"],
-                    source="album_scraper",
-                    art_type="album",
-                    applied=False,
-                ))
-                pre_logs.append(f"[scraper-test] Album art (CAA): {album_art_mb['image_url']}")
-            else:
-                pre_logs.append("[scraper-test] No album art from CAA")
-            album_art_wiki = get_album_artwork_wikipedia(resolved_album_name, resolved_artist_name, wiki_url=_wiki_album_url)
-            if album_art_wiki.get("image_url"):
-                _existing_urls = {c.url for c in artwork_candidates}
-                if album_art_wiki["image_url"] not in _existing_urls:
-                    artwork_candidates.append(ArtworkCandidate(
-                        url=album_art_wiki["image_url"],
-                        source="album_scraper_wiki",
-                        art_type="album",
-                        applied=False,
-                    ))
-                    pre_logs.append(f"[scraper-test] Album art (Wikipedia): {album_art_wiki['image_url']}")
-                else:
-                    pre_logs.append("[scraper-test] Album art (Wikipedia): already in candidates from cross-link")
-            else:
-                pre_logs.append("[scraper-test] No album art from Wikipedia search")
+            _existing_urls = {c.url for c in artwork_candidates}
+            artwork_candidates.extend(
+                candidate for candidate in new_candidates
+                if candidate.url not in _existing_urls
+            )
         except Exception as e:
             pre_logs.append(f"[scraper-test] Album artwork fetch failed: {e}")
             logger.warning(f"Scraper test: album artwork fetch failed: {e}")
@@ -795,12 +892,9 @@ def run_scraper_test(req: ScraperTestRequest, db: Session = Depends(get_db)):
     # When the single's release-group differs from the parent album's
     # release-group, this is a single â€” use the release-group CAA
     # endpoint as poster art.  Otherwise treat it as album art.
-    from app.scraper.artwork_selection import fetch_caa_artwork
-    _caa_validated, _caa_source, _caa_art_type = fetch_caa_artwork(
-        mb_release_id=metadata.get("mb_release_id"),
-        mb_release_group_id=metadata.get("mb_release_group_id"),
-        mb_album_release_group_id=metadata.get("mb_album_release_group_id"),
-        mb_album_release_id=metadata.get("mb_album_release_id"),
+    _caa_validated, _caa_source, _caa_art_type = _caa_artwork_for_policy(
+        policy, metadata,
+        lambda message: pre_logs.append(f"[scraper-test] {message}"),
     )
     if _caa_validated:
         existing_urls = {c.url for c in artwork_candidates}
@@ -1269,8 +1363,10 @@ def run_scraper_test_stream(req: ScraperTestRequest):
             yield emit_start(step_idx)
 
             try:
-                from app.scraper.artist_album_scraper import get_artist_artwork
-                artist_art = get_artist_artwork(resolved_artist_name, mb_artist_id=resolved_mb_artist)
+                artist_art = _artist_artwork_for_policy(
+                    policy, resolved_artist_name, resolved_mb_artist, _wiki_artist_url,
+                    lambda message: pre_logs.append(f"[scraper-test] {message}"),
+                )
                 if artist_art.get("image_url"):
                     artwork_candidates.append(ArtworkCandidate(
                         url=artist_art["image_url"], source="artist_scraper", art_type="artist", applied=False,
@@ -1291,25 +1387,15 @@ def run_scraper_test_stream(req: ScraperTestRequest):
             yield emit_start(step_idx)
 
             if resolved_album_name:
-                try:
-                    from app.scraper.artist_album_scraper import (
-                        get_album_artwork_musicbrainz, get_album_artwork_wikipedia,
-                    )
-                    if req.scrape_musicbrainz or req.ai_auto:
-                        album_art_mb = get_album_artwork_musicbrainz(resolved_album_name, resolved_artist_name)
-                        if album_art_mb.get("image_url"):
-                            artwork_candidates.append(ArtworkCandidate(
-                                url=album_art_mb["image_url"], source="album_scraper", art_type="album", applied=False,
-                            ))
-                    album_art_wiki = get_album_artwork_wikipedia(resolved_album_name, resolved_artist_name, wiki_url=_wiki_album_url)
-                    if album_art_wiki.get("image_url"):
-                        _existing_urls = {c.url for c in artwork_candidates}
-                        if album_art_wiki["image_url"] not in _existing_urls:
-                            artwork_candidates.append(ArtworkCandidate(
-                                url=album_art_wiki["image_url"], source="album_scraper_wiki", art_type="album", applied=False,
-                            ))
-                except Exception as e:
-                    pre_logs.append(f"[scraper-test] Album artwork fetch failed: {e}")
+                new_candidates = _album_artwork_for_policy(
+                    policy, resolved_album_name, resolved_artist_name, _wiki_album_url,
+                    lambda message: pre_logs.append(f"[scraper-test] {message}"),
+                )
+                _existing_urls = {c.url for c in artwork_candidates}
+                artwork_candidates.extend(
+                    candidate for candidate in new_candidates
+                    if candidate.url not in _existing_urls
+                )
             yield emit_done(step_idx, s)
 
             # ── Step 6: CAA artwork ──
@@ -1317,12 +1403,9 @@ def run_scraper_test_stream(req: ScraperTestRequest):
             s = time.monotonic()
             yield emit_start(step_idx)
 
-            from app.scraper.artwork_selection import fetch_caa_artwork
-            _caa_validated, _caa_source, _caa_art_type = fetch_caa_artwork(
-                mb_release_id=metadata.get("mb_release_id"),
-                mb_release_group_id=metadata.get("mb_release_group_id"),
-                mb_album_release_group_id=metadata.get("mb_album_release_group_id"),
-                mb_album_release_id=metadata.get("mb_album_release_id"),
+            _caa_validated, _caa_source, _caa_art_type = _caa_artwork_for_policy(
+                policy, metadata,
+                lambda message: pre_logs.append(f"[scraper-test] {message}"),
             )
             if _caa_validated:
                 existing_urls = {c.url for c in artwork_candidates}
@@ -1900,8 +1983,10 @@ def run_import_test_stream(req: ImportTestRequest):
             s = time.monotonic()
             yield emit_start(step_idx)
             try:
-                from app.scraper.artist_album_scraper import get_artist_artwork
-                artist_art = get_artist_artwork(resolved_artist_name, mb_artist_id=resolved_mb_artist)
+                artist_art = _artist_artwork_for_policy(
+                    policy, resolved_artist_name, resolved_mb_artist, _wiki_artist_url,
+                    lambda message: pre_logs.append(f"[import-test] {message}"),
+                )
                 if artist_art.get("image_url"):
                     artwork_candidates.append(ArtworkCandidate(
                         url=artist_art["image_url"], source="artist_scraper", art_type="artist", applied=False,
@@ -1921,37 +2006,24 @@ def run_import_test_stream(req: ImportTestRequest):
             s = time.monotonic()
             yield emit_start(step_idx)
             if resolved_album_name:
-                try:
-                    from app.scraper.artist_album_scraper import (
-                        get_album_artwork_musicbrainz, get_album_artwork_wikipedia,
-                    )
-                    if req.scrape_musicbrainz or req.ai_auto:
-                        album_art_mb = get_album_artwork_musicbrainz(resolved_album_name, resolved_artist_name)
-                        if album_art_mb.get("image_url"):
-                            artwork_candidates.append(ArtworkCandidate(
-                                url=album_art_mb["image_url"], source="album_scraper", art_type="album", applied=False,
-                            ))
-                    album_art_wiki = get_album_artwork_wikipedia(resolved_album_name, resolved_artist_name, wiki_url=_wiki_album_url)
-                    if album_art_wiki.get("image_url"):
-                        _existing_urls = {c.url for c in artwork_candidates}
-                        if album_art_wiki["image_url"] not in _existing_urls:
-                            artwork_candidates.append(ArtworkCandidate(
-                                url=album_art_wiki["image_url"], source="album_scraper_wiki", art_type="album", applied=False,
-                            ))
-                except Exception as e:
-                    pre_logs.append(f"[import-test] Album artwork fetch failed: {e}")
+                new_candidates = _album_artwork_for_policy(
+                    policy, resolved_album_name, resolved_artist_name, _wiki_album_url,
+                    lambda message: pre_logs.append(f"[import-test] {message}"),
+                )
+                _existing_urls = {c.url for c in artwork_candidates}
+                artwork_candidates.extend(
+                    candidate for candidate in new_candidates
+                    if candidate.url not in _existing_urls
+                )
             yield emit_done(step_idx, s)
 
             # ── Step 8: CAA artwork ──
             step_idx = 8
             s = time.monotonic()
             yield emit_start(step_idx)
-            from app.scraper.artwork_selection import fetch_caa_artwork
-            _caa_validated, _caa_source, _caa_art_type = fetch_caa_artwork(
-                mb_release_id=metadata.get("mb_release_id"),
-                mb_release_group_id=metadata.get("mb_release_group_id"),
-                mb_album_release_group_id=metadata.get("mb_album_release_group_id"),
-                mb_album_release_id=metadata.get("mb_album_release_id"),
+            _caa_validated, _caa_source, _caa_art_type = _caa_artwork_for_policy(
+                policy, metadata,
+                lambda message: pre_logs.append(f"[import-test] {message}"),
             )
             if _caa_validated:
                 existing_urls = {c.url for c in artwork_candidates}

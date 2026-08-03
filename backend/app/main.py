@@ -1078,8 +1078,8 @@ def _purge_orphan_previews():
         logger.warning(f"Orphan preview cleanup failed: {e}")
 
 
-def _hydrate_dir_settings_from_db(settings):
-    """Load directory settings from the DB and apply them to the config singleton.
+def _hydrate_runtime_settings_from_db(settings):
+    """Load config-backed settings from the DB into the config singleton.
 
     This ensures user-configured paths (library_dir, etc.)
     survive server restarts instead of reverting to .env / defaults.
@@ -1087,20 +1087,24 @@ def _hydrate_dir_settings_from_db(settings):
     from app.database import SessionLocal
     from app.models import AppSetting
 
-    _dir_keys = {"library_dir", "library_source_dirs"}
+    from app.routers.settings import CONFIG_SETTING_CASTERS
+
+    keys = set(CONFIG_SETTING_CASTERS)
     db = SessionLocal()
     try:
         rows = db.query(AppSetting).filter(
-            AppSetting.key.in_(_dir_keys),
+            AppSetting.key.in_(keys),
             AppSetting.user_id.is_(None),
         ).all()
         for row in rows:
-            old = getattr(settings, row.key, None)
-            setattr(settings, row.key, row.value)
-            if old != row.value:
-                logger.info(f"Settings: {row.key} overridden from DB: {row.value}")
+            attribute = "port" if row.key == "server.port" else row.key
+            value = CONFIG_SETTING_CASTERS[row.key](row.value)
+            old = getattr(settings, attribute, None)
+            setattr(settings, attribute, value)
+            if old != value:
+                logger.info("Settings: %s overridden from DB", row.key)
     except Exception as e:
-        logger.warning(f"Failed to hydrate dir settings from DB: {e}")
+        logger.warning(f"Failed to hydrate runtime settings from DB: {e}")
     finally:
         db.close()
 
@@ -1284,6 +1288,14 @@ async def lifespan(app: FastAPI):
         report_path=rdirs.data_dir / "migration-status.json",
         reconcile=post_migration_reconciliation, target_version=APP_VERSION,
     )
+    # Convert the pre-V2 genre mask relationships to the revisioned model used
+    # by Metadata Manager. Source genre rows and video links remain untouched.
+    from app.database import SessionLocal
+    from app.services.consolidations import migrate_legacy_genre_consolidations
+    with SessionLocal() as migration_db:
+        migrated_genres = migrate_legacy_genre_consolidations(migration_db)
+    if migrated_genres:
+        logger.info("Migrated %s legacy genre consolidations to the V2 editor", migrated_genres)
     # Kill zombie ffmpeg processes left over from a previous crash/restart
     _kill_zombie_ffmpeg()
 
@@ -1297,8 +1309,8 @@ async def lifespan(app: FastAPI):
     # (can accumulate when FK enforcement was previously OFF)
     _cleanup_fk_violations(engine)
 
-    # Hydrate directory settings from DB so user-configured paths survive restarts
-    _hydrate_dir_settings_from_db(s)
+    # Hydrate config-backed settings from DB so every UI value survives restarts.
+    _hydrate_runtime_settings_from_db(s)
     s.ensure_directories()
 
     logger.info(f"Library dir: {s.library_dir}")
@@ -1306,6 +1318,14 @@ async def lifespan(app: FastAPI):
     if extra_dirs:
         logger.info(f"Additional source dirs: {extra_dirs}")
     logger.info(f"Archive dir: {s.archive_dir} (inside library)")
+
+    # The portable library manifest is the sidecar-level source of truth for
+    # revisioned consolidations and review provenance. Refresh it only after
+    # DB-backed paths have been hydrated, so installed and test profiles write
+    # to the correct library root.
+    from app.services.consolidations import write_library_consolidation_manifest
+    with SessionLocal() as manifest_db:
+        write_library_consolidation_manifest(manifest_db)
 
     # Raise the default worker thread-pool limit (anyio defaults to 40).
     # Starlette pumps a sync streaming generator by re-acquiring a pool thread

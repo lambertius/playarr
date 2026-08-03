@@ -25,6 +25,7 @@ from app.services.file_operations import (
     create_rename_operation,
     execute_file_operation,
     reconcile_file_operations,
+    retry_waiting_file_operation,
 )
 from app.services.mutation_runtime import process_next_mutation
 
@@ -158,6 +159,35 @@ def test_active_file_waits_without_blocking_and_can_be_cancelled(tmp_path, monke
     assert result.status == "waiting_for_release"
     assert result.error_json["code"] == "waiting_for_release"
     assert files["video"].is_file()
+
+
+def test_external_windows_sharing_violation_is_retried_from_the_journal(tmp_path, monkeypatch):
+    db = _session()
+    video, _, _ = _video_tree(db, tmp_path)
+    operation = create_rename_operation(
+        db, video, str(tmp_path / "Artist" / "New Name [1080p]"),
+        "New Name [1080p]",
+    )
+    real_replace = file_operations.os.replace
+
+    def locked_replace(_source, _destination):
+        error = PermissionError(13, "sharing violation")
+        error.winerror = 32
+        raise error
+
+    monkeypatch.setattr(file_operations.os, "replace", locked_replace)
+    waiting = execute_file_operation(db, operation.id)
+    assert waiting.status == "waiting_for_release"
+    assert waiting.error_json["code"] == "external_file_lock"
+    assert waiting.error_json["attempts"] == 1
+
+    waiting.error_json = {**waiting.error_json, "retry_after": 0}
+    db.commit()
+    monkeypatch.setattr(file_operations.os, "replace", real_replace)
+    completed = retry_waiting_file_operation(db)
+    assert completed is True
+    db.expire_all()
+    assert db.get(FileOperation, operation.id).status == "succeeded"
 
 
 def test_editor_replace_archives_original_then_atomically_installs_staging(tmp_path):

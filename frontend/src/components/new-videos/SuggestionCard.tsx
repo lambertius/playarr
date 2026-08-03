@@ -103,7 +103,7 @@ export function SuggestionCard({ video }: { video: SuggestedVideoItem }) {
   const primaryReason = video.reasons?.[0];
 
   return (
-    <div className="h-full min-h-[390px] grid grid-rows-[auto_1fr] rounded-lg bg-surface-light border border-surface-border overflow-hidden group hover:border-accent/40 transition-colors">
+    <div className="h-[390px] min-w-0 grid grid-rows-[auto_1fr] rounded-lg bg-surface-light border border-surface-border overflow-hidden group hover:border-accent/40 transition-colors">
       {/* Thumbnail */}
       <div className="relative aspect-video bg-surface cursor-pointer" onClick={handleOpenSource}>
         {video.thumbnail_url ? (
@@ -138,7 +138,7 @@ export function SuggestionCard({ video }: { video: SuggestedVideoItem }) {
       </div>
 
       {/* Metadata */}
-      <div className="p-3 grid grid-rows-[3.5rem_2rem_3rem_auto] gap-2">
+      <div className="min-h-0 p-3 grid grid-rows-[3.5rem_2rem_3rem_auto] gap-2">
         {/* Title & artist */}
         <div>
           <h3 className="text-sm font-medium text-text-primary leading-tight line-clamp-2" title={video.title}>
@@ -156,11 +156,9 @@ export function SuggestionCard({ video }: { video: SuggestedVideoItem }) {
         </div>
 
         {/* Reason text */}
-        {primaryReason && (
-          <p className="text-[11px] text-accent/80 leading-tight line-clamp-2 italic">
-            {primaryReason}
-          </p>
-        )}
+        <p className="text-[11px] text-accent/80 leading-tight line-clamp-2 italic">
+          {primaryReason || "Recommended from your library and discovery settings"}
+        </p>
 
         {/* Actions */}
         <div className="flex items-center gap-1 pt-1">

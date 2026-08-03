@@ -4,7 +4,7 @@ Preferences API — server-side storage for client UI preferences.
 These are the settings that used to live in each browser's localStorage
 (NowPlaying visualizer config, party-mode exclusions/animation, library
 sort/view, per-page filters, …).  Storing them centrally means every browser
-sees the same preferences and the Kodi add-on can read the shared ones too.
+sees the same preferences across the browser, TV and Cast surfaces.
 
 Storage reuses the ``app_settings`` table with a ``pref.`` key namespace and
 ``user_id = NULL`` (a single shared config for this self-hosted instance).

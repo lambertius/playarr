@@ -7,7 +7,7 @@ import threading
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
-from app.database import SessionLocal
+from app.database import SerializedSessionLocal
 from app.services.mutation_coordinator import (
     claim_next_command,
     execute_command,
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _consumer_lock = threading.Lock()
 
 
-def recover_mutation_queue(session_factory: sessionmaker = SessionLocal) -> int:
+def recover_mutation_queue(session_factory: sessionmaker = SerializedSessionLocal) -> int:
     db = session_factory()
     try:
         return recover_interrupted_commands(db)
@@ -27,7 +27,7 @@ def recover_mutation_queue(session_factory: sessionmaker = SessionLocal) -> int:
         db.close()
 
 
-def process_next_mutation(session_factory: sessionmaker = SessionLocal) -> bool:
+def process_next_mutation(session_factory: sessionmaker = SerializedSessionLocal) -> bool:
     """Process one command; the non-blocking lock enforces one actor/process."""
     if not _consumer_lock.acquire(blocking=False):
         return False

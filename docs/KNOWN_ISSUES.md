@@ -38,13 +38,17 @@ Test coverage is incomplete. The `backend/tests/` directory contains ~9 test fil
 
 ## SQLite Concurrency
 
-**Severity:** Low (mitigated)
+**Severity:** Low (actively observed and bounded)
 
-SQLite in WAL mode with dual connection pools (main=20, cosmetic=10) handles typical concurrency well. However, under very high load (many simultaneous imports + UI operations), lock contention can occur.
+SQLite permits one writer even in WAL mode. Playarr therefore uses parallel
+I/O/read phases with a guarded short-transaction writer boundary, durable
+mutation commands, revision preconditions, and transactional sidecar/file
+outboxes. Queue System Health reports writer wait percentiles and backlog age.
 
-**Mitigation in place:** WAL mode, separate pools for heavy vs. lightweight writes, busy_timeout, retry logic.
-
-**Long-term fix:** PostgreSQL support (config.py already accepts a `DATABASE_URL` connection string).
+The accepted architecture and escalation thresholds are documented in
+[`QUEUE_CONCURRENCY_AUDIT.md`](QUEUE_CONCURRENCY_AUDIT.md). PostgreSQL remains
+the scale-up path for multi-process or sustained write-heavy deployments; a
+temporary sidecar inbox is deliberately not used as a database command bus.
 
 ---
 

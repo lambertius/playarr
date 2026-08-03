@@ -41,6 +41,7 @@ def apply_mutation_plan(plan: dict) -> int:
     from app.config import get_settings
     from app.models import MutationCommand
     from app.services.mutation_coordinator import CommandRequest, MutationPriority, enqueue_command
+    from app.database import SerializedSessionLocal
     from app.services.mutation_runtime import notify_mutation_worker, process_next_mutation
     encoded = json.dumps(plan, sort_keys=True, default=str).encode("utf-8")
     digest = hashlib.sha256(encoded).hexdigest()
@@ -60,7 +61,7 @@ def apply_mutation_plan(plan: dict) -> int:
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         if get_settings().deployment_profile == "single_process":
-            process_next_mutation(SessionLocal)
+            process_next_mutation(SerializedSessionLocal)
         check = SessionLocal()
         try:
             current = check.get(MutationCommand, command_id)

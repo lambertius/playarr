@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from collections import defaultdict
 from difflib import SequenceMatcher
@@ -25,6 +26,39 @@ from app.models import (
     VideoItem,
 )
 from app.services.sidecar_store import atomic_write_sidecar
+
+
+def library_manifest_hash(manifest: dict[str, Any]) -> str:
+    canonical = dict(manifest)
+    canonical.pop("content_hash", None)
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def validate_library_manifest(manifest: dict[str, Any]) -> None:
+    if int(manifest.get("schema_version") or 0) not in (1, 2):
+        raise ValueError("invalid Playarr library manifest schema")
+    if "artist_consolidations" not in manifest:
+        raise ValueError("invalid Playarr library manifest")
+    claimed = manifest.get("content_hash")
+    if claimed and claimed != library_manifest_hash(manifest):
+        raise ValueError("Playarr library manifest content hash mismatch")
+
+
+def load_library_manifest(path: str | Path) -> tuple[dict[str, Any], Path]:
+    """Load the primary manifest, falling back to its atomic-write backup."""
+    primary = Path(path)
+    errors: list[str] = []
+    for candidate in (primary, primary.with_name(primary.name + ".bak")):
+        if not candidate.is_file():
+            continue
+        try:
+            manifest = json.loads(candidate.read_text(encoding="utf-8"))
+            validate_library_manifest(manifest)
+            return manifest, candidate
+        except Exception as exc:
+            errors.append(f"{candidate}: {exc}")
+    raise ValueError("; ".join(errors) or f"library manifest not found: {primary}")
 
 
 def serialize_artist_consolidation(item: ArtistConsolidation) -> dict[str, Any]:
@@ -104,6 +138,64 @@ def list_genre_consolidations(db: Session) -> list[dict[str, Any]]:
     return [serialize_genre_consolidation(row, db) for row in rows]
 
 
+def migrate_legacy_genre_consolidations(db: Session) -> int:
+    """Move legacy ``genres.master_genre_id`` masks into revisioned aggregates.
+
+    Raw Genre rows and their video relationships are deliberately retained.  The
+    legacy relationship is cleared only after its equivalent durable aggregate
+    exists, making this safe to retry after an interrupted startup.
+    """
+    aliases = (
+        db.query(Genre)
+        .filter(Genre.master_genre_id.isnot(None))
+        .order_by(Genre.master_genre_id, Genre.name)
+        .all()
+    )
+    if not aliases:
+        return 0
+
+    by_master: dict[int, list[Genre]] = defaultdict(list)
+    for alias in aliases:
+        if alias.master_genre_id is not None:
+            by_master[alias.master_genre_id].append(alias)
+    masters = {
+        row.id: row
+        for row in db.query(Genre).filter(Genre.id.in_(list(by_master))).all()
+    }
+    active = (
+        db.query(GenreConsolidation)
+        .options(selectinload(GenreConsolidation.members))
+        .filter(GenreConsolidation.deleted_at.is_(None))
+        .all()
+    )
+    active_by_mask = {row.mask_name.casefold(): row for row in active}
+    migrated = 0
+
+    for master_id, grouped_aliases in by_master.items():
+        master = masters.get(master_id)
+        if master is None:
+            continue
+        aggregate = active_by_mask.get(master.name.casefold())
+        if aggregate is None:
+            aggregate = GenreConsolidation(mask_name=master.name, created_by="legacy_migration")
+            db.add(aggregate)
+            active_by_mask[master.name.casefold()] = aggregate
+        existing = {member.raw_name.casefold() for member in aggregate.members}
+        for genre in [master, *grouped_aliases]:
+            if genre.name.casefold() not in existing:
+                aggregate.members.append(GenreConsolidationMember(
+                    raw_name=genre.name,
+                    provenance_json={"source": "legacy_master_genre", "genre_id": genre.id},
+                ))
+                existing.add(genre.name.casefold())
+        for alias in grouped_aliases:
+            alias.master_genre_id = None
+        migrated += 1
+
+    db.commit()
+    return migrated
+
+
 def genre_display_map(db: Session) -> dict[str, str]:
     """Resolve raw tags through active stable aggregates, with legacy fallback."""
     mapping: dict[str, str] = {}
@@ -129,30 +221,58 @@ def genre_display_map(db: Session) -> dict[str, str]:
 def consolidation_conflicts(db: Session) -> list[dict[str, Any]]:
     """One diagnostics source used by both counts and list UI."""
     conflicts: list[dict[str, Any]] = []
-    rows = db.query(VideoItem.artist, VideoItem.mb_artist_id).filter(VideoItem.artist.isnot(None)).all()
-    names_by_mbid: dict[str, set[str]] = defaultdict(set)
-    mbids_by_name: dict[str, set[str]] = defaultdict(set)
-    no_mbid_names: set[str] = set()
-    for name, mbid in rows:
+    rows = (
+        db.query(VideoItem.artist, VideoItem.mb_artist_id, func.count(VideoItem.id))
+        .filter(VideoItem.artist.isnot(None))
+        .group_by(VideoItem.artist, VideoItem.mb_artist_id)
+        .all()
+    )
+    names_by_mbid: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    identities: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    no_mbid_names: dict[str, int] = defaultdict(int)
+    for name, mbid, count in rows:
         primary = (name or "").split(";")[0].strip()
         normalized = re.sub(r"[^a-z0-9]", "", primary.casefold())
         if mbid:
-            names_by_mbid[mbid].add(primary)
-            mbids_by_name[normalized].add(mbid)
+            names_by_mbid[mbid][primary] += count
+            identities[normalized][mbid][primary] += count
         elif primary:
-            no_mbid_names.add(primary)
+            no_mbid_names[primary] += count
     for mbid, names in names_by_mbid.items():
         if len({name.casefold() for name in names}) > 1:
-            conflicts.append({"type": "same_mbid_different_name", "mbids": [mbid], "names": sorted(names), "confidence": 1.0})
-    for normalized, mbids in mbids_by_name.items():
-        if normalized and len(mbids) > 1:
-            conflicts.append({"type": "multiple_mbid_identity", "mbids": sorted(mbids), "names": [normalized], "confidence": 0.98})
+            conflicts.append({
+                "type": "same_mbid_different_name", "mbids": [mbid],
+                "names": sorted(names), "confidence": 1.0,
+                "targets": [
+                    {"raw_name": name, "mb_artist_id": mbid, "video_count": count}
+                    for name, count in sorted(names.items())
+                ],
+            })
+    for normalized, by_mbid in identities.items():
+        if normalized and len(by_mbid) > 1:
+            targets = [
+                {"raw_name": name, "mb_artist_id": mbid, "video_count": count}
+                for mbid, names in sorted(by_mbid.items())
+                for name, count in sorted(names.items())
+            ]
+            conflicts.append({
+                "type": "multiple_mbid_identity", "mbids": sorted(by_mbid),
+                "names": sorted({target["raw_name"] for target in targets}),
+                "targets": targets, "confidence": 0.98,
+            })
     names = sorted(no_mbid_names)
     for index, left in enumerate(names):
         for right in names[index + 1:]:
             score = SequenceMatcher(None, left.casefold(), right.casefold()).ratio()
             if score >= 0.88:
-                conflicts.append({"type": "similar_name_no_mbid", "mbids": [], "names": [left, right], "confidence": round(score, 3)})
+                conflicts.append({
+                    "type": "similar_name_no_mbid", "mbids": [], "names": [left, right],
+                    "targets": [
+                        {"raw_name": left, "mb_artist_id": None, "video_count": no_mbid_names[left]},
+                        {"raw_name": right, "mb_artist_id": None, "video_count": no_mbid_names[right]},
+                    ],
+                    "confidence": round(score, 3),
+                })
     target_membership: dict[str, list[str]] = defaultdict(list)
     for item in list_artist_consolidations(db):
         for target in item["targets"]:
@@ -160,7 +280,26 @@ def consolidation_conflicts(db: Session) -> list[dict[str, Any]]:
     for name, stable_ids in target_membership.items():
         if len(stable_ids) > 1:
             conflicts.append({"type": "target_multiple_consolidations", "mbids": [], "names": [name], "consolidation_ids": stable_ids, "confidence": 1.0})
-    return conflicts
+
+    # Raw provider values remain immutable, so a resolved consolidation would
+    # otherwise be rediscovered forever. A conflict is resolved when one active
+    # aggregate covers every implicated raw name and MBID.
+    active = list_artist_consolidations(db)
+    unresolved: list[dict[str, Any]] = []
+    for conflict in conflicts:
+        if conflict["type"] == "target_multiple_consolidations":
+            unresolved.append(conflict)
+            continue
+        conflict_names = {name.casefold() for name in conflict.get("names") or []}
+        conflict_mbids = set(conflict.get("mbids") or [])
+        covered = any(
+            conflict_names.issubset({target["raw_name"].casefold() for target in item["targets"]})
+            and conflict_mbids.issubset(set(item["mbids"]))
+            for item in active
+        )
+        if not covered:
+            unresolved.append(conflict)
+    return unresolved
 
 
 def library_consolidation_manifest(db: Session) -> dict[str, Any]:
@@ -205,10 +344,20 @@ def library_consolidation_manifest(db: Session) -> dict[str, Any]:
                 "evidence": edge.evidence_json,
                 "status": edge.status,
             } for edge in case.edges],
+            "plans": [{
+                "id": plan.id,
+                "expected_revision": plan.expected_revision,
+                "actions": plan.actions_json,
+                "consequences": plan.consequence_json,
+                "status": plan.status,
+                "created_at": plan.created_at.isoformat() if plan.created_at else None,
+                "committed_at": plan.committed_at.isoformat() if plan.committed_at else None,
+            } for plan in case.plans],
         })
     archive_operations = [{
         "operation_id": operation.id,
-        "playarr_video_id": operation.entity_stable_id,
+        "entity_id": operation.entity_stable_id,
+        "playarr_video_id": (operation.plan_json or {}).get("playarr_video_id"),
         "operation_type": operation.operation_type,
         "status": operation.status,
         "archive_relative_path": (operation.plan_json or {}).get("archive_relative_path"),
@@ -229,11 +378,12 @@ def library_consolidation_manifest(db: Session) -> dict[str, Any]:
 
 def write_library_consolidation_manifest(db: Session) -> Path:
     path = Path(get_settings().library_dir) / ".playarr-library-manifest.json"
-    payload = json.dumps(library_consolidation_manifest(db), indent=2, sort_keys=True).encode("utf-8")
+    manifest = library_consolidation_manifest(db)
+    manifest["content_hash"] = library_manifest_hash(manifest)
+    payload = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
 
     def validate_json(candidate: Path) -> None:
         parsed = json.loads(candidate.read_text(encoding="utf-8"))
-        if parsed.get("schema_version") != 2 or "artist_consolidations" not in parsed:
-            raise ValueError("invalid Playarr library manifest")
+        validate_library_manifest(parsed)
 
     return atomic_write_sidecar(path, payload, validator=validate_json)

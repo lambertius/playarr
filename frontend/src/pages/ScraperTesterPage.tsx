@@ -350,6 +350,7 @@ function buildFlowSteps(r: ScraperTestResult): FlowStep[] {
   const wikiMethod = r.scraper_sources_used.find(s => s.startsWith("wikipedia:"));
   // Check if Wikipedia was even attempted (not in No Scraping / AI Only modes)
   const wikiAttempted = logs.some(l =>
+    l.includes("Wikipedia: using user-provided") ||
     l.includes("Wikipedia: using AI-provided") ||
     l.includes("Wikipedia: search") ||
     l.includes("Wikipedia: no confident")
@@ -368,7 +369,7 @@ function buildFlowSteps(r: ScraperTestResult): FlowStep[] {
     const wikiOut: { label: string; value: string }[] = [];
     const wikiNotes: string[] = [];
 
-    if (wikiMethod) wikiNotes.push(`Method: ${wikiMethod === "wikipedia:ai_url" ? "AI-provided URL" : "Search-based"}`);
+    if (wikiMethod) wikiNotes.push(`Method: ${wikiMethod === "wikipedia:user_url" ? "User-provided URL" : wikiMethod === "wikipedia:ai_url" ? "AI-provided URL" : "Search-based"}`);
 
     if (wikiResolved) {
       if (r.plot.source === "wikipedia" && r.plot.value) {
@@ -728,6 +729,25 @@ export function ScraperTesterPage() {
   const [aiAuto, setAiAuto] = useState(false);
   const [aiOnly, setAiOnly] = useState(false);
 
+  const effectivePlan = useMemo(() => {
+    if (aiOnly) return {
+      mode: "AI Only",
+      stages: ["Identity", "AI source resolution", "AI final review"],
+      note: "Wikipedia, MusicBrainz, and Cover Art Archive are not called.",
+    };
+    if (aiAuto) return {
+      mode: "AI Auto",
+      stages: ["Identity", "AI source resolution", "MusicBrainz", "Wikipedia", "IMDB", "Validation", "AI final review"],
+      note: "AI final review proofreads the values returned by the scrapers.",
+    };
+    const providers = [scrapeMusicbrainz && "MusicBrainz", scrapeWiki && "Wikipedia"].filter(Boolean) as string[];
+    return {
+      mode: providers.length ? providers.join(" + ") : "Existing metadata only",
+      stages: ["Identity", ...providers, "Validation"],
+      note: "No AI request is made.",
+    };
+  }, [aiOnly, aiAuto, scrapeMusicbrainz, scrapeWiki]);
+
   const [isPending, setIsPending] = useState(false);
   const [result, setResult] = useState<ScraperTestResult | null>(null);
   const [steps, setSteps] = useState<ScraperTestProgress[]>([]);
@@ -822,8 +842,8 @@ export function ScraperTesterPage() {
           title_override: titleOverride.trim() || undefined,
           scrape_wikipedia: scrapeWiki,
           scrape_musicbrainz: scrapeMusicbrainz,
-          wikipedia_url: scrapeWiki && wikiUrl.trim() ? wikiUrl.trim() : undefined,
-          musicbrainz_url: scrapeMusicbrainz && mbUrl.trim() ? mbUrl.trim() : undefined,
+          wikipedia_url: (scrapeWiki || aiAuto) && wikiUrl.trim() ? wikiUrl.trim() : undefined,
+          musicbrainz_url: (scrapeMusicbrainz || aiAuto) && mbUrl.trim() ? mbUrl.trim() : undefined,
           ai_auto: aiAuto,
           ai_only: aiOnly,
         },
@@ -839,8 +859,8 @@ export function ScraperTesterPage() {
           title_override: titleOverride.trim() || undefined,
           scrape_wikipedia: scrapeWiki,
           scrape_musicbrainz: scrapeMusicbrainz,
-          wikipedia_url: scrapeWiki && wikiUrl.trim() ? wikiUrl.trim() : undefined,
-          musicbrainz_url: scrapeMusicbrainz && mbUrl.trim() ? mbUrl.trim() : undefined,
+          wikipedia_url: (scrapeWiki || aiAuto) && wikiUrl.trim() ? wikiUrl.trim() : undefined,
+          musicbrainz_url: (scrapeMusicbrainz || aiAuto) && mbUrl.trim() ? mbUrl.trim() : undefined,
           ai_auto: aiAuto,
           ai_only: aiOnly,
         },
@@ -987,7 +1007,7 @@ export function ScraperTesterPage() {
           </div>
           <div>
             <Toggle label="Wikipedia" description="Plot, genre, and background from Wikipedia" checked={scrapeWiki} onChange={(v) => { setScrapeWiki(v); if (v) { setAiAuto(false); setAiOnly(false); } }} />
-            {scrapeWiki && (
+            {(scrapeWiki || aiAuto) && (
               <div className="mt-1.5 ml-5">
                 <label className="text-[11px] text-text-muted mb-1 block">Wikipedia URL (optional — auto-search if blank)</label>
                 <input type="url" value={wikiUrl} onChange={(e) => setWikiUrl(e.target.value)} placeholder="https://en.wikipedia.org/wiki/..." className="input-field w-full text-xs" />
@@ -996,15 +1016,26 @@ export function ScraperTesterPage() {
           </div>
           <div>
             <Toggle label="MusicBrainz" description="Album, year, genre tags, cover art" checked={scrapeMusicbrainz} onChange={(v) => { setScrapeMusicbrainz(v); if (v) { setAiAuto(false); setAiOnly(false); } }} />
-            {scrapeMusicbrainz && (
+            {(scrapeMusicbrainz || aiAuto) && (
               <div className="mt-1.5 ml-5">
                 <label className="text-[11px] text-text-muted mb-1 block">MusicBrainz recording URL (optional — auto-search if blank)</label>
                 <input type="url" value={mbUrl} onChange={(e) => setMbUrl(e.target.value)} placeholder="https://musicbrainz.org/recording/..." className="input-field w-full text-xs" />
               </div>
             )}
           </div>
-          <Toggle label="AI Auto" description="Full AI-guided enrichment after scraping" checked={aiAuto} onChange={(v) => { setAiAuto(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setAiOnly(false); } }} />
+          <Toggle label="AI Auto" description="Resolve sources, run both scrapers, then use AI to proofread their output" checked={aiAuto} onChange={(v) => { setAiAuto(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setAiOnly(false); } }} />
           <Toggle label="AI Only" description="Skip all external scrapers — AI generates everything" checked={aiOnly} onChange={(v) => { setAiOnly(v); if (v) { setScrapeWiki(false); setScrapeMusicbrainz(false); setAiAuto(false); } }} />
+          <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="font-semibold text-blue-300">Effective plan: {effectivePlan.mode}</span>
+              {effectivePlan.stages.map((stage, index) => (
+                <span key={stage} className="inline-flex items-center gap-1 text-text-muted">
+                  {index > 0 && <ArrowRight size={10} />}{stage}
+                </span>
+              ))}
+            </div>
+            <p className="mt-1 text-[11px] text-text-muted">{effectivePlan.note}</p>
+          </div>
         </div>
 
         <button type="submit" disabled={!canSubmit} className="btn-primary w-full">
@@ -1679,14 +1710,31 @@ function ResultsView({ r }: { r: ScraperTestResult }) {
                       <td className="p-2 font-mono text-text-secondary">{event.step}</td>
                       <td className={`p-2 ${event.status === "failed" ? "text-red-400" : event.status === "skipped" ? "text-text-muted" : "text-emerald-400"}`}>{event.status}</td>
                       <td className="p-2 text-text-muted">{event.provider || "—"}</td>
-                      <td className="p-2 text-text-muted">{event.output_fields?.join(", ") || "—"}</td>
+                      <td className="p-2 text-text-muted">
+                        <div>{event.output_fields?.join(", ") || "—"}</div>
+                        {(Object.keys(event.request ?? {}).length > 0 || Object.keys(event.response ?? {}).length > 0) && (
+                          <details className="mt-1 max-w-xl">
+                            <summary className="cursor-pointer text-blue-300 hover:text-blue-200">Sent / received data</summary>
+                            <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                              <div>
+                                <p className="mb-1 text-[10px] font-semibold uppercase text-text-muted">Sent</p>
+                                <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded bg-surface p-2 text-[10px] text-text-secondary">{JSON.stringify(event.request ?? {}, null, 2)}</pre>
+                              </div>
+                              <div>
+                                <p className="mb-1 text-[10px] font-semibold uppercase text-text-muted">Received</p>
+                                <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded bg-surface p-2 text-[10px] text-text-secondary">{JSON.stringify(event.response ?? {}, null, 2)}</pre>
+                              </div>
+                            </div>
+                          </details>
+                        )}
+                      </td>
                       <td className="p-2 text-right text-text-muted">{event.duration_ms != null ? `${event.duration_ms} ms` : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <p className="text-[10px] text-text-muted">Run {r.run_id}. Secrets and local paths are redacted; raw provider response bodies are not stored.</p>
+            <p className="text-[10px] text-text-muted">Run {r.run_id}. Secrets and local paths are redacted. AI prompts/responses and provider field snapshots are included; HTTP headers and full raw HTTP bodies are not stored.</p>
           </div>
         </Collapsible>
       )}

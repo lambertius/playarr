@@ -1277,9 +1277,9 @@ export interface paths {
         put?: never;
         /**
          * Bulk Rename Execute
-         * @description Rename/move all videos to match the current naming convention settings.
-         *     Renames folder, video file, NFO, posters, and all associated files.
-         *     Updates all DB path references.
+         * @description Queue durable rename plans for every video that does not match the current
+         *     naming convention.  The mutation worker performs the filesystem changes,
+         *     companion-file renames and database path update as one journalled unit.
          */
         post: operations["bulk_rename_execute_api_library_bulk_rename_execute_post"];
         delete?: never;
@@ -2070,6 +2070,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/metadata/artist-consolidation-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Artist Consolidation Options
+         * @description Search raw library artist names with their MBID and usage count.
+         */
+        get: operations["artist_consolidation_options_api_metadata_artist_consolidation_options_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/metadata/artist-consolidation-suggestions": {
         parameters: {
             query?: never;
@@ -2216,6 +2236,23 @@ export interface paths {
         get: operations["get_artwork_stats_api_metadata_artwork_stats_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metadata/consolidation-suggestions/{kind}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dismiss Consolidation Suggestion */
+        post: operations["dismiss_consolidation_suggestion_api_metadata_consolidation_suggestions__kind__dismiss_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3135,6 +3172,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/operations/sidecars/failed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Failed Sidecars */
+        get: operations["failed_sidecars_api_operations_sidecars_failed_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/sidecars/{outbox_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Sidecar */
+        post: operations["cancel_sidecar_api_operations_sidecars__outbox_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/sidecars/{outbox_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry Sidecar */
+        post: operations["retry_sidecar_api_operations_sidecars__outbox_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/operations/{operation_id}": {
         parameters: {
             query?: never;
@@ -3269,27 +3357,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/playback/download-audio/{video_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Download Audio
-         * @description Extract audio from a video as a tagged CBR MP3.
-         *     Matches source audio bitrate/channels. Tags with metadata + poster art.
-         */
-        get: operations["download_audio_api_playback_download_audio__video_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/playback/history/{video_id}": {
         parameters: {
             query?: never;
@@ -3375,31 +3442,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/playback/raw/{video_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stream Raw
-         * @description Serve the original video file untouched with HTTP Range support.
-         *
-         *     Unlike ``/stream/{video_id}`` (which remuxes/transcodes for browsers),
-         *     this performs NO remux or transcode — intended for native players such
-         *     as the Playarr Kodi add-on that handle MKV and every codec directly,
-         *     so seeking is fast and exact.
-         */
-        get: operations["stream_raw_api_playback_raw__video_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/playback/stream-archive": {
         parameters: {
             query?: never;
@@ -3461,32 +3503,6 @@ export interface paths {
          *     is fully re-encoded to a broadly-compatible, network-friendly H.264 stream.
          */
         get: operations["stream_video_api_playback_stream__video_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/playback/theatre/{video_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Stream Theatre
-         * @description Theatre stream — the source video centred over a pre-rendered artwork-wall
-         *     backdrop, composited into a single H.264/AAC stream.
-         *
-         *     This is how Kodi (a native player that can't draw the web app's artwork wall)
-         *     gets the theatre experience: it just plays this stream full-screen. The
-         *     backdrop is cached and reused (see services/theatre_backdrop), so the per-track
-         *     cost is a composite + encode, comparable to the compatibility transcode.
-         */
-        get: operations["stream_theatre_api_playback_theatre__video_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4218,6 +4234,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/review/scan-health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Scan Review Health
+         * @description Audit requested processing steps, confidence, and loudness drift.
+         *
+         *     The scan uses structured job input and processing-state data. Human-facing
+         *     reason text is output evidence only and is never parsed to classify a case.
+         */
+        post: operations["scan_review_health_api_review_scan_health_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/review/scan-renames": {
         parameters: {
             query?: never;
@@ -4804,7 +4843,7 @@ export interface paths {
         };
         /**
          * List Genre Blacklist
-         * @description List resolved mask genres; aliases and unused rows are maintenance data.
+         * @description List populated display genres, collapsing every consolidation to its mask.
          */
         get: operations["list_genre_blacklist_api_settings_genre_blacklist_get"];
         /**
@@ -6562,6 +6601,38 @@ export interface components {
              * @default false
              */
             ai_only: boolean;
+            /** Artist Override */
+            artist_override?: string | null;
+            /**
+             * Find Source Video
+             * @default false
+             */
+            find_source_video: boolean;
+            /**
+             * From Disk
+             * @default false
+             */
+            from_disk: boolean;
+            /**
+             * Hint Alternate
+             * @default false
+             */
+            hint_alternate: boolean;
+            /**
+             * Hint Cover
+             * @default false
+             */
+            hint_cover: boolean;
+            /**
+             * Hint Live
+             * @default false
+             */
+            hint_live: boolean;
+            /**
+             * Hint Uncensored
+             * @default false
+             */
+            hint_uncensored: boolean;
             /**
              * Normalize
              * @default false
@@ -6578,10 +6649,17 @@ export interface components {
              */
             scrape_musicbrainz: boolean;
             /**
+             * Scrape Tmvdb
+             * @default false
+             */
+            scrape_tmvdb: boolean;
+            /**
              * Scrape Wikipedia
              * @default true
              */
             scrape_wikipedia: boolean;
+            /** Title Override */
+            title_override?: string | null;
             /** Video Ids */
             video_ids: number[];
         };
@@ -7006,6 +7084,11 @@ export interface components {
             /** Video Id */
             video_id: number;
         };
+        /** DismissConsolidationSuggestionRequest */
+        DismissConsolidationSuggestionRequest: {
+            /** Suggestion Id */
+            suggestion_id: string;
+        };
         /** DismissRequest */
         DismissRequest: {
             /**
@@ -7237,7 +7320,7 @@ export interface components {
             audio_passthrough: boolean;
             /**
              * Crf
-             * @default 18
+             * @default 14
              */
             crf: number;
             /** Crop H */
@@ -7250,7 +7333,7 @@ export interface components {
             crop_y?: number | null;
             /**
              * Preset
-             * @default medium
+             * @default slow
              */
             preset: string;
             /**
@@ -7283,12 +7366,16 @@ export interface components {
             completed_steps?: string[];
             /** Failed Steps */
             failed_steps?: components["schemas"]["EnrichmentFailure"][];
+            /** Incomplete Steps */
+            incomplete_steps?: string[];
             /** Last Run At */
             last_run_at?: string | null;
             /** Model */
             model?: string | null;
             /** Provider */
             provider?: string | null;
+            /** Requested Steps */
+            requested_steps?: string[];
             /** Stale Reason */
             stale_reason?: string | null;
             /** State */
@@ -7477,6 +7564,8 @@ export interface components {
             alias_count: number;
             /** Blacklisted */
             blacklisted: boolean;
+            /** Genre Ids */
+            genre_ids: number[];
             /** Id */
             id: number;
             /** Master Genre Id */
@@ -7575,6 +7664,8 @@ export interface components {
             master_id: number;
             /** Master Name */
             master_name: string;
+            /** Suggestion Id */
+            suggestion_id: string;
         };
         /** GenreUnconsolidateRequest */
         GenreUnconsolidateRequest: {
@@ -11858,7 +11949,7 @@ export interface operations {
                 version_type?: string | null;
                 /** @description Filter by review status: none, needs_human_review, needs_ai_review, reviewed */
                 review_status?: string | null;
-                /** @description Filter by enrichment status: enriched, partial, pending */
+                /** @description Filter by AI lifecycle: not_requested, queued, running, partial, complete, failed, stale */
                 enrichment?: string | null;
                 /** @description Filter by import method: url, import, scanned */
                 import_method?: string | null;
@@ -13356,6 +13447,37 @@ export interface operations {
             };
         };
     };
+    artist_consolidation_options_api_metadata_artist_consolidation_options_get: {
+        parameters: {
+            query?: {
+                q?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     artist_consolidation_suggestions_api_metadata_artist_consolidation_suggestions_get: {
         parameters: {
             query?: never;
@@ -13649,6 +13771,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ArtworkStats"];
+                };
+            };
+        };
+    };
+    dismiss_consolidation_suggestion_api_metadata_consolidation_suggestions__kind__dismiss_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DismissConsolidationSuggestionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -15084,6 +15241,94 @@ export interface operations {
             };
         };
     };
+    failed_sidecars_api_operations_sidecars_failed_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    }[];
+                };
+            };
+        };
+    };
+    cancel_sidecar_api_operations_sidecars__outbox_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                outbox_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_sidecar_api_operations_sidecars__outbox_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                outbox_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     operation_status_api_operations__operation_id__get: {
         parameters: {
             query?: never;
@@ -15339,37 +15584,6 @@ export interface operations {
             };
         };
     };
-    download_audio_api_playback_download_audio__video_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                video_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     record_playback_api_playback_history__video_id__post: {
         parameters: {
             query?: {
@@ -15485,37 +15699,6 @@ export interface operations {
             };
         };
     };
-    stream_raw_api_playback_raw__video_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                video_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     stream_archive_api_playback_stream_archive_get: {
         parameters: {
             query: {
@@ -15587,37 +15770,6 @@ export interface operations {
                 /** @description Force a full H.264/AAC compatibility transcode */
                 transcode?: boolean;
             };
-            header?: never;
-            path: {
-                video_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    stream_theatre_api_playback_theatre__video_id__get: {
-        parameters: {
-            query?: never;
             header?: never;
             path: {
                 video_id: number;
@@ -16727,6 +16879,9 @@ export interface operations {
             query?: {
                 status?: string | null;
                 category?: string | null;
+                group?: string | null;
+                q?: string | null;
+                missing?: string | null;
                 page?: number;
                 page_size?: number;
             };
@@ -16894,6 +17049,38 @@ export interface operations {
         parameters: {
             query?: {
                 /** @description Re-scan ALL videos including previously dismissed items */
+                rescan_all?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scan_review_health_api_review_scan_health_post: {
+        parameters: {
+            query?: {
+                /** @description Re-evaluate items already reviewed */
                 rescan_all?: boolean;
             };
             header?: never;
@@ -17720,6 +17907,7 @@ export interface operations {
             query?: {
                 reason?: string | null;
                 search?: string | null;
+                video_id?: number | null;
                 page?: number;
                 page_size?: number;
                 refresh?: boolean;
@@ -17878,9 +18066,7 @@ export interface operations {
     };
     list_genre_blacklist_api_settings_genre_blacklist_get: {
         parameters: {
-            query?: {
-                include_unused?: boolean;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
@@ -17894,15 +18080,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GenreBlacklistItem"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

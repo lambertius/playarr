@@ -28,6 +28,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import String, func
 from sqlalchemy.orm import Session
 
 from app.database import RequestSessionLocal
@@ -45,7 +46,8 @@ from app.matching.schemas import (
     ManualSearchResultOut, ManualSearchResponse,
 )
 from app.models import (
-    VideoItem, ProcessingJob, JobStatus, ReviewActionPlan, ReviewCase,
+    VideoItem, ProcessingJob, JobStatus, QualitySignature, ReviewActionPlan,
+    ReviewCase, ReviewCaseItem,
 )
 
 logger = logging.getLogger(__name__)
@@ -642,6 +644,26 @@ class ReviewCasePlanRequest(BaseModel):
     actions: List[dict]
 
 
+REVIEW_CASE_GROUPS: dict[str, tuple[str, ...]] = {
+    "duplicates": ("duplicate",),
+    "versions": ("version_ambiguity", "version_detection", "version"),
+    "enrichment": (
+        "low_certainty_import", "requested_step_incomplete", "ai_pending",
+        "ai_partial", "enrichment_incomplete", "canonical_missing", "canonical_conflict",
+        "canonical_low_confidence", "canonical_link_mismatch",
+    ),
+    "normalization": ("normalization_failure", "normalization_mismatch", "normalization"),
+    "untracked": ("orphan_file", "scanned"),
+}
+
+
+def _review_group(category: str) -> str:
+    for group, categories in REVIEW_CASE_GROUPS.items():
+        if category in categories:
+            return group
+    return "other"
+
+
 def _review_case_payload(case: ReviewCase) -> dict:
     return {
         "stable_id": case.stable_id,
@@ -650,6 +672,7 @@ def _review_case_payload(case: ReviewCase) -> dict:
         "revision": case.revision,
         "trigger_code": case.trigger_code,
         "evidence_hash": case.evidence_hash,
+        "evidence": case.evidence_json,
         "created_at": case.created_at,
         "updated_at": case.updated_at,
         "resolved_at": case.resolved_at,
@@ -706,6 +729,9 @@ def _require_case_revision(case: ReviewCase, expected: int) -> None:
 def list_review_cases(
     status: Optional[str] = Query("open"),
     category: Optional[str] = Query(None),
+    group: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    missing: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(_get_db),
@@ -713,13 +739,41 @@ def list_review_cases(
     """Return durable cases; transition-era flags are materialized first."""
     from app.services.review_cases import sync_review_cases
 
-    sync_review_cases(db)
+    sync_review_cases(
+        db,
+        include_enrichment_completeness=(
+            isinstance(group, str) and group in {"all", "enrichment"}
+        ) or category == "enrichment_incomplete",
+    )
     db.commit()
     query = db.query(ReviewCase)
     if status:
         query = query.filter(ReviewCase.status == status)
     if category:
         query = query.filter(ReviewCase.category == category)
+    elif isinstance(group, str) and group and group != "all":
+        categories = REVIEW_CASE_GROUPS.get(group)
+        if categories:
+            query = query.filter(ReviewCase.category.in_(categories))
+        elif group == "other":
+            known = tuple(category for values in REVIEW_CASE_GROUPS.values() for category in values)
+            query = query.filter(ReviewCase.category.notin_(known))
+    if isinstance(q, str) and q.strip():
+        from sqlalchemy import or_
+        needle = f"%{q.strip()}%"
+        query = (
+            query.outerjoin(ReviewCaseItem, ReviewCaseItem.case_id == ReviewCase.id)
+            .outerjoin(VideoItem, VideoItem.id == ReviewCaseItem.video_id)
+            .filter(or_(VideoItem.artist.ilike(needle), VideoItem.title.ilike(needle)))
+            .distinct()
+        )
+    if isinstance(missing, str) and missing:
+        allowed_missing = {"no_ai", "no_thumbnails", "no_scene_analysis", "no_wikipedia", "no_mbid"}
+        if missing not in allowed_missing:
+            raise HTTPException(422, "Unknown enrichment filter")
+        query = query.filter(ReviewCase.items.any(
+            ReviewCaseItem.evidence_summary_json.cast(String).like(f'%"{missing}"%'),
+        ))
     total = query.count()
     cases = (
         query.order_by(ReviewCase.updated_at.desc(), ReviewCase.id.desc())
@@ -727,10 +781,21 @@ def list_review_cases(
         .limit(page_size)
         .all()
     )
+    open_categories = dict(
+        db.query(ReviewCase.category, func.count(ReviewCase.id))
+        .filter(ReviewCase.status == "open")
+        .group_by(ReviewCase.category)
+        .all()
+    )
+    group_counts = {name: 0 for name in (*REVIEW_CASE_GROUPS, "other")}
+    for category_name, count in open_categories.items():
+        group_counts[_review_group(category_name)] += count
     return {
         "items": [_review_case_payload(case) for case in cases],
         "total": total, "page": page, "page_size": page_size,
         "total_pages": max(1, (total + page_size - 1) // page_size),
+        "category_counts": open_categories,
+        "group_counts": {"all": sum(open_categories.values()), **group_counts},
     }
 
 
@@ -740,11 +805,23 @@ def dismiss_review_case(
     request: ReviewCaseDismissRequest,
     db: Session = Depends(_get_db),
 ):
-    from app.services.review_cases import dismiss_case
+    from app.services.review_cases import (
+        clear_resolved_duplicate_flags, dismiss_case,
+        record_duplicate_pair_resolution,
+    )
 
     case = _case_or_404(db, stable_id)
     _require_case_revision(case, request.expected_revision)
+    stable_ids = {item.video_stable_id for item in case.items}
+    if case.category == "duplicate":
+        record_duplicate_pair_resolution(db, case)
     dismiss_case(case)
+    db.flush()
+    if case.category == "duplicate":
+        clear_resolved_duplicate_flags(db, stable_ids)
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    for video in db.query(VideoItem).filter(VideoItem.stable_id.in_(stable_ids)).all():
+        schedule_sidecar_write(db, video)
     db.commit()
     db.refresh(case)
     return _review_case_payload(case)
@@ -793,7 +870,10 @@ def commit_review_case_plan(
     db: Session = Depends(_get_db),
 ):
     """Atomically commit the currently supported non-file review actions."""
-    from app.services.review_cases import dismiss_case
+    from app.services.review_cases import (
+        clear_resolved_duplicate_flags, dismiss_case, sync_review_cases,
+        record_duplicate_pair_resolution,
+    )
 
     case = _case_or_404(db, stable_id)
     plan = db.get(ReviewActionPlan, plan_id)
@@ -811,6 +891,14 @@ def commit_review_case_plan(
     final_action = None
     from app.services.review_plan_actions import apply_plan
     applied = apply_plan(db, case, plan.actions_json, plan.id)
+    db.flush()
+    is_duplicate = case.category == "duplicate"
+    duplicate_stable_ids = set(videos)
+    if is_duplicate:
+        # Recompute all affected pair evidence after reclassification/deletion
+        # before recording this pair's final decision.
+        sync_review_cases(db)
+        case = _case_or_404(db, stable_id)
     for action in plan.actions_json:
         action_type = action.get("type")
         if action_type in {"keep", "dismiss"}:
@@ -820,11 +908,20 @@ def commit_review_case_plan(
     elif final_action == "keep":
         case.status = "resolved"
         case.resolved_at = datetime.now(timezone.utc)
-    if final_action:
+    if final_action and is_duplicate:
+        record_duplicate_pair_resolution(db, case)
+    if final_action and not is_duplicate:
         for video in videos.values():
             video.review_status = "none"
             video.review_category = None
             video.review_reason = None
+    if final_action and is_duplicate:
+        db.flush()
+        clear_resolved_duplicate_flags(db, duplicate_stable_ids)
+    if final_action:
+        from app.services.sidecar_outbox import schedule_sidecar_write
+        for video in db.query(VideoItem).filter(VideoItem.stable_id.in_(set(videos))).all():
+            schedule_sidecar_write(db, video)
     case.revision += 1
     plan.status = "committed"
     plan.committed_at = datetime.now(timezone.utc)
@@ -946,10 +1043,9 @@ def batch_approve(
         vi.review_status = "reviewed"
         vi.review_reason = None
         vi.review_category = None
-    db.commit()
-    from app.services.playarr_xml import write_playarr_xml
-    for vi in items:
-        write_playarr_xml(vi, db)
+        vi.revision = int(vi.revision or 1) + 1
+        from app.services.sidecar_outbox import schedule_sidecar_write
+        schedule_sidecar_write(db, vi)
     db.commit()
     return {"status": "approved", "count": len(items)}
 
@@ -972,10 +1068,9 @@ def batch_dismiss(
         vi.review_status = "none"
         vi.review_reason = None
         vi.review_category = None
-    db.commit()
-    from app.services.playarr_xml import write_playarr_xml
-    for vi in items:
-        write_playarr_xml(vi, db)
+        vi.revision = int(vi.revision or 1) + 1
+        from app.services.sidecar_outbox import schedule_sidecar_write
+        schedule_sidecar_write(db, vi)
     db.commit()
     return {"status": "dismissed", "count": len(items)}
 
@@ -1054,24 +1149,39 @@ def batch_apply_rename(
     db: Session = Depends(_get_db),
 ):
     """Apply naming convention rename for multiple videos."""
-    from app.routers.library import rename_to_expected
-
     renamed = 0
     errors = []
+    queued = 0
     for vid in video_ids:
         try:
-            rename_to_expected(vid, db)
-            vi = db.query(VideoItem).filter(VideoItem.id == vid).first()
-            if vi:
+            item_queued = False
+            with db.begin_nested():
+                vi = db.query(VideoItem).filter(VideoItem.id == vid).first()
+                if not vi:
+                    raise LookupError("video not found")
                 _record_review_history(vi, "approved", db)
                 vi.review_status = "reviewed"
                 vi.review_reason = None
                 vi.review_category = None
+                vi.revision = int(vi.revision or 1) + 1
+                from app.services.sidecar_outbox import schedule_sidecar_write
+                schedule_sidecar_write(db, vi)
+                from app.services.rename_operations import enqueue_expected_rename
+                try:
+                    enqueue_expected_rename(db, vi)
+                    item_queued = True
+                except ValueError:
+                    pass
+            if item_queued:
+                queued += 1
             renamed += 1
         except Exception as e:
             errors.append(f"Video {vid}: {str(e)}")
     db.commit()
-    return {"status": "renamed", "renamed": renamed, "failed": len(errors), "errors": errors}
+    if queued:
+        from app.services.rename_operations import notify_expected_rename
+        notify_expected_rename()
+    return {"status": "queued", "renamed": renamed, "queued": queued, "failed": len(errors), "errors": errors}
 
 
 @review_router.post("/batch/delete")
@@ -1092,12 +1202,21 @@ def batch_delete_from_review(
 
 class BatchScrapeRequest(BaseModel):
     video_ids: List[int]
+    artist_override: Optional[str] = None
+    title_override: Optional[str] = None
     scrape_wikipedia: bool = True
     scrape_musicbrainz: bool = True
+    scrape_tmvdb: bool = False
     ai_auto: bool = False
     ai_only: bool = False
     scene_analysis: bool = True
     normalize: bool = False
+    hint_cover: bool = False
+    hint_live: bool = False
+    hint_alternate: bool = False
+    hint_uncensored: bool = False
+    find_source_video: bool = False
+    from_disk: bool = False
 
 
 @review_router.post("/batch/scrape")
@@ -1144,9 +1263,17 @@ def batch_scrape_from_review(
         db.flush()
         sub_job_ids.append(sub_job.id)
         dispatch_task(rescan_metadata_task, job_id=sub_job.id, video_id=vid,
+                      artist_override=req.artist_override,
+                      title_override=req.title_override,
                       scrape_wikipedia=req.scrape_wikipedia,
                       scrape_musicbrainz=req.scrape_musicbrainz,
+                      scrape_tmvdb=req.scrape_tmvdb,
                       ai_auto=req.ai_auto, ai_only=req.ai_only,
+                      hint_cover=req.hint_cover, hint_live=req.hint_live,
+                      hint_alternate=req.hint_alternate,
+                      hint_uncensored=req.hint_uncensored,
+                      find_source_video=req.find_source_video,
+                      from_disk=req.from_disk,
                       scene_analysis=req.scene_analysis,
                       normalize=req.normalize)
 
@@ -1206,6 +1333,105 @@ def scan_enrichment(
 
     db.commit()
     return {"status": "scanned", "flagged": flagged, "stale_cleared": stale_cleared}
+
+
+@review_router.post("/scan-health")
+def scan_review_health(
+    rescan_all: bool = Query(False, description="Re-evaluate items already reviewed"),
+    db: Session = Depends(_get_db),
+):
+    """Audit requested processing steps, confidence, and loudness drift.
+
+    The scan uses structured job input and processing-state data. Human-facing
+    reason text is output evidence only and is never parsed to classify a case.
+    """
+    settings = get_settings()
+    videos = db.query(VideoItem).filter(VideoItem.file_path.isnot(None)).all()
+    video_ids = [video.id for video in videos]
+    latest_jobs: dict[int, ProcessingJob] = {}
+    if video_ids:
+        jobs = (
+            db.query(ProcessingJob)
+            .filter(
+                ProcessingJob.video_id.in_(video_ids),
+                ProcessingJob.job_type.in_((
+                    "import_url", "library_import_video", "metadata_scrape",
+                    "rescan", "redownload",
+                )),
+            )
+            .order_by(ProcessingJob.updated_at.desc(), ProcessingJob.id.desc())
+            .all()
+        )
+        for job in jobs:
+            if job.video_id is not None:
+                latest_jobs.setdefault(job.video_id, job)
+
+    protected = {
+        "duplicate", "version_ambiguity", "version_detection", "rename",
+        "url_import_error", "manual_review", "artwork_incomplete",
+        "missing_artwork",
+    }
+    counts = {
+        "requested_step_incomplete": 0,
+        "low_certainty_import": 0,
+        "normalization_mismatch": 0,
+    }
+    tolerance_lufs = 0.5
+    for video in videos:
+        if video.review_category in protected:
+            continue
+        if not rescan_all and video.review_status != "none":
+            continue
+        state = video.processing_state or {}
+        def completed(step: str) -> bool:
+            entry = state.get(step)
+            return bool(entry if isinstance(entry, bool) else (entry or {}).get("completed"))
+        latest = latest_jobs.get(video.id)
+        params = (latest.input_params or {}) if latest else {}
+        required: list[tuple[str, str]] = []
+        if any(params.get(key) for key in ("ai_auto_analyse", "ai_auto_fallback", "ai_auto", "ai_only")):
+            required.append(("ai_enriched", "AI enrichment"))
+        if params.get("scene_analysis"):
+            required.append(("scenes_analyzed", "scene analysis"))
+        if any(params.get(key) for key in ("normalize", "normalize_audio", "normalise_audio")):
+            required.append(("audio_normalized", "audio normalization"))
+        if any(params.get(key) for key in ("scrape", "scrape_wikipedia", "scrape_musicbrainz")):
+            required.append(("metadata_scraped", "metadata scraping"))
+        missing = [label for step, label in required if not completed(step)]
+
+        quality = video.quality_signature
+        loudness = quality.loudness_lufs if quality else None
+        normalization_drift = (
+            completed("audio_normalized")
+            and loudness is not None
+            and abs(loudness - settings.normalization_target_lufs) > tolerance_lufs
+        )
+
+        category = None
+        reason = None
+        if normalization_drift:
+            category = "normalization_mismatch"
+            reason = (
+                f"Measured {loudness:.1f} LUFS; current target is "
+                f"{settings.normalization_target_lufs:.1f} LUFS"
+            )
+        elif missing:
+            category = "requested_step_incomplete"
+            reason = f"Requested processing did not complete: {', '.join(missing)}"
+        elif video.canonical_confidence is not None and video.canonical_confidence < 0.70:
+            category = "low_certainty_import"
+            reason = f"Import identity confidence is {video.canonical_confidence:.0%}"
+
+        if category is None:
+            continue
+        video.review_status = "needs_human_review"
+        video.review_category = category
+        video.review_reason = reason
+        video.revision += 1
+        counts[category] += 1
+
+    db.commit()
+    return {"status": "scanned", "flagged": sum(counts.values()), "counts": counts}
 
 
 @review_router.post("/scan-artwork")
@@ -1497,10 +1723,9 @@ def approve_review_item(
     vi.review_status = "reviewed"
     vi.review_reason = None
     vi.review_category = None
-    db.commit()
-
-    from app.services.playarr_xml import write_playarr_xml
-    write_playarr_xml(vi, db)
+    vi.revision = int(vi.revision or 1) + 1
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    schedule_sidecar_write(db, vi)
     db.commit()
 
     return {"status": "approved", "video_id": video_id}
@@ -1528,10 +1753,9 @@ def dismiss_review_item(
     vi.review_status = "none"
     vi.review_reason = None
     vi.review_category = None
-    db.commit()
-
-    from app.services.playarr_xml import write_playarr_xml
-    write_playarr_xml(vi, db)
+    vi.revision = int(vi.revision or 1) + 1
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    schedule_sidecar_write(db, vi)
     db.commit()
 
     return {"status": "dismissed", "video_id": video_id}
@@ -1557,36 +1781,49 @@ def set_review_version_type(
         vi.review_status = "reviewed"
         vi.review_reason = None
         vi.review_category = None
+    vi.revision = int(vi.revision or 1) + 1
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    schedule_sidecar_write(db, vi)
+    queued_operation_id = None
+    if vi.file_path:
+        from app.services.rename_operations import enqueue_expected_rename
+        try:
+            _operation, command, _created = enqueue_expected_rename(db, vi)
+            queued_operation_id = command.id
+        except ValueError:
+            pass
     db.commit()
+    if queued_operation_id:
+        from app.services.rename_operations import notify_expected_rename
+        notify_expected_rename()
 
-    from app.services.playarr_xml import write_playarr_xml
-    write_playarr_xml(vi, db)
-    db.commit()
-
-    return {"status": "updated", "video_id": video_id, "version_type": version_type}
+    return {"status": "queued" if queued_operation_id else "updated", "video_id": video_id, "version_type": version_type, "operation_id": queued_operation_id}
 
 
 @review_router.post("/{video_id}/apply-rename")
 def apply_rename(video_id: int, db: Session = Depends(_get_db)):
     """Apply the naming convention rename for a single video and clear its review flag."""
-    from app.routers.library import rename_to_expected
-
     vi = db.query(VideoItem).filter(VideoItem.id == video_id).first()
     if not vi:
         raise HTTPException(404, "Video not found")
 
-    # Delegate to the existing library rename endpoint logic
-    rename_to_expected(video_id, db)
-
-    # Clear review flag
-    vi = db.query(VideoItem).filter(VideoItem.id == video_id).first()
-    if vi:
-        vi.review_status = "reviewed"
-        vi.review_reason = None
-        vi.review_category = None
-        db.commit()
-
-    return {"status": "renamed", "video_id": video_id}
+    vi.review_status = "reviewed"
+    vi.review_reason = None
+    vi.review_category = None
+    vi.revision = int(vi.revision or 1) + 1
+    from app.services.sidecar_outbox import schedule_sidecar_write
+    schedule_sidecar_write(db, vi)
+    from app.services.rename_operations import enqueue_expected_rename
+    try:
+        _operation, command, _created = enqueue_expected_rename(db, vi)
+        operation_id = command.id
+    except ValueError:
+        operation_id = None
+    db.commit()
+    if operation_id:
+        from app.services.rename_operations import notify_expected_rename
+        notify_expected_rename()
+    return {"status": "queued" if operation_id else "renamed", "video_id": video_id, "operation_id": operation_id}
 
 
 # ── Manual search (MusicBrainz) ──────────────────────────────────────────

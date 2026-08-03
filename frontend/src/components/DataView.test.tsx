@@ -85,4 +85,29 @@ describe("DataView", () => {
     expect(screen.getByLabelText("location")).toHaveTextContent("view=grid");
     expect(screen.getAllByRole("article")).toHaveLength(2);
   });
+
+  it("can place view controls inside the page filter tile", () => {
+    render(
+      <MemoryRouter initialEntries={["/artists?view=list"]}>
+        <Routes>
+          <Route path="/artists" element={(
+            <DataView
+              rows={rows}
+              rowKey={(row) => row.id}
+              columns={columns}
+              renderCard={(row) => <article>{row.artist}</article>}
+              preferenceKey="artists"
+              defaultSort="artist"
+              empty={<p>No artists</p>}
+              renderFilterTile={(controls) => <section aria-label="Filters">Shared filters {controls}</section>}
+            />
+          )} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const filterTile = screen.getByRole("region", { name: "Filters" });
+    expect(filterTile).toContainElement(screen.getByLabelText("artists layout"));
+    expect(filterTile).toContainElement(screen.getByText("Page size"));
+  });
 });

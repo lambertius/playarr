@@ -1,8 +1,8 @@
 import { useCallback, useDeferredValue, useMemo, useState } from "react";
 import {
-  Activity, Ban, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight,
-  Clapperboard, Clock3, Download, FileSearch, FolderInput, RefreshCw,
-  RotateCcw, Search, ServerCog, SkipForward, Trash2, Wifi, WifiOff, XCircle,
+  Ban, ChevronDown, ChevronLeft, ChevronRight,
+  Clock3, Download, RefreshCw,
+  RotateCcw, Search, ServerCog, Trash2, Wifi, WifiOff,
 } from "lucide-react";
 
 import { JobCard } from "@/components/QueueComponents";
@@ -16,33 +16,10 @@ import {
 import { useJobTelemetry } from "@/hooks/useJobTelemetry";
 import { jobsApi } from "@/lib/api";
 import { getPref, setPref } from "@/lib/preferences";
+import { CATEGORY_TABS, STATUS_TABS } from "@/lib/queueTaxonomy";
 import type {
   ClearHistoryParams, JobCategory, JobPageParams, JobStatusGroup, JobSummary,
 } from "@/types";
-
-const STATUS_TABS: Array<{
-  value: JobStatusGroup;
-  label: string;
-  icon: typeof Activity;
-}> = [
-  { value: "active", label: "Active", icon: Activity },
-  { value: "complete", label: "Complete", icon: CheckCircle2 },
-  { value: "failed", label: "Failed", icon: XCircle },
-  { value: "cancelled", label: "Cancelled", icon: Ban },
-  { value: "skipped", label: "Skipped", icon: SkipForward },
-];
-
-const CATEGORY_TABS: Array<{
-  value: JobCategory | "all";
-  label: string;
-  icon?: typeof Download;
-}> = [
-  { value: "all", label: "All" },
-  { value: "download", label: "Downloads", icon: Download },
-  { value: "import", label: "Imports", icon: FolderInput },
-  { value: "video_editor", label: "Video Editor", icon: Clapperboard },
-  { value: "scraper", label: "Scraper", icon: FileSearch },
-];
 
 const PAGE_SIZES = [10, 20, 50, 100];
 
@@ -335,7 +312,7 @@ export function QueuePage() {
             className="btn-secondary btn-sm gap-1"
           >
             <RefreshCw size={13} className={ytdlpUpdate.isPending ? "animate-spin" : ""} />
-            {ytdlp.data?.update_available ? "Update" : "Check / reinstall"}
+            {ytdlpUpdate.isPending ? "Queuing…" : "Update yt-dlp"}
           </button>
         </div>
       </div>
@@ -352,24 +329,27 @@ export function QueuePage() {
           <ChevronDown size={14} className="ml-auto transition-transform group-open:rotate-180" />
         </summary>
         {health && (
-          <div className="grid gap-2 border-t border-surface-border px-3 py-3 text-xs sm:grid-cols-2 lg:grid-cols-5">
+          <div className="grid gap-2 border-t border-surface-border px-3 py-3 text-xs sm:grid-cols-2 lg:grid-cols-6">
             <div><span className="block text-text-muted">Worker profile</span><b>{health.deployment_profile}</b></div>
             <div><span className="block text-text-muted">Pending mutations</span><b>{health.mutations.pending} / {health.mutation_queue_limit}</b></div>
             <div><span className="block text-text-muted">Oldest mutation</span><b>{compactAge(health.mutations.oldest_age_seconds)}</b></div>
             <div><span className="block text-text-muted">Database retries</span><b>{health.database_retry_count}</b></div>
+            <div><span className="block text-text-muted">Writer wait p99</span><b>{health.write_transactions?.wait_p99_ms ?? 0}ms</b></div>
             <div><span className="block text-text-muted">Outbox / cosmetic writes</span><b>{sumBacklog(health.sidecars) + sumBacklog(health.files)} / {health.cosmetic_writes.pending} of {health.cosmetic_writes.max_pending}</b></div>
           </div>
         )}
       </details>
 
       <div className="mb-3 border-b border-surface-border">
-        <div className="flex overflow-x-auto">
+        <div className="flex overflow-x-auto" role="tablist" aria-label="Queue status">
           {STATUS_TABS.map(({ value, label, icon: Icon }) => {
             const count = data?.status_counts[value] ?? 0;
             return (
               <button
                 key={value}
                 onClick={() => selectStatus(value)}
+                role="tab"
+                aria-selected={status === value}
                 className={`relative flex shrink-0 items-center gap-1.5 px-3 py-2.5 text-sm font-medium ${
                   status === value ? "text-accent" : "text-text-muted hover:text-text-secondary"
                 }`}
@@ -383,13 +363,15 @@ export function QueuePage() {
         </div>
       </div>
 
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+      <div className="mb-4 flex flex-wrap items-center gap-2" role="tablist" aria-label="Job source">
         {CATEGORY_TABS.map(({ value, label, icon: Icon }) => {
           const count = data?.category_counts[value] ?? 0;
           return (
             <button
               key={value}
               onClick={() => selectCategory(value)}
+              role="tab"
+              aria-selected={category === value}
               className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium ${
                 category === value
                   ? "border-accent/30 bg-accent/15 text-accent"

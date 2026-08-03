@@ -16,6 +16,8 @@ import platform
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
@@ -28,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 _GITHUB_API_LATEST = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
 _last_checked_at: Optional[str] = None
+_latest_version: Optional[str] = None
+_last_check_monotonic = 0.0
+_check_in_progress = False
+_check_lock = threading.Lock()
+_STATUS_TTL_SECONDS = 30 * 60
 
 
 def _subprocess_kwargs() -> dict:
@@ -90,7 +97,7 @@ def get_installed_version() -> Optional[str]:
 
 def get_latest_version() -> Optional[str]:
     """Return the latest yt-dlp release tag from GitHub, or None on failure."""
-    global _last_checked_at
+    global _last_checked_at, _latest_version, _last_check_monotonic
     try:
         resp = httpx.get(
             _GITHUB_API_LATEST,
@@ -101,18 +108,50 @@ def get_latest_version() -> Optional[str]:
             logger.warning(f"yt-dlp release check returned HTTP {resp.status_code}")
             return None
         tag = resp.json().get("tag_name", "").strip()
+        if tag:
+            _latest_version = tag
         return tag or None
     except Exception as e:
         logger.warning(f"Failed to check latest yt-dlp version: {e}")
         return None
     finally:
         _last_checked_at = datetime.now(timezone.utc).isoformat()
+        _last_check_monotonic = time.monotonic()
+
+
+def _refresh_latest_in_background() -> None:
+    global _check_in_progress
+    try:
+        get_latest_version()
+    finally:
+        with _check_lock:
+            _check_in_progress = False
+
+
+def _ensure_latest_check() -> None:
+    """Start at most one non-blocking release check when the cache is stale."""
+    global _check_in_progress
+    fresh = _last_check_monotonic and (
+        time.monotonic() - _last_check_monotonic < _STATUS_TTL_SECONDS
+    )
+    if fresh:
+        return
+    with _check_lock:
+        if _check_in_progress:
+            return
+        _check_in_progress = True
+    threading.Thread(
+        target=_refresh_latest_in_background,
+        daemon=True,
+        name="ytdlp-version-check",
+    ).start()
 
 
 def get_status() -> dict:
-    """Full status for the yt-dlp updater UI."""
+    """Return local/cached status immediately and refresh remote state async."""
     installed = get_installed_version()
-    latest = get_latest_version()
+    _ensure_latest_check()
+    latest = _latest_version
     # yt-dlp versions are date-based (YYYY.MM.DD) and sort lexically, so a plain
     # string compare is a reliable "is newer" test.
     update_available = bool(installed and latest and latest > installed)

@@ -6,13 +6,15 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
 from app.database import Base
-from app.models import VideoItem
+from app.models import Genre, GenreConsolidation, VideoItem
 from app.routers.metadata import (
     ArtistConsolidationCreate,
     ArtistConsolidationTargetInput,
     ArtistConsolidationUpdate,
     create_artist_consolidation_v2,
     update_artist_consolidation_v2,
+    artist_consolidation_options,
+    get_mbid_stats,
 )
 from app.routers.genre_consolidations import (
     GenreConsolidationCreate, GenreConsolidationMemberInput,
@@ -22,6 +24,7 @@ from app.routers.genre_consolidations import (
 )
 from app.services.consolidations import (
     consolidation_conflicts, genre_display_map, library_consolidation_manifest,
+    migrate_legacy_genre_consolidations,
 )
 
 
@@ -97,6 +100,32 @@ def test_conflict_service_covers_same_mbid_and_multi_mbid_identity():
     kinds = {item["type"] for item in consolidation_conflicts(db)}
     assert "same_mbid_different_name" in kinds
     assert "multiple_mbid_identity" in kinds
+    conflict = next(item for item in consolidation_conflicts(db) if item["type"] == "same_mbid_different_name")
+    assert {target["raw_name"] for target in conflict["targets"]} == {"The Name", "The-Name"}
+
+
+def test_saved_artist_consolidation_resolves_diagnostic_and_options_are_searchable(monkeypatch):
+    db = _db()
+    db.add_all([
+        VideoItem(artist="BeyoncÃ©", title="One", mb_artist_id="mbid-a"),
+        VideoItem(artist="Beyonce", title="Two", mb_artist_id="mbid-a"),
+    ])
+    db.commit()
+    monkeypatch.setattr("app.services.consolidations.write_library_consolidation_manifest", lambda _db: None)
+    assert len(consolidation_conflicts(db)) == 1
+    assert get_mbid_stats(db).artist_conflicts == 1
+    options = artist_consolidation_options("Bey", db)
+    assert {option["name"] for option in options} == {"BeyoncÃ©", "Beyonce"}
+    create_artist_consolidation_v2(ArtistConsolidationCreate(
+        mask_name="BeyoncÃ©",
+        targets=[
+            ArtistConsolidationTargetInput(raw_name="BeyoncÃ©", mb_artist_id="mbid-a"),
+            ArtistConsolidationTargetInput(raw_name="Beyonce", mb_artist_id="mbid-a"),
+        ],
+        mbids=["mbid-a"],
+    ), db)
+    assert consolidation_conflicts(db) == []
+    assert get_mbid_stats(db).artist_conflicts == 0
 
 
 def test_genre_aggregate_masks_without_rewriting_source_tags(monkeypatch):
@@ -122,3 +151,22 @@ def test_genre_aggregate_masks_without_rewriting_source_tags(monkeypatch):
     assert library_consolidation_manifest(db)["genre_consolidations"][0]["stable_id"] == created["stable_id"]
     delete_genre_consolidation_v2(created["stable_id"], updated["revision"], db)
     assert "Hip-Hop" not in genre_display_map(db)
+
+
+def test_legacy_genre_masks_migrate_to_editable_v2_aggregates():
+    db = _db()
+    master = Genre(name="Alternative Rock")
+    alias = Genre(name="Alt Rock")
+    db.add_all([master, alias])
+    db.flush()
+    alias.master_genre_id = master.id
+    db.commit()
+
+    assert migrate_legacy_genre_consolidations(db) == 1
+    aggregate = db.query(GenreConsolidation).one()
+    assert aggregate.mask_name == "Alternative Rock"
+    assert {member.raw_name for member in aggregate.members} == {"Alternative Rock", "Alt Rock"}
+    assert db.get(Genre, alias.id).master_genre_id is None
+    # A restart is safe and does not duplicate the migrated consolidation.
+    assert migrate_legacy_genre_consolidations(db) == 0
+    assert db.query(GenreConsolidation).count() == 1

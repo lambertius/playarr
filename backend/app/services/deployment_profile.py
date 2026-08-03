@@ -62,6 +62,11 @@ def validate_deployment_profile(
 
     if profile != "redis":
         raise UnsafeDeploymentProfile(f"unsupported deployment profile {profile!r}")
+    if str(settings.database_url).casefold().startswith("sqlite"):
+        raise UnsafeDeploymentProfile(
+            "DEPLOYMENT_PROFILE=redis requires a server database such as PostgreSQL; "
+            "SQLite cannot share Playarr's process-local writer boundary across workers"
+        )
     if not probe_redis(settings.redis_url):
         raise UnsafeDeploymentProfile(
             "DEPLOYMENT_PROFILE=redis requires a reachable REDIS_URL"

@@ -271,7 +271,9 @@ export interface JobSummary {
 
 export interface EnrichmentStatus {
   state: "not_requested" | "queued" | "running" | "partial" | "complete" | "failed" | "stale";
+  requested_steps: string[];
   completed_steps: string[];
+  incomplete_steps: string[];
   failed_steps: Array<{ step: string; code: string; message: string }>;
   provider?: string | null;
   model?: string | null;
@@ -324,6 +326,16 @@ export interface OperationHealth {
   sidecars: Record<string, number>;
   files: Record<string, number>;
   database_retry_count: number;
+  write_transactions?: {
+    count: number;
+    p50_ms: number;
+    p95_ms: number;
+    p99_ms: number;
+    wait_count: number;
+    wait_p50_ms: number;
+    wait_p95_ms: number;
+    wait_p99_ms: number;
+  };
 }
 
 export interface PipelineStep {
@@ -604,6 +616,7 @@ export interface MbidStats {
 }
 export interface GenreBlacklistItem {
   id: number;
+  genre_ids: number[];
   name: string;
   blacklisted: boolean;
   video_count: number;
@@ -624,6 +637,7 @@ export interface GenreSearchResult {
   already_consolidated: boolean;
 }
 export interface GenreSuggestion {
+  suggestion_id: string;
   master_name: string;
   master_id: number;
   aliases: { id: number; name: string; video_count: number }[];
@@ -751,6 +765,20 @@ export interface ArtistConsolidationAggregate {
   revision: number;
   targets: Array<{ id: number; raw_name: string; provenance?: string | null; mb_artist_id?: string | null }>;
   mbids: string[];
+}
+export interface ArtistConsolidationSuggestion {
+  suggestion_id: string;
+  type: "same_mbid_different_name" | "multiple_mbid_identity" | "similar_name_no_mbid" | "target_multiple_consolidations";
+  mbids: string[];
+  names: string[];
+  confidence: number;
+  targets?: Array<{ raw_name: string; mb_artist_id?: string | null; video_count: number }>;
+  consolidation_ids?: string[];
+}
+export interface ConsolidationNameOption {
+  name: string;
+  mb_artist_id?: string | null;
+  video_count: number;
 }
 export interface GenreConsolidationAggregate {
   id: number;
@@ -1724,6 +1752,10 @@ export interface EncodePlan {
     bit_depth: number;
     hdr: boolean;
     frame_rate?: string | null;
+    average_frame_rate?: string | null;
+    nominal_frame_rate?: string | null;
+    time_base?: string | null;
+    video_bitrate?: number | null;
     audio_codec?: string | null;
     audio_sample_rate?: string | null;
     audio_channels?: number | null;
@@ -1734,12 +1766,24 @@ export interface EncodePlan {
     pixel_format: string;
     crf: number;
     preset: string;
-    maxrate?: string | null;
+    width?: number | null;
+    height?: number | null;
+    target_video_bitrate?: number | null;
+    adjusted_source_bitrate?: number | null;
+    maxrate?: number | null;
+    bufsize?: number | null;
+    bitrate_policy?: string;
+    source_codec_factor?: number | null;
+    resolution_bitrate_floor?: number | null;
     frame_timing: string;
+    encoder_time_base?: string;
     metadata: string;
     chapters: string;
     audio_codec?: string | null;
     audio_bitrate?: string | null;
+    audio_sample_rate?: string;
+    audio_channels?: string;
+    audio_channel_layout?: string;
   };
   warnings: string[];
   errors: string[];
@@ -1908,6 +1952,8 @@ export interface ScraperTestResult {
     step: string;
     status: string;
     provider?: string | null;
+    request?: Record<string, unknown>;
+    response?: Record<string, unknown>;
     output_fields?: string[];
     decisions?: { field?: string | null; action: string; reason: string }[];
     duration_ms?: number | null;

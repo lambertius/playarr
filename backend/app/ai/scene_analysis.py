@@ -42,6 +42,8 @@ def analyze_scenes(
     threshold: float = DEFAULT_SCENE_THRESHOLD,
     max_thumbnails: int = DEFAULT_MAX_THUMBNAILS,
     force: bool = False,
+    *,
+    commit: bool = True,
 ) -> Optional[AISceneAnalysis]:
     """
     Run scene detection and thumbnail extraction for a video.
@@ -121,7 +123,7 @@ def analyze_scenes(
                                 video.review_status = "none"
                                 video.review_reason = None
                                 video.review_category = None
-                    db.commit()
+                    db.commit() if commit else db.flush()
                     logger.info(f"Auto-selected best thumbnail for video {video_id}")
             else:
                 logger.info(f"Scene analysis exists for video {video_id}, skipping")
@@ -229,7 +231,7 @@ def analyze_scenes(
 
         analysis.status = SceneAnalysisStatus.complete
         analysis.completed_at = datetime.now(timezone.utc)
-        db.commit()
+        db.commit() if commit else db.flush()
 
         logger.info(
             f"Scene analysis complete for video {video_id}: "
@@ -241,7 +243,7 @@ def analyze_scenes(
         analysis.status = SceneAnalysisStatus.failed
         analysis.error_message = str(e)
         analysis.completed_at = datetime.now(timezone.utc)
-        db.commit()
+        db.commit() if commit else db.flush()
         logger.error(f"Scene analysis failed for video {video_id}: {e}")
         return analysis
 

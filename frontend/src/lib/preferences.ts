@@ -54,9 +54,9 @@ export function getPref<T>(name: string, fallback: T): T {
 const pending: Record<string, Record<string, unknown>> = {};
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
-function scheduleFlush() {
+function scheduleFlush(delayMs = 400) {
   if (flushTimer) return;
-  flushTimer = setTimeout(flush, 400);
+  flushTimer = setTimeout(flush, delayMs);
 }
 
 async function flush() {
@@ -80,8 +80,10 @@ async function flush() {
         const newerPatch = pending[name];
         adopt(name, newerPatch ? { ...result.value, ...newerPatch } : result.value);
       } catch {
-        // Offline: the local mirror is only a startup cache. A later user
-        // change will retry; it is never uploaded as a whole-group replace.
+        // Offline: retain the field-level patch and retry after connectivity
+        // has had time to recover. Never upload a whole-group replacement.
+        pending[name] = { ...patch, ...(pending[name] ?? {}) };
+        scheduleFlush(5_000);
       }
     }
   }));
@@ -113,6 +115,12 @@ function adopt(name: string, value: unknown) {
   } catch {
     /* ignore */
   }
+}
+
+function announce(name: string, value: unknown) {
+  globalThis.dispatchEvent?.(new CustomEvent("playarr:preference-changed", {
+    detail: { name, value },
+  }));
 }
 
 type LegacyMigration = {
@@ -204,4 +212,31 @@ export async function hydratePreferences(): Promise<void> {
   } catch {
     /* offline or first run — local mirrors / consumer fallbacks cover it */
   }
+}
+
+let syncTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Keep already-open devices converged with server preference revisions. */
+export function startPreferenceSync(intervalMs = 5_000): () => void {
+  if (syncTimer) return () => undefined;
+  const refresh = async () => {
+    try {
+      const state = await prefApi.getState();
+      for (const [name, value] of Object.entries(state.values)) {
+        const remoteRevision = state.revisions[name] ?? 0;
+        if (remoteRevision > (revisions[name] ?? 0) && !pending[name]) {
+          revisions[name] = remoteRevision;
+          adopt(name, value);
+          announce(name, value);
+        }
+      }
+    } catch {
+      /* Offline devices retain their local mirror until connectivity returns. */
+    }
+  };
+  syncTimer = setInterval(refresh, intervalMs);
+  return () => {
+    if (syncTimer) clearInterval(syncTimer);
+    syncTimer = null;
+  };
 }

@@ -90,7 +90,7 @@ export function NewVideosPage() {
           </Tooltip>
 
           {/* Refresh */}
-          <Tooltip content="Re-fetch suggestions for all categories">
+          <Tooltip content="Replace every category with a newly generated list">
           <button
             onClick={() => refreshMutation.mutate({ force: true })}
             disabled={isRefreshing}
@@ -165,7 +165,7 @@ export function NewVideosPage() {
             className="btn-primary btn-sm mt-4"
           >
             <RefreshCw size={14} className={`mr-1 ${isRefreshing ? "animate-spin" : ""}`} />
-            {isRefreshing ? "Generating…" : "Generate Recommendations"}
+            {isRefreshing ? "Building fresh list…" : "Fresh list"}
           </button>
         </div>
       )}
@@ -207,7 +207,7 @@ function CategorySection({
       </div>
 
       {/* Responsive column grid */}
-      <div className="grid grid-cols-[repeat(auto-fill,200px)] gap-4">
+      <div className="grid grid-cols-[repeat(auto-fill,200px)] auto-rows-[390px] gap-4">
         {videos.slice(0, 20).map(video => (
           <SuggestionCard key={video.id} video={video} />
         ))}

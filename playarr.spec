@@ -143,7 +143,6 @@ hiddenimports = [
     "app.metadata",
     "app.scraper",
     "app.services",
-    "app.services.theatre_backdrop",  # imported lazily by the theatre stream route
     "app.pipeline",
     "app.pipeline_lib",
     "app.pipeline_url",

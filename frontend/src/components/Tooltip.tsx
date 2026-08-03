@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect, cloneElement, isValidElement 
 import ReactDOM from "react-dom";
 
 interface TooltipProps {
-  content: string;
+  content: React.ReactNode;
   children: React.ReactElement;
   delay?: number;
 }

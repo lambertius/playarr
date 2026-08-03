@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <playarr version="2" schemaVersion="2" playarrVersion="fixture"
  sidecarRevision="1" entityRevision="1" generatedAt="2026-08-01T00:00:00Z"
- contentHash="sha256:fixture-live" entityId="fixture-live" playarrVideoId="PVD-fixture-live">
+ contentHash="sha256:e4eaa4f216fc93e709cb732c86e0237d865ecc293691f70591df524af92ee42a" entityId="fixture-live" playarrVideoId="PVD-fixture-live">
   <portable_identity entityId="fixture-live" videoId="PVD-fixture-live" trackId="PTR-fixture-live" />
   <identity><artist>Fixture Artist</artist><title>Live Fixture</title><version_type>live</version_type></identity>
 </playarr>

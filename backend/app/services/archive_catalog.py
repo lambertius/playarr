@@ -63,8 +63,13 @@ def sync_archive_catalog(db: Session) -> int:
     return len(seen)
 
 
-def query_archive_catalog(db: Session, *, reason: str | None, search: str | None, page: int, page_size: int) -> dict:
+def query_archive_catalog(
+    db: Session, *, reason: str | None, search: str | None,
+    video_id: int | None = None, page: int, page_size: int,
+) -> dict:
     query = db.query(ArchiveCatalogEntry)
+    if video_id is not None:
+        query = query.filter(ArchiveCatalogEntry.video_id == video_id)
     if reason and reason != "all":
         if reason == "orphaned":
             query = query.filter(ArchiveCatalogEntry.integrity_status == "orphaned_owner")
@@ -77,6 +82,7 @@ def query_archive_catalog(db: Session, *, reason: str | None, search: str | None
     rows = query.order_by(ArchiveCatalogEntry.archived_at.desc(), ArchiveCatalogEntry.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
     count_rows = db.query(ArchiveCatalogEntry.reason, func.count(ArchiveCatalogEntry.id)).group_by(ArchiveCatalogEntry.reason).all()
     counts = {key: value for key, value in count_rows}
+    counts["all"] = db.query(ArchiveCatalogEntry).count()
     counts["orphaned"] = db.query(ArchiveCatalogEntry).filter(ArchiveCatalogEntry.integrity_status == "orphaned_owner").count()
     items = [{
         "path": row.path, "folder": row.folder, "reason": row.reason,

@@ -328,14 +328,33 @@ const SETTING_META: Record<string, SettingMeta> = {
 };
 
 const GROUP_LABELS: Record<string, string> = {
-  library: "Library & Storage",
+  library: "Library & Files",
   av: "Video & Audio",
   import: "Import Defaults",
-  previews: "Preview Generation",
-  ai: "AI / Summaries",
+  previews: "Previews",
+  ai: "AI Providers & Policy",
   nowplaying: "Now Playing",
   server: "Server",
-  tmvdb: "The Music Video DB",
+  tmvdb: "Community Metadata",
+};
+
+const SECTION_DESCRIPTIONS: Record<string, string> = {
+  library: "Choose where media lives, how files are named, and run library-wide import, repair, and export actions.",
+  import: "Set the options preselected for new URL downloads and disk imports; existing library items are unchanged.",
+  av: "Control download containers, audio normalisation, and compatibility transcoding.",
+  previews: "Configure the short preview clips used throughout library browsing.",
+  ai: "Configure enrichment providers, credentials, model policy, review safeguards, and generated fields.",
+  nowplaying: "Control artwork, information overlays, queue visibility, and browser playback presentation.",
+  partymode: "Set reusable playlist, audience, era, exclusion, and celebration defaults for Party Mode.",
+  tvmode: "Configure large-screen artwork and playback behaviour for TV Mode.",
+  castmode: "Configure media compatibility when sending playback to Cast receivers.",
+  newvideos: "Tune recommendation diversity, refresh behaviour, cart actions, and category sizes.",
+  tmvdb: "Control reviewed metadata exchange with The Music Video Database.",
+  server: "Configure the Playarr service endpoint. Restart-required changes are identified in their descriptions.",
+  startup: "Choose how the desktop service starts and which background review scans run at launch.",
+  management: "Run explicit service lifecycle actions.",
+  logs: "Inspect current backend diagnostics without leaving Settings.",
+  about: "View installed component versions and update the download engine independently.",
 };
 
 /* ── Sidebar navigation ── */
@@ -348,39 +367,29 @@ interface NavItem { id: string; label: string; icon: React.ReactNode }
 interface NavGroup { heading: string; items: NavItem[] }
 
 const SETTINGS_NAV: NavGroup[] = [
-  { heading: "Library and files", items: [
+  { heading: "Library", items: [
     { id: "library", label: "Library & files", icon: <HardDrive size={16} /> },
-  ]},
-  { heading: "Imports and scraping", items: [
     { id: "import", label: "Import defaults", icon: <Download size={16} /> },
   ]},
-  { heading: "AI", items: [
+  { heading: "Media", items: [
+    { id: "av", label: "Video & audio", icon: <Film size={16} /> },
+    { id: "previews", label: "Previews", icon: <Image size={16} /> },
+  ]},
+  { heading: "Intelligence", items: [
     { id: "ai", label: "AI providers & policy", icon: <Sparkles size={16} /> },
+    { id: "newvideos", label: "New Videos", icon: <Compass size={16} /> },
+    { id: "tmvdb", label: "Community metadata", icon: <Database size={16} /> },
   ]},
   { heading: "Playback", items: [
     { id: "nowplaying", label: "Now Playing", icon: <Play size={16} /> },
-    { id: "previews", label: "Previews", icon: <Image size={16} /> },
-  ]},
-  { heading: "TV, Cast and Party", items: [
     { id: "partymode",  label: "Party Mode",  icon: <Music size={16} /> },
     { id: "tvmode",     label: "TV Mode",     icon: <Tv size={16} /> },
     { id: "castmode",   label: "Cast Mode",   icon: <Cast size={16} /> },
-  ]},
-  { heading: "Discovery", items: [
-    { id: "newvideos", label: "New Videos", icon: <Compass size={16} /> },
-  ]},
-  { heading: "Video editor", items: [
-    { id: "av", label: "Encode & audio", icon: <Film size={16} /> },
-  ]},
-  { heading: "TMVDB", items: [
-    { id: "tmvdb", label: "Community metadata", icon: <Compass size={16} /> },
   ]},
   { heading: "System", items: [
     { id: "server",     label: "Server",             icon: <Server size={16} /> },
     { id: "startup",    label: "Startup & Behaviour", icon: <Power size={16} /> },
     { id: "management", label: "Server Management",  icon: <Wrench size={16} /> },
-  ]},
-  { heading: "Diagnostics", items: [
     { id: "logs", label: "Logs & diagnostics", icon: <ScrollText size={16} /> },
   ]},
 ];
@@ -489,6 +498,7 @@ export function SettingsPage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
             {GROUP_LABELS[group]}
           </h2>
+          <p className="-mt-2 mb-3 text-xs leading-relaxed text-text-muted">{SECTION_DESCRIPTIONS[group]}</p>
           <div className="card space-y-5">
             <div>
               <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Directories</h4>
@@ -531,13 +541,11 @@ export function SettingsPage() {
 
             <div className="mt-4">
               <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Import Library</h4>
-              <div className="space-y-4 pl-2 border-l-2 border-border">
-              <div className="flex items-start gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-text-muted leading-relaxed">
-                    Import an existing music video collection with full metadata scraping, source URL matching, and AI enrichment. Use this for first-time setup or migrating from another system.
-                  </p>
-                </div>
+              <div className="space-y-4">
+              <SettingRowLayout
+                label="Import Existing Library"
+                description="Import a music-video collection from disk with local sidecars, optional metadata scraping, source matching, and enrichment."
+              >
                 <button
                   onClick={() => navigate("/library-import")}
                   className="btn-primary btn-sm flex items-center gap-1.5 shrink-0"
@@ -545,7 +553,7 @@ export function SettingsPage() {
                   <Database size={14} />
                   Import Library
                 </button>
-              </div>
+              </SettingRowLayout>
               </div>
             </div>
 
@@ -586,6 +594,7 @@ export function SettingsPage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
             {GROUP_LABELS[group]}
           </h2>
+          <p className="-mt-2 mb-3 text-xs leading-relaxed text-text-muted">{SECTION_DESCRIPTIONS[group]}</p>
           <div className="card space-y-5">
             <div>
               <h4 className="text-xs font-semibold uppercase tracking-wider text-text-muted mb-3">Video</h4>
@@ -616,6 +625,7 @@ export function SettingsPage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
             {GROUP_LABELS[group]}
           </h2>
+          <p className="-mt-2 mb-3 text-xs leading-relaxed text-text-muted">{SECTION_DESCRIPTIONS[group]}</p>
           <div className="card space-y-5">
             <AISettingsPanel />
             {settingRows(groups[group].filter(s => {
@@ -636,6 +646,7 @@ export function SettingsPage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
             {GROUP_LABELS[group]}
           </h2>
+          <p className="-mt-2 mb-3 text-xs leading-relaxed text-text-muted">{SECTION_DESCRIPTIONS[group]}</p>
           <div className="card space-y-5">
             <p className="text-xs text-text-muted leading-relaxed">
               These settings control which options are pre-checked by default when you add a video by URL or run a library import. They don't affect videos already in your library.
@@ -673,6 +684,7 @@ export function SettingsPage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
             {GROUP_LABELS[group] || group}
           </h2>
+          <p className="-mt-2 mb-3 text-xs leading-relaxed text-text-muted">{SECTION_DESCRIPTIONS[group]}</p>
           <div className="card space-y-5">
             <div className="space-y-4 pl-2 border-l-2 border-border">
               {settingRows(portOnly)}
@@ -689,6 +701,7 @@ export function SettingsPage() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
             {GROUP_LABELS[group]}
           </h2>
+          <p className="-mt-2 mb-3 text-xs leading-relaxed text-text-muted">{SECTION_DESCRIPTIONS[group]}</p>
           <div className="card space-y-5">
             <p className="text-xs text-text-muted italic">
               Pulls create reviewed field candidates; pushes use the durable outbox and include only eligible verified data.
@@ -704,9 +717,10 @@ export function SettingsPage() {
     // Default card rendering for other groups (previews, server, etc.)
     return (
       <section key={group}>
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
-          {GROUP_LABELS[group] || group}
-        </h2>
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
+        {GROUP_LABELS[group] || group}
+      </h2>
+      <p className="-mt-2 mb-3 text-xs leading-relaxed text-text-muted">{SECTION_DESCRIPTIONS[group]}</p>
         <div className="card space-y-5">
           <div className="space-y-4 pl-2 border-l-2 border-border">
             {settingRows(groups[group])}
@@ -717,11 +731,12 @@ export function SettingsPage() {
   };
 
   /* ── Render a client-side section wrapped to match renderGroup's chrome ── */
-  const extraSection = (title: string, node: React.ReactNode, plain = false) => (
+  const extraSection = (id: string, title: string, node: React.ReactNode, plain = false) => (
     <section>
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary mb-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-text-secondary">
         {title}
       </h2>
+      <p className="mb-3 mt-1 text-xs leading-relaxed text-text-muted">{SECTION_DESCRIPTIONS[id]}</p>
       <div className={plain ? "card" : "card space-y-5"}>{node}</div>
     </section>
   );
@@ -730,13 +745,13 @@ export function SettingsPage() {
   const renderSection = (id: string): React.ReactNode => {
     if (SERVER_GROUP_IDS.has(id)) return renderGroup(id);
     switch (id) {
-      case "newvideos": return extraSection("New Videos Discovery", <NewVideosSettings />);
-      case "nowplaying": return extraSection(GROUP_LABELS.nowplaying, <NowPlayingSettings />);
-      case "partymode": return extraSection("Party Mode", <PartyModeSettings />);
-      case "tvmode": return extraSection("TV Mode", <TvModeSettings />);
-      case "castmode": return extraSection("Cast Mode", <CastModeSettings />);
+      case "newvideos": return extraSection(id, "New Videos Discovery", <NewVideosSettings />);
+      case "nowplaying": return extraSection(id, GROUP_LABELS.nowplaying, <NowPlayingSettings />);
+      case "partymode": return extraSection(id, "Party Mode", <PartyModeSettings />);
+      case "tvmode": return extraSection(id, "TV Mode", <TvModeSettings />);
+      case "castmode": return extraSection(id, "Cast Mode", <CastModeSettings />);
       case "startup":
-        return extraSection("Startup & Behaviour", (
+        return extraSection(id, "Startup & Behaviour", (
           <StartupControls settings={settingsByKey} onSave={(key, value, valueType) => {
             // Return the promise so the registry sync can await the DB write.
             return updateMutation.mutateAsync(
@@ -748,9 +763,9 @@ export function SettingsPage() {
             );
           }} />
         ));
-      case "management": return extraSection("Server Management", <RestartServerButton />);
-      case "logs": return extraSection("Log Viewer", <LogViewer />, true);
-      case "about": return extraSection("System Information", (
+      case "management": return extraSection(id, "Server Management", <RestartServerButton />);
+      case "logs": return extraSection(id, "Log Viewer", <LogViewer />, true);
+      case "about": return extraSection(id, "System Information", (
         <>
           <VersionInfo />
           <div className="mt-4 pt-4 border-t border-surface-border">
@@ -773,9 +788,9 @@ export function SettingsPage() {
     <div className="p-4 md:p-6">
       <h1 className="text-2xl font-bold text-text-primary mb-4">Settings</h1>
 
-      <div className="flex flex-col md:flex-row gap-6">
+      <div className="flex flex-col lg:flex-row gap-6">
         {/* ── Sidebar (md+) ── */}
-        <nav className="hidden md:block md:w-56 shrink-0 self-start md:sticky md:top-6">
+        <nav className="hidden lg:block lg:w-56 shrink-0 self-start lg:sticky lg:top-6">
           {SETTINGS_NAV.map((group) => (
             <div key={group.heading} className="mb-4">
               <div className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted/70">
@@ -801,7 +816,7 @@ export function SettingsPage() {
         <select
           value={activeSection}
           onChange={(e) => setActiveSection(e.target.value)}
-          className="input-field md:hidden"
+          className="input-field lg:hidden"
         >
           {SETTINGS_NAV.map((group) => (
             <optgroup key={group.heading} label={group.heading}>
@@ -814,7 +829,7 @@ export function SettingsPage() {
         </select>
 
         {/* ── Content ── */}
-        <div className={`flex-1 min-w-0 space-y-8 ${activeSection === "logs" ? "max-w-5xl" : "max-w-3xl"}`}>
+        <div className="flex-1 min-w-0 max-w-5xl space-y-8">
           {renderSection(activeSection)}
         </div>
       </div>
@@ -877,50 +892,35 @@ function StartupControls({
     }
   };
 
-  return (
-    <div className="space-y-4">
-      {/* Start with Windows */}
-      <div className="flex items-center justify-between">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <p className="text-sm font-medium text-text-primary">Start with Windows</p>
-            <Tooltip content="Adds Playarr to the Windows startup registry (HKCU Run) so it launches automatically on login. Launches to the system tray with no console window.">
-              <Info size={13} className="text-text-muted cursor-help" />
-            </Tooltip>
-          </div>
-          <p className="text-xs text-text-muted mt-0.5">
-            Automatically launch Playarr when you log in to Windows
-          </p>
-        </div>
-        <button
-          onClick={toggleStartup}
-          disabled={syncing}
-          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-            startupEnabled ? "bg-accent" : "bg-surface-3"
-          }`}
-        >
-          <span
-            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
-              startupEnabled ? "translate-x-[18px]" : "translate-x-[3px]"
-            }`}
-          />
-        </button>
-      </div>
+  const toggle = (checked: boolean, onClick: () => void, label: string, disabled = false) => (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onClick}
+      disabled={disabled}
+      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${checked ? "bg-accent" : "bg-surface-3"}`}
+    >
+      <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${checked ? "translate-x-6" : "translate-x-1"}`} />
+    </button>
+  );
 
-      {/* Delayed Start */}
+  return (
+    <div className="divide-y divide-white/5">
+      <SettingRowLayout
+        label="Start with Windows"
+        description="Adds Playarr to the current user's Windows startup registry and launches it automatically after login."
+        className="pb-4"
+      >
+        {toggle(startupEnabled, toggleStartup, "Start with Windows", syncing)}
+      </SettingRowLayout>
       {startupEnabled && (
-        <div className="flex items-center justify-between pl-4 border-l-2 border-border">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <p className="text-sm font-medium text-text-primary">Startup Delay</p>
-              <Tooltip content="Useful to let other services (e.g. network, Redis) initialise first. Set to 0 for no delay.">
-                <Info size={13} className="text-text-muted cursor-help" />
-              </Tooltip>
-            </div>
-            <p className="text-xs text-text-muted mt-0.5">
-              Seconds to wait before launching the server on system start
-            </p>
-          </div>
+        <SettingRowLayout
+          label="Startup Delay"
+          description="Wait before launching so network storage and supporting services can initialise. Set 0 for no delay."
+          className="py-4"
+        >
           <div className="flex items-center gap-2">
             <input
               type="number"
@@ -930,115 +930,24 @@ function StartupControls({
               onChange={(e) => setDelayInput(e.target.value)}
               onBlur={saveDelay}
               onKeyDown={(e) => e.key === "Enter" && saveDelay()}
-              className="input-field w-20 text-center text-sm"
+              className="input-field w-24 text-sm"
             />
-            <span className="text-xs text-text-muted">sec</span>
+            <span className="text-xs text-text-muted">seconds</span>
           </div>
-        </div>
+        </SettingRowLayout>
       )}
-
-      {/* Open Browser on Launch */}
-      <div className="flex items-center justify-between">
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-text-primary">Open Browser on Launch</p>
-          <p className="text-xs text-text-muted mt-0.5">
-            Automatically open the Playarr UI when the server starts
-          </p>
-        </div>
-        <button
-          onClick={() => onSave("auto_open_browser", autoOpen ? "false" : "true", "bool")}
-          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-            autoOpen ? "bg-accent" : "bg-surface-3"
-          }`}
-        >
-          <span
-            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
-              autoOpen ? "translate-x-[18px]" : "translate-x-[3px]"
-            }`}
-          />
-        </button>
-      </div>
-
-      {/* System Tray Icon */}
-      <div className="flex items-center justify-between">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <p className="text-sm font-medium text-text-primary">System Tray Icon</p>
-            <Tooltip content="Show a Playarr icon in the system tray with Open and Quit actions. Takes effect on next server start.">
-              <Info size={13} className="text-text-muted cursor-help" />
-            </Tooltip>
-          </div>
-          <p className="text-xs text-text-muted mt-0.5">
-            Show a tray icon for quick access (requires restart)
-          </p>
-        </div>
-        <button
-          onClick={() => onSave("minimize_to_tray", trayIcon ? "false" : "true", "bool")}
-          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-            trayIcon ? "bg-accent" : "bg-surface-3"
-          }`}
-        >
-          <span
-            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
-              trayIcon ? "translate-x-[18px]" : "translate-x-[3px]"
-            }`}
-          />
-        </button>
-      </div>
-
-      {/* Duplicate Scan on Startup */}
-      <div className="flex items-center justify-between">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <p className="text-sm font-medium text-text-primary">Duplicate Scan on Startup</p>
-            <Tooltip content="Runs a background duplicate detection scan each time Playarr starts. Flagged items appear in the Review Queue.">
-              <Info size={13} className="text-text-muted cursor-help" />
-            </Tooltip>
-          </div>
-          <p className="text-xs text-text-muted mt-0.5">
-            Automatically check for duplicate videos on launch
-          </p>
-        </div>
-        <button
-          onClick={() => onSave("startup_duplicate_scan", dupeScanStartup ? "false" : "true", "bool")}
-          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-            dupeScanStartup ? "bg-accent" : "bg-surface-3"
-          }`}
-        >
-          <span
-            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
-              dupeScanStartup ? "translate-x-[18px]" : "translate-x-[3px]"
-            }`}
-          />
-        </button>
-      </div>
-
-      {/* Rename Scan on Startup */}
-      <div className="flex items-center justify-between">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <p className="text-sm font-medium text-text-primary">Rename Scan on Startup</p>
-            <Tooltip content="Checks all files against the naming convention each time Playarr starts. Mismatched items appear in the Review Queue. Previously dismissed items are skipped.">
-              <Info size={13} className="text-text-muted cursor-help" />
-            </Tooltip>
-          </div>
-          <p className="text-xs text-text-muted mt-0.5">
-            Automatically check for naming convention mismatches on launch
-          </p>
-        </div>
-        <button
-          onClick={() => onSave("startup_rename_scan", renameScanStartup ? "false" : "true", "bool")}
-          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-            renameScanStartup ? "bg-accent" : "bg-surface-3"
-          }`}
-        >
-          <span
-            className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
-              renameScanStartup ? "translate-x-[18px]" : "translate-x-[3px]"
-            }`}
-          />
-        </button>
-      </div>
+      <SettingRowLayout label="Open Browser on Launch" description="Open the Playarr web interface when the server starts." className="py-4">
+        {toggle(autoOpen, () => { void onSave("auto_open_browser", autoOpen ? "false" : "true", "bool"); }, "Open browser on launch")}
+      </SettingRowLayout>
+      <SettingRowLayout label="System Tray Icon" description="Show quick Open and Quit actions in the Windows tray. Takes effect after restart." className="py-4">
+        {toggle(trayIcon, () => { void onSave("minimize_to_tray", trayIcon ? "false" : "true", "bool"); }, "Show system tray icon")}
+      </SettingRowLayout>
+      <SettingRowLayout label="Duplicate Scan on Startup" description="Run duplicate detection after launch and send suspected matches to the Review Queue." className="py-4">
+        {toggle(dupeScanStartup, () => { void onSave("startup_duplicate_scan", dupeScanStartup ? "false" : "true", "bool"); }, "Scan for duplicates on startup")}
+      </SettingRowLayout>
+      <SettingRowLayout label="Rename Scan on Startup" description="Check naming-convention mismatches after launch; dismissed cases remain dismissed." className="pt-4">
+        {toggle(renameScanStartup, () => { void onSave("startup_rename_scan", renameScanStartup ? "false" : "true", "bool"); }, "Scan for rename mismatches on startup")}
+      </SettingRowLayout>
     </div>
   );
 }
@@ -1075,13 +984,7 @@ function RestartServerButton() {
   };
 
   return (
-    <div className="flex items-center justify-between">
-      <div>
-        <p className="text-sm font-medium text-text-primary">Restart Server</p>
-        <p className="text-xs text-text-muted mt-0.5">
-          Restart the Playarr backend. Active downloads will be interrupted.
-        </p>
-      </div>
+    <SettingRowLayout label="Restart Server" description="Restart the Playarr backend. Active downloads and in-flight media processing will be interrupted.">
       <button
         onClick={handleRestart}
         disabled={restarting}
@@ -1090,7 +993,7 @@ function RestartServerButton() {
         <Power size={14} className={restarting ? "animate-spin" : ""} />
         {restarting ? "Restarting…" : "Restart"}
       </button>
-    </div>
+    </SettingRowLayout>
   );
 }
 
@@ -1109,15 +1012,11 @@ function VersionInfo() {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-sm font-medium text-text-primary">Version</p>
-          <p className="text-xs text-text-muted mt-0.5">Current application version</p>
-        </div>
+      <SettingRowLayout label="Playarr Version" description="The installed application build. Database compatibility is checked against this version.">
         <span className="text-sm font-mono text-text-secondary">
           {versionData?.app_version ?? "…"}
         </span>
-      </div>
+      </SettingRowLayout>
       {versionData?.version_mismatch && (
         <div className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/30 p-3">
           <AlertTriangle size={16} className="text-amber-400 mt-0.5 shrink-0" />
@@ -1161,37 +1060,28 @@ function YtdlpUpdater() {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-text-primary">yt-dlp (YouTube downloader engine)</p>
-          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-            yt-dlp changes often to keep up with YouTube. Update it here without reinstalling Playarr —
-            an out-of-date engine is the usual cause of downloads capping at low resolution.
-          </p>
-        </div>
+      <SettingRowLayout
+        label="yt-dlp Downloader Engine"
+        description="Updates independently of Playarr so download-site changes can be handled without reinstalling the application."
+      >
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <span className="text-text-muted">Installed: <span className="font-mono text-text-secondary">{isLoading ? "…" : (installed ?? "not installed")}</span></span>
+            <span className="text-text-muted">Latest: <span className="font-mono text-text-secondary">{isLoading ? "…" : (latest ?? "unknown")}</span></span>
+            {status?.managed && <span className="text-[10px] text-text-muted/70">self-managed</span>}
+          </div>
         <button
           onClick={handleUpdate}
           disabled={busy || isLoading}
-          className="btn-secondary btn-sm flex items-center gap-1.5 shrink-0"
+          className="btn-secondary btn-sm flex items-center gap-1.5"
         >
           {busy
             ? <RefreshCw size={14} className="animate-spin" />
             : <Download size={14} />}
           {busy ? "Updating…" : (installed ? "Update" : "Install")}
         </button>
-      </div>
-
-      <div className="flex items-center gap-4 text-xs">
-        <span className="text-text-muted">
-          Installed: <span className="font-mono text-text-secondary">{isLoading ? "…" : (installed ?? "not installed")}</span>
-        </span>
-        <span className="text-text-muted">
-          Latest: <span className="font-mono text-text-secondary">{isLoading ? "…" : (latest ?? "unknown")}</span>
-        </span>
-        {status?.managed && (
-          <span className="text-[10px] text-text-muted/70">(self-managed)</span>
-        )}
-      </div>
+        </div>
+      </SettingRowLayout>
 
       {!isLoading && updateAvailable && (
         <div className="flex items-start gap-2 rounded-lg bg-amber-500/10 border border-amber-500/30 p-2.5">
@@ -1487,31 +1377,31 @@ function NamingConventionEditor({
 
   const isDefaultConfig = pattern === "{artist} - {title} [{quality}]" && structure === "{artist}/{file_folder}";
 
-  // Fetch preview whenever pattern or structure changes
-  const fetchPreview = async () => {
-    setLoadingPreview(true);
-    try {
-      const res = await settingsApi.namingPreview(pattern, structure);
-      setPreview(res.examples);
-    } catch {
-      setPreview([]);
-    } finally {
-      setLoadingPreview(false);
-    }
-  };
-
-  // Auto-fetch preview on mount and when values change
-  useState(() => { fetchPreview(); });
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setLoadingPreview(true);
+      try {
+        const res = await settingsApi.namingPreview(pattern, structure);
+        if (!cancelled) setPreview(res.examples);
+      } catch {
+        if (!cancelled) setPreview([]);
+      } finally {
+        if (!cancelled) setLoadingPreview(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [pattern, structure]);
 
   const handlePatternChange = (value: string) => {
     setPattern(value);
-    // Debounced preview fetch
-    setTimeout(() => fetchPreview(), 300);
   };
 
   const handleStructureChange = (value: string) => {
     setStructure(value);
-    setTimeout(() => fetchPreview(), 300);
   };
 
   const savePattern = () => {
@@ -1524,21 +1414,16 @@ function NamingConventionEditor({
 
   return (
     <div className="space-y-4">
-      {/* Folder Structure */}
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-2">
-          <label className="text-sm font-medium text-text-primary">Folder Structure</label>
-          {structure === "{artist}/{file_folder}" && (
-            <Tooltip content="Artist artwork and metadata are organised into per-artist folders alongside video subfolders.">
-              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-green-500/20 text-green-400 rounded">Recommended</span>
-            </Tooltip>
-          )}
-        </div>
-        <p className="text-xs text-text-muted mb-1.5">
-          How video folders are organised within the library. Tokens: <code className="text-accent/80">{"{artist}"}</code>, <code className="text-accent/80">{"{album}"}</code>, <code className="text-accent/80">{"{file_folder}"}</code>
-        </p>
-        <div className="flex items-center gap-2">
+      <SettingRowLayout
+        label="Folder Structure"
+        controlId="folder-structure"
+        description={<>Organises video folders within the library. Tokens: <code className="text-accent/80">{"{artist}"}</code>, <code className="text-accent/80">{"{album}"}</code>, <code className="text-accent/80">{"{file_folder}"}</code>.</>}
+        labelExtra={structure === "{artist}/{file_folder}" ? <span className="rounded bg-green-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-green-400">Recommended</span> : undefined}
+      >
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
           <select
+            id="folder-structure"
             value={FOLDER_STRUCTURE_PRESETS.some(p => p.value === structure) ? structure : "__custom__"}
             onChange={(e) => {
               if (e.target.value !== "__custom__") {
@@ -1569,23 +1454,20 @@ function NamingConventionEditor({
             placeholder="{artist}/{file_folder}"
           />
         )}
-      </div>
-
-      {/* File Naming Pattern */}
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-2">
-          <label className="text-sm font-medium text-text-primary">File Naming Pattern</label>
-          {pattern === "{artist} - {title} [{quality}]" && (
-            <Tooltip content="This is the default naming convention. The quality tag in brackets helps identify resolution at a glance and is widely supported by media managers.">
-              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-blue-500/20 text-blue-400 rounded">Default</span>
-            </Tooltip>
-          )}
         </div>
-        <p className="text-xs text-text-muted mb-1.5">
-          Pattern for video files and their containing folder. Tokens: <code className="text-accent/80">{"{artist}"}</code>, <code className="text-accent/80">{"{title}"}</code>, <code className="text-accent/80">{"{quality}"}</code>, <code className="text-accent/80">{"{album}"}</code>, <code className="text-accent/80">{"{year}"}</code>
-        </p>
-        <div className="flex items-center gap-2">
+      </SettingRowLayout>
+
+      <SettingRowLayout
+        label="File Naming Pattern"
+        controlId="file-naming-pattern"
+        description={<>Names video files and their containing folder. Tokens: <code className="text-accent/80">{"{artist}"}</code>, <code className="text-accent/80">{"{title}"}</code>, <code className="text-accent/80">{"{quality}"}</code>, <code className="text-accent/80">{"{album}"}</code>, <code className="text-accent/80">{"{year}"}</code>.</>}
+        labelExtra={pattern === "{artist} - {title} [{quality}]" ? <span className="rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-400">Default</span> : undefined}
+        className="border-t border-white/5 pt-4"
+      >
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
           <select
+            id="file-naming-pattern"
             value={FILE_NAMING_PRESETS.some(p => p.value === pattern) ? pattern : "__custom__"}
             onChange={(e) => {
               if (e.target.value !== "__custom__") {
@@ -1618,7 +1500,8 @@ function NamingConventionEditor({
             placeholder="{artist} - {title} [{quality}]"
           />
         )}
-      </div>
+        </div>
+      </SettingRowLayout>
 
       {/* Default tooltip */}
       {isDefaultConfig && (
@@ -1634,7 +1517,7 @@ function NamingConventionEditor({
       {/* Live Preview */}
       <div className="space-y-2">
         <button
-          onClick={() => { setShowPreview(!showPreview); if (!showPreview) fetchPreview(); }}
+          onClick={() => setShowPreview(!showPreview)}
           className="flex items-center gap-1.5 text-xs font-medium text-text-muted hover:text-text-secondary transition-colors"
         >
           {showPreview ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
@@ -1672,16 +1555,14 @@ function LibraryMaintenanceContent() {
 
   return (
     <>
-      <div className="space-y-4">
-        <p className="text-sm font-medium text-text-primary">Library Maintenance</p>
-        <div className="space-y-3">
-          <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-text-secondary">Scan Library</p>
-              <p className="text-xs text-text-muted leading-relaxed">
-                Scan the library directory for new files not tracked in the database, or update existing entries from sidecar XMLs.
-              </p>
-              <div className="flex flex-wrap gap-2 mt-2">
+      <div className="divide-y divide-white/5">
+          <SettingRowLayout
+            label="Scan Library"
+            description="Find untracked files or update database records from their Playarr XML sidecars. The scan runs as a background job."
+            className="pb-4"
+          >
+            <div className="space-y-2">
+              <div className="flex flex-wrap gap-2">
                 {[
                   { value: "import_new", label: "Import New", desc: "Import untracked files" },
                   { value: "update_existing", label: "Update Existing", desc: "Sync DB from sidecar XMLs" },
@@ -1708,7 +1589,6 @@ function LibraryMaintenanceContent() {
                   </Tooltip>
                 ))}
               </div>
-            </div>
             <button
               onClick={() => {
                 const importNew = scanMode === "import_new" || scanMode === "both";
@@ -1724,14 +1604,13 @@ function LibraryMaintenanceContent() {
               <ScanLine size={14} />
               {scanMutation.isPending ? "Scanning…" : "Scan"}
             </button>
-          </div>
-          <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-text-secondary">Clean Library</p>
-              <p className="text-xs text-text-muted leading-relaxed">
-                Check library health — find database entries with missing files and on-disk folders not tracked in the database.
-              </p>
             </div>
+          </SettingRowLayout>
+          <SettingRowLayout
+            label="Clean Library"
+            description="Find database entries with missing files and on-disk folders that are not represented in the database. You review results before changes are committed."
+            className="py-4"
+          >
             <button
               onClick={() => setCleanDialogOpen(true)}
               className="btn-secondary btn-sm flex items-center gap-1.5 shrink-0"
@@ -1739,14 +1618,14 @@ function LibraryMaintenanceContent() {
               <HeartPulse size={14} />
               Clean
             </button>
-          </div>
-          <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-text-secondary">Export Library</p>
-              <p className="text-xs text-text-muted leading-relaxed">
-                Export NFO files, Playarr XML sidecars, and artwork for all videos. Locked items are excluded from overwrites.
-              </p>
-              <div className="flex flex-wrap gap-2 mt-2">
+          </SettingRowLayout>
+          <SettingRowLayout
+            label="Export Library"
+            description="Write NFO files, reconstructable Playarr XML sidecars, and artwork. Locked items remain protected from overwrite."
+            className="pt-4"
+          >
+            <div className="space-y-2">
+              <div className="flex flex-wrap gap-2">
                 {[
                   { value: "skip_existing", label: "Skip Existing", desc: "Only write missing files" },
                   { value: "overwrite_new", label: "Overwrite New", desc: "Only overwrite changed files" },
@@ -1773,7 +1652,6 @@ function LibraryMaintenanceContent() {
                   </Tooltip>
                 ))}
               </div>
-            </div>
             <button
               onClick={() =>
                 exportMutation.mutate(exportMode, {
@@ -1786,8 +1664,8 @@ function LibraryMaintenanceContent() {
               <Download size={14} />
               {exportMutation.isPending ? "Exporting…" : "Export"}
             </button>
-          </div>
-        </div>
+            </div>
+          </SettingRowLayout>
       </div>
       {cleanDialogOpen && (
         <CleanLibraryDialog open={cleanDialogOpen} onClose={() => setCleanDialogOpen(false)} />
@@ -1856,7 +1734,7 @@ function NowPlayingSettings() {
             className="w-32 accent-accent"
           />
           <span className="text-sm text-text-secondary w-12 text-right">{artworkSize}</span>
-        </div>
+          </div>
       </SettingRowLayout>
 
       {/* Scroll Rate (duration) */}
@@ -1872,11 +1750,11 @@ function NowPlayingSettings() {
             className="w-32 accent-accent"
           />
           <span className="text-sm text-text-secondary w-12 text-right">{scrollDuration}s</span>
-        </div>
+          </div>
       </SettingRowLayout>
 
         </div>
-      </div>
+        </div>
 
       {/* ── Tile Swapping ── */}
       <div className="mt-4">
@@ -2651,7 +2529,7 @@ function SettingRow({
             </button>
           </Tooltip>
         )}
-      </div>
-    </SettingRowLayout>
+        </div>
+      </SettingRowLayout>
   );
 }

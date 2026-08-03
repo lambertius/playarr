@@ -1043,7 +1043,7 @@ class ReviewCaseItem(Base):
     video_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("video_items.id", ondelete="SET NULL"), nullable=True, index=True,
     )
-    video_stable_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    video_stable_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(30), nullable=False, default="candidate")
     evidence_summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
@@ -1061,8 +1061,8 @@ class ReviewCaseEdge(Base):
     case_id: Mapped[int] = mapped_column(
         ForeignKey("review_cases.id", ondelete="CASCADE"), nullable=False, index=True,
     )
-    left_video_stable_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    right_video_stable_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    left_video_stable_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    right_video_stable_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     evidence_type: Mapped[str] = mapped_column(String(60), nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)

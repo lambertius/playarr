@@ -246,9 +246,9 @@ export function GenresPage() {
           </div>
         )}
       </div>
-      <div className="mb-4">
+      {(isLoading || isError || !filtered || filtered.length === 0) && (
         <FilterBar filters={filters} onChange={setFilters} hideGenre />
-      </div>
+      )}
 
       {isLoading ? (
         <div className="grid grid-cols-[repeat(auto-fill,150px)] gap-4">
@@ -267,6 +267,7 @@ export function GenresPage() {
           preferenceKey="genres"
           defaultSort="name"
           empty={<EmptyState icon={<Tags size={48} />} title="No genres yet" />}
+          renderFilterTile={(controls) => <FilterBar filters={filters} onChange={setFilters} hideGenre>{controls}</FilterBar>}
           columns={[
             { id: "name", label: "Genre", width: "minmax(12rem,1fr)", sortValue: (genre) => genre.genre, render: (genre) => <button className="truncate hover:text-accent" onClick={() => selectMode ? toggleGenre(genre.genre) : navigate(`/library?genre=${encodeURIComponent(genre.genre)}`)}>{genre.genre}</button> },
             { id: "count", label: "Videos", width: "6rem", align: "right", sortValue: (genre) => genre.count, render: (genre) => genre.count },

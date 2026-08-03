@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from typing import Generator
 import re
+import time
 
 from app.config import get_settings
 from app.db_lock import _apply_lock
@@ -153,7 +154,10 @@ def _install_write_serialization(target_engine) -> None:
         if conn.info.get(_GUARD_FLAG):
             return  # already holding it for this transaction
         if _statement_is_write(statement):
+            wait_started = time.monotonic()
             _apply_lock.acquire()
+            from app.services.transaction_telemetry import record_wait
+            record_wait((time.monotonic() - wait_started) * 1000)
             conn.info[_GUARD_FLAG] = True
             from app.services.transaction_telemetry import begin
             begin(conn)
@@ -214,6 +218,11 @@ RequestSessionLocal = sessionmaker(
     expire_on_commit=False,  # match SessionLocal — endpoints read attributes
                              # after commit (e.g. db.refresh(job); return job)
 )
+
+# The guarded factory is also the mandatory session for durable actors and
+# outbox reconcilers. ``RequestSessionLocal`` remains as a compatibility name;
+# new non-pipeline writers should use the role-oriented alias below.
+SerializedSessionLocal = RequestSessionLocal
 
 Base = declarative_base()
 

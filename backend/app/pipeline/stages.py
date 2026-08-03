@@ -918,11 +918,6 @@ def _step_resolve_metadata(ws: ImportWorkspace, artist: str, title: str,
         return
     ws.update_stage("resolve_metadata", "running")
 
-    opts = options.get("options", options)
-    _skip_ai = not (opts.get("ai_auto_analyse", False) or opts.get("ai_auto_fallback", False))
-    _skip_wiki = not (opts.get("scrape_wikipedia", True) or opts.get("ai_auto_analyse", False))
-    _skip_mb = not (opts.get("scrape_musicbrainz", True) or opts.get("ai_auto_analyse", False))
-
     from app.pipeline.import_context import context_from_options, run_metadata_stage
     ytdlp_meta = ws.read_artifact("ytdlp_metadata") or {}
 
@@ -944,19 +939,6 @@ def _step_resolve_metadata(ws: ImportWorkspace, artist: str, title: str,
         ws.log(f"Metadata resolution warning: {e}", level="warning")
         metadata = {"artist": artist, "title": title, "genres": [], "plot": None}
 
-    # AI summary
-    if metadata.get("plot"):
-        try:
-            from app.services.ai_summary import generate_ai_summary
-            summary = generate_ai_summary(metadata["plot"],
-                                          source_url=identity.get("source_url", ""))
-            if summary:
-                metadata["plot"] = summary
-            else:
-                ws.log("AI summary returned empty — raw scraped text kept as plot", level="warning")
-        except Exception as e:
-            ws.log(f"AI summary generation failed: {e}", level="warning")
-
     ws.write_artifact("scraper_results", metadata)
     ws.update_stage("resolve_metadata", "complete")
     ws.log(f"Metadata resolved: {metadata.get('artist')} - {metadata.get('title')}")
@@ -969,10 +951,6 @@ def _step_resolve_metadata_url(ws: ImportWorkspace, artist: str, title: str,
     if ws.is_stage_complete("resolve_metadata"):
         return
     ws.update_stage("resolve_metadata", "running")
-
-    _skip_ai = not (opts.get("ai_auto_analyse", False) or opts.get("ai_auto_fallback", False))
-    _skip_wiki = not (opts.get("scrape", True) or opts.get("ai_auto_analyse", False))
-    _skip_mb = not (opts.get("scrape_musicbrainz", True) or opts.get("ai_auto_analyse", False))
 
     from app.pipeline.import_context import context_from_options, run_metadata_stage
 
@@ -993,15 +971,6 @@ def _step_resolve_metadata_url(ws: ImportWorkspace, artist: str, title: str,
     except Exception as e:
         ws.log(f"Metadata resolution warning: {e}", level="warning")
         metadata = {"artist": artist, "title": title, "genres": [], "plot": None}
-
-    if metadata.get("plot"):
-        try:
-            from app.services.ai_summary import generate_ai_summary
-            summary = generate_ai_summary(metadata["plot"], source_url=canonical)
-            if summary:
-                metadata["plot"] = summary
-        except Exception:
-            pass
 
     ws.write_artifact("scraper_results", metadata)
     ws.update_stage("resolve_metadata", "complete")

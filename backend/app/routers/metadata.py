@@ -13,6 +13,8 @@ Endpoints:
     POST /api/metadata/undo/{entity_type}/{entity_id} — undo last refresh
     GET  /api/metadata/revisions/{entity_type}/{entity_id} — list revisions
 """
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -25,6 +27,7 @@ from app.database import get_db
 from app.models import (
     VideoItem, ProcessingJob, JobStatus,
     ArtistConsolidation, ArtistConsolidationTarget, ArtistConsolidationMbid,
+    AppSetting,
 )
 from app.metadata.models import (
     ArtistEntity, AlbumEntity, TrackEntity, MetadataRevision, ExportManifest,
@@ -34,6 +37,48 @@ from app.metadata.revisions import list_revisions, rollback, save_revision
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/metadata", tags=["Metadata"])
+
+
+def _consolidation_suggestion_id(kind: str, payload: dict) -> str:
+    canonical = json.dumps({"kind": kind, **payload}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+
+
+def _dismissed_consolidation_suggestions(db: Session, kind: str) -> set[str]:
+    row = db.query(AppSetting).filter(
+        AppSetting.user_id.is_(None), AppSetting.key == f"consolidation.dismissed.{kind}",
+    ).one_or_none()
+    if not row:
+        return set()
+    try:
+        return set(json.loads(row.value))
+    except (TypeError, ValueError):
+        return set()
+
+
+class DismissConsolidationSuggestionRequest(BaseModel):
+    suggestion_id: str
+
+
+@router.post("/consolidation-suggestions/{kind}/dismiss")
+def dismiss_consolidation_suggestion(
+    kind: str, body: DismissConsolidationSuggestionRequest, db: Session = Depends(get_db),
+):
+    if kind not in {"artist", "genre"}:
+        raise HTTPException(404, "Unknown consolidation suggestion type")
+    key = f"consolidation.dismissed.{kind}"
+    row = db.query(AppSetting).filter(AppSetting.user_id.is_(None), AppSetting.key == key).one_or_none()
+    dismissed = _dismissed_consolidation_suggestions(db, kind)
+    dismissed.add(body.suggestion_id)
+    value = json.dumps(sorted(dismissed))
+    if row:
+        row.value = value
+        row.value_type = "json"
+        row.revision += 1
+    else:
+        db.add(AppSetting(user_id=None, key=key, value=value, value_type="json"))
+    db.commit()
+    return {"dismissed": True, "suggestion_id": body.suggestion_id}
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +603,44 @@ def delete_artist_consolidation_v2(stable_id: str, expected_revision: int, db: S
 @router.get("/artist-consolidation-suggestions")
 def artist_consolidation_suggestions(db: Session = Depends(get_db)):
     from app.services.consolidations import consolidation_conflicts
-    return consolidation_conflicts(db)
+    dismissed = _dismissed_consolidation_suggestions(db, "artist")
+    results = []
+    for conflict in consolidation_conflicts(db):
+        suggestion_id = _consolidation_suggestion_id("artist", {
+            "type": conflict.get("type"),
+            "mbids": sorted(conflict.get("mbids") or []),
+            "names": sorted(conflict.get("names") or [], key=str.casefold),
+        })
+        if suggestion_id not in dismissed:
+            results.append({**conflict, "suggestion_id": suggestion_id})
+    return results
+
+
+@router.get("/artist-consolidation-options")
+def artist_consolidation_options(q: str = "", db: Session = Depends(get_db)):
+    """Search raw library artist names with their MBID and usage count."""
+    from sqlalchemy import func
+
+    term = q.strip()
+    if not term:
+        return []
+    rows = (
+        db.query(VideoItem.artist, VideoItem.mb_artist_id, func.count(VideoItem.id).label("cnt"))
+        .filter(VideoItem.artist.isnot(None), VideoItem.artist.ilike(f"%{term}%"))
+        .group_by(VideoItem.artist, VideoItem.mb_artist_id)
+        .order_by(func.count(VideoItem.id).desc(), VideoItem.artist)
+        .limit(30)
+        .all()
+    )
+    merged: dict[tuple[str, Optional[str]], int] = {}
+    for raw_name, mbid, count in rows:
+        primary = _primary_artist(raw_name)
+        key = (primary, mbid)
+        merged[key] = merged.get(key, 0) + count
+    return [
+        {"name": name, "mb_artist_id": mbid, "video_count": count}
+        for (name, mbid), count in sorted(merged.items(), key=lambda value: (-value[1], value[0][0].casefold()))[:15]
+    ]
 
 
 @router.get("/consolidations/manifest")
@@ -788,6 +870,7 @@ class GenreBlacklistTileRequest(BaseModel):
 
 
 class GenreSuggestion(BaseModel):
+    suggestion_id: str
     master_name: str
     master_id: int
     aliases: list  # list of {id, name, video_count}
@@ -988,6 +1071,7 @@ def suggest_genre_consolidations(db: Session = Depends(get_db)):
         norm_groups[key].append({"id": gid, "name": gname, "video_count": cnt})
 
     suggestions = []
+    dismissed = _dismissed_consolidation_suggestions(db, "genre")
     for key, entries in norm_groups.items():
         if len(entries) <= 1:
             continue
@@ -995,7 +1079,13 @@ def suggest_genre_consolidations(db: Session = Depends(get_db)):
         entries.sort(key=lambda e: e["video_count"], reverse=True)
         master = entries[0]
         aliases = entries[1:]
+        suggestion_id = _consolidation_suggestion_id("genre", {
+            "names": sorted([entry["name"] for entry in entries], key=str.casefold),
+        })
+        if suggestion_id in dismissed:
+            continue
         suggestions.append(GenreSuggestion(
+            suggestion_id=suggestion_id,
             master_name=master["name"],
             master_id=master["id"],
             aliases=aliases,

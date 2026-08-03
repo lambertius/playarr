@@ -19,6 +19,7 @@ from app.subprocess_utils import HIDE_WINDOW
 import tempfile
 import threading
 import time
+from fractions import Fraction
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
@@ -40,6 +41,9 @@ ASPECT_RATIOS = {
 
 ENCODE_PROFILES = {"source_fidelity", "balanced", "custom"}
 _LOSSLESS_AUDIO_CODECS = {"alac", "flac", "ape", "wavpack", "tta"}
+SOURCE_FIDELITY_CRF = 14
+SOURCE_FIDELITY_PRESET = "slow"
+SOURCE_FIDELITY_SSIM_MINIMUM = 0.98
 
 
 def _stream_bit_depth(stream: Dict[str, Any]) -> int:
@@ -58,14 +62,102 @@ def _stream_bit_depth(stream: Dict[str, Any]) -> int:
     return 8
 
 
+def _positive_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value or 0)
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _rational_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(Fraction(str(value)))
+        return parsed if parsed > 0 else None
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _source_video_bitrate(media: Dict[str, Any], video: Dict[str, Any]) -> Optional[int]:
+    """Return the best source-video-only bitrate available from ffprobe."""
+    stream_rate = _positive_int(video.get("bit_rate"))
+    if stream_rate:
+        return stream_rate
+    total_rate = _positive_int((media.get("format") or {}).get("bit_rate"))
+    if not total_rate:
+        return None
+    audio_rate = sum(
+        _positive_int(stream.get("bit_rate")) or 0
+        for stream in media.get("streams", [])
+        if stream.get("codec_type") == "audio"
+    )
+    estimated = total_rate - audio_rate
+    return estimated if estimated > 0 else total_rate
+
+
+def _bitrate_envelope(
+    media: Dict[str, Any],
+    video: Dict[str, Any],
+    video_encoder: str,
+    output_width: int,
+    output_height: int,
+) -> Dict[str, Any]:
+    """Build a quality-first rate envelope using the source as a reference.
+
+    The reference is not used as a fixed ABR target: doing that would trade
+    fidelity for file-size predictability.  It feeds a generous VBV ceiling so
+    the source's data rate participates in rate control while CRF remains the
+    primary target.  A pixels-per-frame floor protects unusually low-bitrate or
+    more efficient sources from starving an H.264/HEVC transcode.
+    """
+    source_rate = _source_video_bitrate(media, video)
+    if not source_rate:
+        return {
+            "source_video_bitrate": None,
+            "target_video_bitrate": None,
+            "adjusted_source_bitrate": None,
+            "maxrate": None,
+            "bufsize": None,
+            "bitrate_policy": "quality_only_source_bitrate_unavailable",
+        }
+
+    source_codec = str(video.get("codec_name") or "").lower()
+    if video_encoder == "libx264" and source_codec in {"hevc", "h265", "av1", "vp9"}:
+        codec_factor = 1.5
+    elif video_encoder == "libx265" and source_codec in {"h264", "avc", "mpeg4", "mpeg2video"}:
+        codec_factor = 0.8
+    else:
+        codec_factor = 1.0
+
+    frame_rate = _rational_float(video.get("avg_frame_rate") or video.get("r_frame_rate")) or 30.0
+    bits_per_pixel_frame = 0.06 if video_encoder == "libx265" else 0.10
+    resolution_floor = int(output_width * output_height * frame_rate * bits_per_pixel_frame)
+    adjusted_source_rate = int(source_rate * codec_factor)
+    target_rate = max(adjusted_source_rate, resolution_floor)
+    # Two times the reference leaves scene-complexity headroom; a two-second
+    # buffer avoids turning the reference into a brittle per-GOP hard target.
+    maxrate = target_rate * 2
+    bufsize = maxrate * 2
+    return {
+        "source_video_bitrate": source_rate,
+        "adjusted_source_bitrate": adjusted_source_rate,
+        "target_video_bitrate": target_rate,
+        "maxrate": maxrate,
+        "bufsize": bufsize,
+        "bitrate_policy": "source_referenced_constrained_quality",
+        "source_codec_factor": codec_factor,
+        "resolution_bitrate_floor": resolution_floor,
+    }
+
+
 def resolve_encode_plan(
     input_path: str,
     *,
     profile: str = "source_fidelity",
     crop: Optional[Dict[str, int]] = None,
     target_dar: Optional[str] = None,
-    crf: int = 18,
-    preset: str = "medium",
+    crf: int = SOURCE_FIDELITY_CRF,
+    preset: str = SOURCE_FIDELITY_PRESET,
     audio_passthrough: bool = True,
     trim_start: Optional[float] = None,
     trim_end: Optional[float] = None,
@@ -75,9 +167,9 @@ def resolve_encode_plan(
 ) -> Dict[str, Any]:
     """Resolve user intent into an auditable, source-aware encode plan.
 
-    The plan is JSON serialisable and is stored with the job.  In particular,
-    source-fidelity never derives a maxrate from the input bitrate: CRF remains
-    a quality target instead of an accidental quality ceiling.
+    The plan is JSON serialisable and is stored with the job. Source fidelity
+    uses the source bitrate to establish a generous constrained-quality
+    envelope while CRF remains the primary visual-quality target.
     """
     if profile not in ENCODE_PROFILES:
         raise ValueError(f"Unknown encode profile: {profile}")
@@ -118,6 +210,10 @@ def resolve_encode_plan(
     else:
         pixel_format = source_pix_fmt if source_pix_fmt in {"yuv420p", "yuv422p", "yuv444p"} else "yuv420p"
 
+    output_width = int(crop["crop_w"]) if crop else int(video.get("width") or 0)
+    output_height = int(crop["crop_h"]) if crop else int(video.get("height") or 0)
+    bitrate = _bitrate_envelope(media, video, video_encoder, output_width, output_height)
+
     copy_audio = bool(audio and audio_passthrough and not has_trim)
     resolved_audio_codec: Optional[str] = "copy" if copy_audio else None
     resolved_audio_bitrate = audio_bitrate
@@ -125,12 +221,18 @@ def resolve_encode_plan(
         source_audio_codec = str(audio.get("codec_name") or "")
         if audio_codec:
             resolved_audio_codec = audio_codec
-        elif source_audio_codec in _LOSSLESS_AUDIO_CODECS or source_audio_codec.startswith("pcm_"):
-            # ALAC remains lossless and is supported by MP4/MOV; Matroska can
-            # carry it too.  Never silently turn a lossless source into AAC.
+        elif profile == "source_fidelity":
+            # Once stream-copy is impossible, a second lossy generation is not
+            # source-fidelity even when the source was already AAC/Opus.  ALAC
+            # stores the decoder output losslessly and is supported by every
+            # output container used by the editor.
             resolved_audio_codec = "alac"
             resolved_audio_bitrate = None
-            warnings.append("Lossless source audio will be re-encoded losslessly as ALAC because trimming prevents stream copy.")
+            warnings.append("Audio will be re-encoded losslessly as ALAC because stream copy is unavailable.")
+        elif source_audio_codec in _LOSSLESS_AUDIO_CODECS or source_audio_codec.startswith("pcm_"):
+            resolved_audio_codec = "alac"
+            resolved_audio_bitrate = None
+            warnings.append("Lossless source audio will be re-encoded losslessly as ALAC.")
         else:
             resolved_audio_codec = "aac"
         if has_trim:
@@ -146,12 +248,16 @@ def resolve_encode_plan(
         "bit_depth": bit_depth,
         "hdr": hdr,
         "frame_rate": video.get("avg_frame_rate") or video.get("r_frame_rate"),
+        "average_frame_rate": video.get("avg_frame_rate"),
+        "nominal_frame_rate": video.get("r_frame_rate"),
+        "time_base": video.get("time_base"),
         "sample_aspect_ratio": video.get("sample_aspect_ratio"),
         "color_primaries": video.get("color_primaries"),
         "color_transfer": transfer,
         "color_space": video.get("color_space"),
         "color_range": video.get("color_range"),
         "rotation": (video.get("tags") or {}).get("rotate"),
+        "video_bitrate": bitrate["source_video_bitrate"],
         "audio_codec": audio.get("codec_name") if audio else None,
         "audio_sample_rate": audio.get("sample_rate") if audio else None,
         "audio_channels": audio.get("channels") if audio else None,
@@ -166,8 +272,17 @@ def resolve_encode_plan(
             "pixel_format": pixel_format,
             "crf": crf,
             "preset": preset,
-            "maxrate": None,
-            "frame_timing": "passthrough",
+            "target_video_bitrate": bitrate["target_video_bitrate"],
+            "adjusted_source_bitrate": bitrate["adjusted_source_bitrate"],
+            "maxrate": bitrate["maxrate"] if profile == "source_fidelity" else None,
+            "bufsize": bitrate["bufsize"] if profile == "source_fidelity" else None,
+            "bitrate_policy": bitrate["bitrate_policy"],
+            "source_codec_factor": bitrate.get("source_codec_factor"),
+            "resolution_bitrate_floor": bitrate.get("resolution_bitrate_floor"),
+            "width": output_width,
+            "height": output_height,
+            "frame_timing": "source_timestamps",
+            "encoder_time_base": "demux",
             "metadata": "copy",
             "chapters": "copy",
             "color_metadata": "copy",
@@ -177,6 +292,7 @@ def resolve_encode_plan(
             "audio_bitrate": resolved_audio_bitrate,
             "audio_sample_rate": "preserve",
             "audio_channels": "preserve",
+            "audio_channel_layout": "preserve",
         },
         "transforms": {
             "crop": crop,
@@ -520,8 +636,8 @@ def encode_video(
     output_path: str,
     crop: Optional[Dict[str, int]] = None,
     target_dar: Optional[str] = None,
-    crf: int = 18,
-    preset: str = "medium",
+    crf: int = SOURCE_FIDELITY_CRF,
+    preset: str = SOURCE_FIDELITY_PRESET,
     audio_passthrough: bool = True,
     trim_start: Optional[float] = None,
     trim_end: Optional[float] = None,
@@ -537,7 +653,7 @@ def encode_video(
         output_path: Destination file
         crop: Dict with crop_w, crop_h, crop_x, crop_y (None = no crop)
         target_dar: Display aspect ratio string e.g. "16:9" (None = keep original)
-        crf: Constant Rate Factor (lower = higher quality, 18 is visually lossless)
+        crf: Constant Rate Factor (lower = higher quality; source-fidelity defaults to 14)
         preset: x264 preset (ultrafast..veryslow)
         audio_passthrough: If True, copy audio stream without re-encoding
         trim_start: Seconds to trim from the beginning (None = no start trim)
@@ -645,8 +761,14 @@ def encode_video(
         "-crf", str(crf),
         "-preset", preset,
         "-pix_fmt", plan["output"]["pixel_format"],
-        "-fps_mode", "passthrough",
+        "-fps_mode:v", "passthrough",
+        "-enc_time_base:v", "demux",
     ])
+    if plan["output"].get("maxrate") and plan["output"].get("bufsize"):
+        cmd.extend([
+            "-maxrate:v", str(plan["output"]["maxrate"]),
+            "-bufsize:v", str(plan["output"]["bufsize"]),
+        ])
 
     # Re-state colour properties explicitly: container metadata copying alone is
     # not sufficient for every encoder/muxer combination.
@@ -712,6 +834,18 @@ def encode_video(
             else:
                 br = "192k"
             cmd.extend(["-c:a", "aac", "-b:a", br])
+
+        # Make preservation explicit instead of relying on encoder/muxer
+        # defaults, which vary by codec and FFmpeg build.
+        sample_rate = plan["source"].get("audio_sample_rate")
+        channel_layout = plan["source"].get("audio_channel_layout")
+        channels = plan["source"].get("audio_channels")
+        if sample_rate:
+            cmd.extend(["-ar:a:0", str(sample_rate)])
+        if channel_layout:
+            cmd.extend(["-channel_layout:a:0", str(channel_layout)])
+        elif channels:
+            cmd.extend(["-ac:a:0", str(channels)])
 
     # Copy subtitle streams if present
     cmd.extend(["-c:s", "copy"])
@@ -819,6 +953,36 @@ def validate_encoded_output(
 
     checks: Dict[str, Any] = {}
     transforms = plan.get("transforms", {})
+
+    expected_width = int(plan.get("output", {}).get("width") or source_video.get("width") or 0)
+    expected_height = int(plan.get("output", {}).get("height") or source_video.get("height") or 0)
+    output_width = int(output_video.get("width") or 0)
+    output_height = int(output_video.get("height") or 0)
+    checks["dimensions"] = f"{output_width}x{output_height}"
+    if (expected_width, expected_height) != (output_width, output_height):
+        raise RuntimeError(
+            f"Staged validation failed: dimensions {output_width}x{output_height} differ from "
+            f"expected {expected_width}x{expected_height}; the editor must crop without scaling"
+        )
+
+    source_rate = _rational_float(source_video.get("avg_frame_rate") or source_video.get("r_frame_rate"))
+    output_rate = _rational_float(output_video.get("avg_frame_rate") or output_video.get("r_frame_rate"))
+    checks["source_frame_rate"] = source_rate
+    checks["output_frame_rate"] = output_rate
+    if source_rate and not output_rate:
+        raise RuntimeError("Staged validation failed: output frame rate is unavailable")
+    # A trimmed VFR segment can legitimately have a different average rate, so
+    # exact preservation there is guaranteed by the timestamp/time-base command
+    # rather than by comparing whole-file averages.
+    has_trim = bool(transforms.get("trim_start") or transforms.get("trim_end"))
+    if source_rate and output_rate and not has_trim:
+        relative_rate_error = abs(output_rate - source_rate) / source_rate
+        checks["frame_rate_relative_error"] = relative_rate_error
+        if relative_rate_error > 0.002:
+            raise RuntimeError(
+                f"Staged validation failed: frame rate changed from {source_rate:.6f} "
+                f"to {output_rate:.6f} fps"
+            )
     source_duration = float(source_probe.get("format", {}).get("duration") or 0)
     output_duration = float(output_probe.get("format", {}).get("duration") or 0)
     expected_duration = max(
@@ -860,6 +1024,25 @@ def validate_encoded_output(
                 raise RuntimeError(
                     f"Staged validation failed: audio {key} changed from {source_value} to {output_value}"
                 )
+        source_layout = str(source_audio.get("channel_layout") or "")
+        output_layout = str(output_audio.get("channel_layout") or "")
+        checks["audio_channel_layout"] = output_layout
+        if source_layout and output_layout and source_layout != output_layout:
+            raise RuntimeError(
+                f"Staged validation failed: audio channel layout changed from "
+                f"{source_layout} to {output_layout}"
+            )
+
+    source_video_bitrate = _source_video_bitrate(source_probe, source_video)
+    output_video_bitrate = _source_video_bitrate(output_probe, output_video)
+    target_video_bitrate = _positive_int(plan.get("output", {}).get("target_video_bitrate"))
+    checks["source_video_bitrate"] = source_video_bitrate
+    checks["target_video_bitrate"] = target_video_bitrate
+    checks["output_video_bitrate"] = output_video_bitrate
+    checks["output_to_target_bitrate_ratio"] = (
+        output_video_bitrate / target_video_bitrate
+        if output_video_bitrate and target_video_bitrate else None
+    )
 
     # A successful full video decode is the last mandatory gate.  Corruption is
     # caught here while the original is still in place.
@@ -896,8 +1079,12 @@ def validate_encoded_output(
         match = re.search(r"All:([0-9.]+)", metric.stderr or "")
         if metric.returncode == 0 and match:
             checks["ssim"] = float(match.group(1))
-            if checks["ssim"] < 0.90:
-                raise RuntimeError(f"Staged validation failed: SSIM {checks['ssim']:.4f} is below 0.9000")
+            minimum_ssim = SOURCE_FIDELITY_SSIM_MINIMUM if plan.get("profile") == "source_fidelity" else 0.90
+            if checks["ssim"] < minimum_ssim:
+                raise RuntimeError(
+                    f"Staged validation failed: SSIM {checks['ssim']:.4f} is below "
+                    f"{minimum_ssim:.4f}"
+                )
         else:
             checks["ssim_note"] = "metric unavailable; probe comparison and full decode passed"
     else:

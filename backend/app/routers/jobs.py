@@ -54,6 +54,18 @@ def _import_action_label(req: "VideoItemCreate") -> str:
     return f"URL Import ({', '.join(parts)})"
 
 
+def _import_policy_payload(req: "VideoItemCreate") -> dict:
+    """Persist the normalized policy alongside every URL/playlist job."""
+    from app.services.import_policy import ImportPolicy
+    return ImportPolicy.from_legacy(
+        scrape_wikipedia=req.scrape,
+        scrape_musicbrainz=req.scrape_musicbrainz,
+        ai_auto=req.ai_auto_analyse,
+        ai_only=req.ai_auto_fallback,
+        normalise_audio=req.normalize,
+    ).model_dump(mode="json")
+
+
 def _rescan_action_label(**opts) -> str:
     """Build a human-readable action label for rescan jobs."""
     ai_auto = opts.get("ai_auto")
@@ -129,6 +141,7 @@ def import_by_url(req: VideoItemCreate, db: Session = Depends(get_db)):
     if is_playlist_url(req.url):
         return _import_playlist(req, db)
 
+    import_policy = _import_policy_payload(req)
     job = ProcessingJob(
         job_type="import_url",
         status=JobStatus.queued,
@@ -138,6 +151,9 @@ def import_by_url(req: VideoItemCreate, db: Session = Depends(get_db)):
         input_params={"artist": req.artist, "title": req.title,
                       "normalize": req.normalize, "scrape": req.scrape,
                       "scrape_musicbrainz": req.scrape_musicbrainz,
+                      "ai_auto_analyse": req.ai_auto_analyse,
+                      "ai_auto_fallback": req.ai_auto_fallback,
+                      "import_policy": import_policy,
                       "is_cover": req.is_cover, "is_live": req.is_live,
                       "is_alternate": req.is_alternate,
                       "alternate_version_label": req.alternate_version_label},
@@ -174,6 +190,7 @@ def _import_playlist(req: VideoItemCreate, db: Session) -> JobOut:
     # Create parent tracking job
     _child_label = _import_action_label(req)
     _playlist_mode = _child_label.split("(", 1)[-1].rstrip(")") if "(" in _child_label else ""
+    import_policy = _import_policy_payload(req)
     parent = ProcessingJob(
         job_type="playlist_import",
         status=JobStatus.analyzing,
@@ -183,6 +200,9 @@ def _import_playlist(req: VideoItemCreate, db: Session) -> JobOut:
         input_params={"artist": req.artist, "title": req.title,
                       "normalize": req.normalize, "scrape": req.scrape,
                       "scrape_musicbrainz": req.scrape_musicbrainz,
+                      "ai_auto_analyse": req.ai_auto_analyse,
+                      "ai_auto_fallback": req.ai_auto_fallback,
+                      "import_policy": import_policy,
                       "is_cover": req.is_cover, "is_live": req.is_live,
                       "is_alternate": req.is_alternate,
                       "is_uncensored": req.is_uncensored,
@@ -268,6 +288,9 @@ def _import_playlist(req: VideoItemCreate, db: Session) -> JobOut:
                 input_params={"artist": req.artist, "title": req.title,
                               "normalize": req.normalize, "scrape": req.scrape,
                               "scrape_musicbrainz": req.scrape_musicbrainz,
+                              "ai_auto_analyse": req.ai_auto_analyse,
+                              "ai_auto_fallback": req.ai_auto_fallback,
+                              "import_policy": import_policy,
                               "is_cover": req.is_cover, "is_live": req.is_live,
                               "is_alternate": req.is_alternate,
                               "is_uncensored": req.is_uncensored,

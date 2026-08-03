@@ -12,3 +12,18 @@ export class PlaybackSessionGuard {
   }
   releaseTransition(session: number): void { this.transitioned.delete(session); }
 }
+
+export function classifyFullscreenChange(
+  wasNativeFullscreen: boolean,
+  isNativeFullscreen: boolean,
+  profile: "browser" | "tv" | "cast",
+): { exited: boolean; recoverVideoSurface: boolean } {
+  const exited = wasNativeFullscreen && !isNativeFullscreen;
+  return {
+    exited,
+    // Desktop uses a separate audio master, so its muted video compositor can
+    // be remounted without interrupting sound. TV/Cast owns one combined
+    // stream and must never be restarted just to repair a desktop-only layer.
+    recoverVideoSurface: exited && profile === "browser",
+  };
+}

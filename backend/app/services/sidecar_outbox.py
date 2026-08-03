@@ -134,3 +134,46 @@ def outbox_stats(db: Session) -> dict[str, int]:
     for (status,) in rows:
         result[status] = result.get(status, 0) + 1
     return result
+
+
+def schedule_stale_sidecars(db: Session) -> int:
+    """Repair missing outbox intent from revision or schema drift.
+
+    A sidecar can have the current entity revision while still using an older
+    document schema.  Startup reconciliation must therefore compare both; this
+    is what makes an in-place application upgrade also migrate the portable
+    library representation without requiring a metadata edit for every video.
+    """
+    from app.services.playarr_xml import (
+        PLAYARR_XML_VERSION,
+        find_playarr_xml,
+        parse_playarr_xml,
+    )
+
+    scheduled = 0
+    for video in db.query(VideoItem).filter(VideoItem.folder_path.isnot(None)).all():
+        latest = db.query(SidecarOutbox).filter(
+            SidecarOutbox.video_id == video.id,
+        ).order_by(SidecarOutbox.created_at.desc()).first()
+        if latest is not None and latest.status in {"pending", "retry", "running", "failed", "cancelled"}:
+            continue
+        actual_revision = 0
+        actual_schema_version = None
+        path = find_playarr_xml(video.folder_path, video_file=video.file_path)
+        if path:
+            try:
+                parsed = parse_playarr_xml(path) or {}
+                actual_revision = int(parsed.get("entity_revision") or 0)
+                actual_schema_version = str(parsed.get("xml_version") or "1")
+            except Exception:
+                actual_revision = 0
+                actual_schema_version = None
+        if (
+            actual_revision < int(video.revision or 1)
+            or actual_schema_version != PLAYARR_XML_VERSION
+        ):
+            schedule_sidecar_write(db, video)
+            scheduled += 1
+    if scheduled:
+        db.commit()
+    return scheduled

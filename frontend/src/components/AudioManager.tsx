@@ -34,7 +34,14 @@ export function AudioManager() {
     const el = audioRef.current;
     if (!el) return;
     if (tvMode) {
+      // TV/Cast owns one combined media stream. Fully detach the desktop audio
+      // source instead of merely pausing it: a paused element near EOF can
+      // still deliver a delayed `ended` event and advance the shared queue a
+      // second time after the TV video has already moved on.
       el.pause();
+      el.removeAttribute("src");
+      el.load();
+      prevVideoIdRef.current = null;
       return;
     }
     if (videoId === null) {
@@ -71,40 +78,41 @@ export function AudioManager() {
   const seekApplied = useRef(false);
   useEffect(() => {
     const el = audioRef.current;
-    if (!el || videoId === null) return;
+    if (!el || videoId === null || tvMode) return;
     // Only seek if difference is significant (>1s), and not from our own timeupdate
     if (Math.abs(el.currentTime - storeCurrentTime) > 1 && !seekApplied.current) {
       el.currentTime = storeCurrentTime;
     }
     seekApplied.current = false;
-  }, [storeCurrentTime, videoId]);
+  }, [storeCurrentTime, tvMode, videoId]);
 
   const onTimeUpdate = useCallback(() => {
     const el = audioRef.current;
-    if (!el) return;
+    if (!el || tvMode) return;
     seekApplied.current = true;
     setCurrentTime(el.currentTime);
-  }, [setCurrentTime]);
+  }, [setCurrentTime, tvMode]);
 
   const onLoadedMetadata = useCallback(() => {
     const el = audioRef.current;
-    if (!el) return;
+    if (!el || tvMode) return;
     if (Number.isFinite(el.duration) && el.duration > 0) {
       setDuration(el.duration);
     }
     // Auto‐play after loading
     if (isPlaying) el.play().catch(() => {});
-  }, [setDuration, isPlaying]);
+  }, [setDuration, isPlaying, tvMode]);
 
   const onDurationChange = useCallback(() => {
     const el = audioRef.current;
-    if (!el) return;
+    if (!el || tvMode) return;
     if (Number.isFinite(el.duration) && el.duration > 0) {
       setDuration(el.duration);
     }
-  }, [setDuration]);
+  }, [setDuration, tvMode]);
 
   const onEnded = useCallback(() => {
+    if (tvMode) return;
     if (repeat === "one") {
       const el = audioRef.current;
       if (el) {
@@ -114,14 +122,14 @@ export function AudioManager() {
     } else {
       next();
     }
-  }, [repeat, next]);
+  }, [repeat, next, tvMode]);
 
   // Record playback history
   const onPause = useCallback(() => {
     const el = audioRef.current;
-    if (!el || !videoId || el.currentTime < 2) return;
+    if (!el || tvMode || !videoId || el.currentTime < 2) return;
     playbackApi.recordHistory(videoId, Math.floor(el.currentTime)).catch(() => {});
-  }, [videoId]);
+  }, [tvMode, videoId]);
 
   return (
     <audio

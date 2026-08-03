@@ -10,7 +10,14 @@ from app.services.deployment_profile import (
 
 
 def _settings(profile="single_process"):
-    return SimpleNamespace(deployment_profile=profile, redis_url="redis://example/0")
+    return SimpleNamespace(
+        deployment_profile=profile,
+        redis_url="redis://example/0",
+        database_url=(
+            "postgresql+psycopg://playarr:test@example/playarr"
+            if profile == "redis" else "sqlite:///playarr.db"
+        ),
+    )
 
 
 def test_single_process_refuses_multiple_web_workers():
@@ -37,6 +44,15 @@ def test_redis_profile_refuses_silent_local_fallback():
     assert validate_deployment_profile(
         _settings("redis"), environment={}, probe_redis=lambda _url: True,
     )["redis_reachable"] is True
+
+
+def test_redis_profile_refuses_sqlite_across_processes():
+    settings = _settings("redis")
+    settings.database_url = "sqlite:///playarr.db"
+    with pytest.raises(UnsafeDeploymentProfile, match="server database"):
+        validate_deployment_profile(
+            settings, environment={}, probe_redis=lambda _url: True,
+        )
 
 
 def test_gunicorn_worker_argument_is_detected():

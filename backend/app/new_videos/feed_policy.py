@@ -2,38 +2,41 @@
 
 
 def diversity_rerank(scored: list[tuple], limit: int) -> list[tuple]:
-    """Prefer artist diversity without discarding the backfill pool."""
+    """Round-robin artists without discarding the ranked backfill pool.
+
+    A simple per-artist cap still lets the highest-scoring artist occupy the
+    first, third and fifth slots. Grouping first and then taking one item per
+    artist per pass makes the visible row genuinely varied while retaining the
+    original score order within each artist's recommendations.
+    """
     if not scored or limit <= 1:
         return scored
-    cap = max(1, int(limit * 0.20))
-    remaining = list(scored)
+
+    buckets: dict[str, list[tuple]] = {}
+    bucket_order: list[str] = []
+    for index, item in enumerate(scored):
+        artist = (item[0].artist or "").strip().casefold()
+        # Unknown artists must not collapse into one artificial mega-artist.
+        key = artist or f"__unknown_{index}"
+        if key not in buckets:
+            buckets[key] = []
+            bucket_order.append(key)
+        buckets[key].append(item)
+
     visible: list[tuple] = []
-    artist_counts: dict[str, int] = {}
-
-    def artist_key(item: tuple) -> str:
-        return (item[0].artist or "").strip().casefold()
-
-    while remaining and len(visible) < limit:
-        previous = artist_key(visible[-1]) if visible else ""
-        selected_index = next((
-            index for index, item in enumerate(remaining)
-            if not artist_key(item) or (
-                artist_key(item) != previous
-                and artist_counts.get(artist_key(item), 0) < cap
-            )
-        ), None)
-        if selected_index is None:
-            selected_index = next((
-                index for index, item in enumerate(remaining)
-                if not artist_key(item) or artist_key(item) != previous
-            ), None)
-        if selected_index is None:
-            selected_index = 0
-        selected = remaining.pop(selected_index)
-        visible.append(selected)
-        artist = artist_key(selected)
-        if artist:
-            artist_counts[artist] = artist_counts.get(artist, 0) + 1
+    pass_index = 0
+    while len(visible) < limit:
+        added = False
+        for key in bucket_order:
+            bucket = buckets[key]
+            if pass_index < len(bucket):
+                visible.append(bucket[pass_index])
+                added = True
+                if len(visible) == limit:
+                    break
+        if not added:
+            break
+        pass_index += 1
 
     selected_ids = {id(item) for item in visible}
     return visible + [item for item in scored if id(item) not in selected_ids]

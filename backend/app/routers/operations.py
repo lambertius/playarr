@@ -1,5 +1,6 @@
 """Read-only API for durable operation state and backlog diagnostics."""
 import subprocess
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, inspect, text
@@ -132,6 +133,52 @@ def migration_status_report() -> dict:
             "diagnostics_id": None,
         })
     return report
+
+
+@router.get("/sidecars/failed")
+def failed_sidecars(db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.query(SidecarOutbox).filter(
+        SidecarOutbox.status == "failed",
+    ).order_by(SidecarOutbox.created_at).all()
+    return [{
+        "id": row.id,
+        "video_id": row.video_id,
+        "entity_stable_id": row.entity_stable_id,
+        "target_path": row.target_path,
+        "entity_revision": row.entity_revision,
+        "attempts": row.attempts,
+        "error": row.error_json,
+        "created_at": row.created_at,
+    } for row in rows]
+
+
+@router.post("/sidecars/{outbox_id}/retry")
+def retry_sidecar(outbox_id: str, db: Session = Depends(get_db)) -> dict:
+    row = db.get(SidecarOutbox, outbox_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Sidecar operation not found")
+    if row.status not in {"failed", "retry"}:
+        raise HTTPException(status_code=409, detail=f"Sidecar operation is {row.status}")
+    row.status = "retry"
+    row.attempts = 0
+    row.error_json = None
+    row.completed_at = None
+    db.commit()
+    return {"id": row.id, "status": row.status}
+
+
+@router.post("/sidecars/{outbox_id}/cancel")
+def cancel_sidecar(outbox_id: str, db: Session = Depends(get_db)) -> dict:
+    row = db.get(SidecarOutbox, outbox_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Sidecar operation not found")
+    if row.status not in {"pending", "retry", "failed"}:
+        raise HTTPException(status_code=409, detail=f"Sidecar operation is {row.status}")
+    row.status = "cancelled"
+    row.error_json = {"code": "cancelled_by_user", "retryable": False}
+    row.completed_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"id": row.id, "status": row.status}
 
 
 @router.get("/{operation_id}")

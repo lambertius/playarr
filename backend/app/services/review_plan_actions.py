@@ -82,7 +82,7 @@ def describe_plan(db: Session, case: ReviewCase, actions: list[dict]) -> dict[st
     return consequences
 
 
-def _archive_delete(db: Session, video: VideoItem, command_id: str) -> str | None:
+def _archive_delete(db: Session, video: VideoItem, review_plan_id: str) -> str | None:
     paths = _companion_paths(video)
     if not paths:
         db.delete(video)
@@ -105,17 +105,22 @@ def _archive_delete(db: Session, video: VideoItem, command_id: str) -> str | Non
     operation = create_file_set_operation(
         db, video, "delete", transitions,
         database_updates={"file_path": main_destination, "folder_path": str(destination_root)},
-        metadata={"reason": "review_delete", "review_case_command": command_id},
-        command_id=command_id,
+        # A review action plan is not a MutationCommand. Keep its identifier in
+        # the journal metadata instead of violating file_operations.command_id's
+        # foreign key to mutation_commands.id.
+        metadata={"reason": "review_delete", "review_plan_id": review_plan_id},
     )
     execute_file_operation(db, operation.id)
     db.delete(video)
     return operation.id
 
 
-def apply_plan(db: Session, case: ReviewCase, actions: list[dict], command_id: str) -> dict[str, list]:
+def apply_plan(db: Session, case: ReviewCase, actions: list[dict], command_id: str) -> dict[str, Any]:
     videos = _video_map(db, case)
-    result: dict[str, list] = {"file_operation_ids": [], "job_ids": []}
+    result: dict[str, Any] = {
+        "file_operation_ids": [], "job_ids": [], "rename_command_ids": [],
+        "notify_rename": False,
+    }
     dispatches: list[dict] = []
     for action in actions:
         action_type = action.get("type")
@@ -127,9 +132,25 @@ def apply_plan(db: Session, case: ReviewCase, actions: list[dict], command_id: s
         elif action_type == "reclassify" and video is not None:
             video.version_type = action["version_type"]
             video.revision += 1
+            from app.services.sidecar_outbox import schedule_sidecar_write
+            schedule_sidecar_write(db, video)
+            if video.file_path:
+                from app.services.rename_operations import enqueue_expected_rename
+                try:
+                    operation, rename_command, _created = enqueue_expected_rename(
+                        db, video,
+                        idempotency_key=f"review-reclassify:{command_id}:{video.stable_id}",
+                    )
+                    result["file_operation_ids"].append(operation.id)
+                    result["rename_command_ids"].append(rename_command.id)
+                    result["notify_rename"] = True
+                except (FileNotFoundError, ValueError):
+                    pass
         elif action_type == "relink" and video is not None:
             video.track_id = int(action["canonical_track_id"])
             video.revision += 1
+            from app.services.sidecar_outbox import schedule_sidecar_write
+            schedule_sidecar_write(db, video)
         elif action_type in {"rescrape", "normalise"} and video is not None:
             job_type = "metadata_scrape" if action_type == "rescrape" else "normalize"
             job = ProcessingJob(
@@ -147,7 +168,10 @@ def apply_plan(db: Session, case: ReviewCase, actions: list[dict], command_id: s
     return result
 
 
-def dispatch_plan_jobs(result: dict[str, list]) -> None:
+def dispatch_plan_jobs(result: dict[str, Any]) -> None:
+    if result.pop("notify_rename", False):
+        from app.services.rename_operations import notify_expected_rename
+        notify_expected_rename()
     for descriptor in result.pop("dispatches", []):
         action_type = descriptor["action_type"]
         job_id = descriptor["job_id"]

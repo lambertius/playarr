@@ -334,6 +334,36 @@ def _normalize_title(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _complete_candidate_metadata(candidate: RecommendationCandidate) -> None:
+    """Fill safe display metadata consistently across every source strategy."""
+    candidate.provider = (candidate.provider or "youtube").strip()
+    candidate.provider_video_id = (candidate.provider_video_id or "").strip()
+    candidate.title = (candidate.title or "").strip()
+    candidate.artist = (candidate.artist or "").strip()
+    candidate.channel = (candidate.channel or "").strip()
+
+    if not candidate.artist and " - " in candidate.title:
+        candidate.artist = candidate.title.split(" - ", 1)[0].strip()
+    if not candidate.artist and candidate.channel:
+        candidate.artist = re.sub(
+            r"\s*(?:-\s*Topic|VEVO)\s*$", "", candidate.channel,
+            flags=re.IGNORECASE,
+        ).strip()
+    if not candidate.channel and candidate.artist:
+        candidate.channel = candidate.artist
+    if not candidate.title:
+        candidate.title = (
+            f"{candidate.artist} music video" if candidate.artist
+            else f"Video {candidate.provider_video_id}"
+        )
+    if not candidate.url and candidate.provider == "youtube" and candidate.provider_video_id:
+        candidate.url = f"https://www.youtube.com/watch?v={candidate.provider_video_id}"
+    if not candidate.thumbnail_url and candidate.provider == "youtube" and candidate.provider_video_id:
+        candidate.thumbnail_url = f"https://i.ytimg.com/vi/{candidate.provider_video_id}/hqdefault.jpg"
+    if not candidate.reasons:
+        candidate.reasons = ["Recommended from your library and discovery settings"]
+
+
 def _get_library_titles(db: Session) -> set[tuple[str, str]]:
     """Return set of normalized (artist, title) tuples from the library.
 
@@ -610,14 +640,18 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
     for a, t, vid in all_seeds:
         artist_seeds.setdefault(a.lower(), []).append((a, t, vid))
 
-    # Phase 1: seed-based matches (fast, no network)
-    for info in library_artists:
-        if info["count"] < min_owned:
-            continue
-        artist_lower = info["artist"].lower()
-        seeds = artist_seeds.get(artist_lower, [])
-        added = 0
-        for artist, title, vid_id in seeds:
+    eligible_artists = [
+        info for info in library_artists if info["count"] >= min_owned
+    ]
+
+    # Phase 1: take one seed from every artist before taking a second.
+    for seed_index in range(max_per_artist):
+        for info in eligible_artists:
+            artist_lower = info["artist"].lower()
+            seeds = artist_seeds.get(artist_lower, [])
+            if seed_index >= len(seeds):
+                continue
+            artist, title, vid_id = seeds[seed_index]
             if vid_id in exclude_ids:
                 continue
             if (_normalize_title(artist), _normalize_title(title)) in library_titles:
@@ -635,8 +669,7 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
                 freshness_score=0.30,
                 reasons=[f"You already have {info['count']} {artist} videos — this one is missing"],
             ))
-            added += 1
-            if added >= max_per_artist:
+            if len(candidates) >= limit:
                 break
         if len(candidates) >= limit:
             break
@@ -645,10 +678,6 @@ def _generate_by_artist_candidates(db: Session, limit: int = 20) -> list[Recomme
     if len(candidates) < limit:
         seen_ids = {c.provider_video_id for c in candidates}
         # Eligible artists: have enough library videos, shuffle for variety
-        eligible_artists = [
-            info for info in library_artists
-            if info["count"] >= min_owned
-        ]
         random.shuffle(eligible_artists)
         # Limit searches to keep refresh fast (max 8 artist searches)
         max_searches = min(8, len(eligible_artists))
@@ -745,8 +774,18 @@ def _generate_taste_candidates(db: Session, limit: int = 20) -> list[Recommendat
             if artist_name not in artist_reasons:
                 artist_reasons[artist_name] = f"played {play_count} times"
 
-    if not artist_scores:
-        return []
+    # The contents of the library are a preference signal too. This keeps the
+    # shelf useful before a user has accumulated ratings or playback history.
+    for info in _get_library_artists(db)[:30]:
+        artist_name = info["artist"]
+        library_affinity = min(0.45, 0.12 + (info["count"] * 0.03))
+        if info.get("avg_rating"):
+            library_affinity += min(0.25, info["avg_rating"] * 0.05)
+        artist_scores[artist_name] = artist_scores.get(artist_name, 0) + library_affinity
+        artist_reasons.setdefault(
+            artist_name,
+            f"{info['count']} video{'s' if info['count'] != 1 else ''} in your library",
+        )
 
     # Sort by preference score descending
     ranked_artists = sorted(artist_scores.items(), key=lambda x: x[1], reverse=True)
@@ -833,6 +872,22 @@ def _generate_taste_candidates(db: Session, limit: int = 20) -> list[Recommendat
                 candidates.append(c)
                 if len(candidates) >= limit:
                     break
+
+    # If personalised sources are sparse, use an honest discovery fallback
+    # instead of leaving most or all of this category empty.
+    if len(candidates) < limit:
+        seen_ids = {c.provider_video_id for c in candidates}
+        for candidate in _generate_famous_candidates(db, limit=limit * 2):
+            if candidate.provider_video_id in seen_ids:
+                continue
+            candidate.category = "taste"
+            candidate.reasons = [
+                "Discovery pick while Playarr learns more from your ratings and plays",
+            ]
+            seen_ids.add(candidate.provider_video_id)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                break
 
     return candidates
 
@@ -1017,10 +1072,17 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
     ).first()
     previous_provider_ids: set[str] = set()
     if snapshot and snapshot.payload_json:
+        previous_visible_count = int(
+            (snapshot.source_summary_json or {}).get(
+                "visible_count", len(snapshot.payload_json),
+            )
+        )
         previous_provider_ids = {
             provider_id
             for (provider_id,) in db.query(SuggestedVideo.provider_video_id)
-            .filter(SuggestedVideo.id.in_(snapshot.payload_json)).all()
+            .filter(
+                SuggestedVideo.id.in_(snapshot.payload_json[:previous_visible_count]),
+            ).all()
             if provider_id
         }
 
@@ -1055,6 +1117,7 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
 
     # Score trust
     for c in candidates:
+        _complete_candidate_metadata(c)
         c.trust_result = score_trust(
             title=c.title,
             channel=c.channel,
@@ -1110,28 +1173,29 @@ def refresh_category(db: Session, category: str, force: bool = False) -> int:
     else:
         deduped = _diversity_rerank(deduped, limit)
 
-    # Persist ALL candidates (extras serve as backfill pool when
-    # snapshot videos are dismissed), but only put top N in snapshot.
+    # Persist all candidates and keep this generation's reserve IDs in the
+    # snapshot after the visible prefix. That prevents a Fresh list from
+    # immediately backfilling with stale candidates from an older generation.
     sv_ids = []
     for candidate, score in deduped:
         sv = _persist_candidate(db, candidate, score)
         sv_ids.append(sv.id)
 
-    snapshot_ids = sv_ids[:limit]
+    visible_ids = sv_ids[:limit]
     genuinely_new = sum(
         1 for candidate, _score in deduped[:limit]
         if candidate.provider_video_id not in previous_provider_ids
     )
-    _update_snapshot(db, category, snapshot_ids, source_summary={
+    _update_snapshot(db, category, sv_ids, source_summary={
         "genuinely_new": genuinely_new,
-        "visible_count": len(snapshot_ids),
+        "visible_count": len(visible_ids),
         "previous_count": len(previous_provider_ids),
         "fresh_requested": force,
     })
     db.commit()
 
     logger.info(f"Category '{category}': generated {len(deduped)} suggestions "
-                f"({len(snapshot_ids)} in snapshot, {len(sv_ids) - len(snapshot_ids)} backfill pool)")
+                f"({len(visible_ids)} visible, {len(sv_ids) - len(visible_ids)} in the current reserve)")
     return len(deduped)
 
 
@@ -1198,6 +1262,18 @@ def get_feed(db: Session) -> dict:
         elif d.dismissal_type == "temporary" and d.suggested_video_id:
             dismissed_temp_ids.add(d.suggested_video_id)
 
+    # Hide accepted add/dismiss commands before the mutation actor processes
+    # them. The UI can acknowledge immediately and a replacement is already
+    # selected by the next feed request.
+    from app.models import MutationCommand
+    pending_stable_ids = {
+        stable_id for (stable_id,) in db.query(MutationCommand.entity_stable_id)
+        .filter(
+            MutationCommand.command_type.in_(("new_videos.add", "new_videos.dismiss")),
+            MutationCommand.status.in_(("pending", "running")),
+        ).all()
+    }
+
     # Also filter by library contents (video ID + title match)
     library_ids = _get_library_video_ids(db)
     library_titles = _get_library_titles(db)
@@ -1232,24 +1308,30 @@ def get_feed(db: Session) -> dict:
             }
             continue
 
-        # Fetch videos in snapshot order
+        # Rank the snapshot and its reserve together. Filtering before the
+        # diversity pass means a cleared slot is replaced in the same response
+        # whenever an eligible reserve candidate exists.
         video_ids = snapshot.payload_json
-        videos = db.query(SuggestedVideo).filter(
-            SuggestedVideo.id.in_(video_ids)
-        ).all()
-        video_map = {v.id: v for v in videos}
-
-        ordered = []
-        snapshot_ids_used = set()
-        for vid in video_ids:
+        snapshot_id_set = set(video_ids)
+        all_videos = db.query(SuggestedVideo).filter(
+            SuggestedVideo.category == cat,
+        ).order_by(SuggestedVideo.recommendation_score.desc()).all()
+        video_map = {v.id: v for v in all_videos}
+        ranked_ids = list(video_ids) + [
+            v.id for v in all_videos if v.id not in snapshot_id_set
+        ]
+        eligible: list[SuggestedVideo] = []
+        used_provider_ids: set[str] = set()
+        for vid in ranked_ids:
             v = video_map.get(vid)
-            if not v:
+            if not v or v.provider_video_id in used_provider_ids:
                 continue
-            snapshot_ids_used.add(vid)
             # Skip dismissed
             if v.provider_video_id in dismissed_perm_ids:
                 continue
             if v.id in dismissed_temp_ids:
+                continue
+            if f"{v.provider}:{v.provider_video_id}" in pending_stable_ids:
                 continue
             # Skip if already in library (video ID or title match)
             if v.provider_video_id in library_ids:
@@ -1263,42 +1345,17 @@ def get_feed(db: Session) -> dict:
                 raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
                 if (_normalize_title(v.artist), _normalize_title(raw_title)) in library_titles:
                     continue
-            ordered.append(_serialize_video(v, in_cart=v.id in cart_video_ids))
+            used_provider_ids.add(v.provider_video_id)
+            eligible.append(v)
 
-        # Backfill from other SuggestedVideo rows for this category if
-        # dismissals caused the count to drop below the target.
-        if len(ordered) < limit:
-            used_provider_ids = {s["provider_video_id"] for s in ordered}
-            backfill_q = (
-                db.query(SuggestedVideo)
-                .filter(
-                    SuggestedVideo.category == cat,
-                    SuggestedVideo.id.notin_(snapshot_ids_used),
-                )
-                .order_by(SuggestedVideo.recommendation_score.desc())
-                .limit((limit - len(ordered)) * 2)
-                .all()
-            )
-            for v in backfill_q:
-                if len(ordered) >= limit:
-                    break
-                if v.provider_video_id in dismissed_perm_ids:
-                    continue
-                if v.id in dismissed_temp_ids:
-                    continue
-                if v.provider_video_id in used_provider_ids:
-                    continue
-                if v.provider_video_id in library_ids:
-                    continue
-                if v.artist and v.title:
-                    raw_title = v.title
-                    if " - " in raw_title:
-                        raw_title = raw_title.split(" - ", 1)[1]
-                    raw_title = re.sub(r"\s*\(.*?\)\s*$", "", raw_title).strip()
-                    if (_normalize_title(v.artist), _normalize_title(raw_title)) in library_titles:
-                        continue
-                used_provider_ids.add(v.provider_video_id)
-                ordered.append(_serialize_video(v, in_cart=v.id in cart_video_ids))
+        reranked = _diversity_rerank(
+            [(video, video.recommendation_score or 0.0) for video in eligible],
+            limit,
+        )[:limit]
+        ordered = [
+            _serialize_video(video, in_cart=video.id in cart_video_ids)
+            for video, _score in reranked
+        ]
 
         result["categories"][cat] = {
             "videos": ordered,

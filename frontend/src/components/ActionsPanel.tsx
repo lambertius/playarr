@@ -1,7 +1,8 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
 import {
-  RefreshCw, Volume2, Download, Undo2, Trash2,
+  RefreshCw, RotateCcw, Volume2, Download, Undo2, Trash2,
   Wrench, Wand2, FileText, Sparkles, Fingerprint,
   FileCheck, Globe, Loader2, Bot, Check, ChevronDown,
   AlertTriangle, Lock, CheckCheck, Zap, FolderSync,
@@ -65,6 +66,17 @@ interface ActionItem {
   pending?: boolean;
   variant?: "default" | "danger" | "success";
   tooltip?: string;
+}
+
+export function buildArchiveFocusHref(
+  videoId: number,
+  artist?: string | null,
+  title?: string | null,
+): string {
+  const params = new URLSearchParams({ focus_video_id: String(videoId) });
+  const searchLabel = title?.trim() || artist?.trim();
+  if (searchLabel) params.set("search", searchLabel);
+  return `/archive?${params.toString()}`;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -761,10 +773,11 @@ function EditTrackIDsPopup({
    Main Actions Panel
    ═══════════════════════════════════════════════════════════ */
 
-export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, filePath, artist, title, resolutionLabel, processingState, versionType, alternateVersionLabel, isLocked, excludeFromEditorScan, className }: ActionsPanelProps) {
+export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, filePath, artist, title, resolutionLabel, processingState, versionType, alternateVersionLabel, isLocked, hasArchive = false, excludeFromEditorScan, className }: ActionsPanelProps) {
   const { toast } = useToast();
   const { confirm, dialog } = useConfirm();
   const qc = useQueryClient();
+  const navigate = useNavigate();
 
   /* ── Helper: check if a processing step was completed ── */
   const isStepDone = (step: string) =>
@@ -1038,6 +1051,12 @@ export function ActionsPanel({ videoId, hasUndoable, quality: q, onDeleted, file
   ];
 
   const fileActions: ActionItem[] = [
+    ...(hasArchive ? [{
+      label: "Restore",
+      icon: <RotateCcw size={14} />,
+      tooltip: "Open this video's linked recovery versions in Archive.",
+      onClick: () => navigate(buildArchiveFocusHref(videoId, artist, title)),
+    }] : []),
     {
       label: "Open Folder",
       icon: <FolderOpen size={14} />,

@@ -13,6 +13,7 @@ import { playbackApi, jobsApi, videoEditorApi } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
 import type { EditorQueueItem, EncodeRequest, EncodePlan, CropPreviewResponse, LetterboxScanItem } from "@/types";
+import { getPref, setPref } from "@/lib/preferences";
 
 // ── Aspect ratio presets ──────────────────────────────────
 const RATIO_PRESETS = [
@@ -36,6 +37,13 @@ const MANUAL_IDS_KEY = "playarr_editor_manual_ids";
 
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
+}
+
+function formatBitrate(bitsPerSecond?: number | null): string {
+  if (!bitsPerSecond) return "unknown";
+  return bitsPerSecond >= 1_000_000
+    ? `${(bitsPerSecond / 1_000_000).toFixed(1)} Mbps`
+    : `${Math.round(bitsPerSecond / 1000)} kbps`;
 }
 
 function loadQueueIds(): number[] {
@@ -165,6 +173,7 @@ function NumericStepper({ value, onChange, min, max, step = 1, disabled, classNa
 export function VideoEditorPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
+  const workspacePrefs = getPref<Record<string, unknown>>("workspace", {});
 
   // Queue state is durable and shared by the backend.
   const [queueIds, setQueueIds] = useState<number[]>([]);
@@ -194,11 +203,15 @@ export function VideoEditorPage() {
   }>>({});
 
   // Global defaults
-  const [globalProfile, setGlobalProfile] = useState<EncodeRequest["profile"]>("source_fidelity");
-  const [globalCrf, setGlobalCrf] = useState(18);
-  const [globalPreset, setGlobalPreset] = useState("medium");
-  const [globalAudioPassthrough, setGlobalAudioPassthrough] = useState(true);
-  const [globalRatio, setGlobalRatio] = useState("original");
+  const [globalProfile, setGlobalProfile] = useState<EncodeRequest["profile"]>(
+    () => (workspacePrefs.videoEditorProfile as EncodeRequest["profile"]) || "source_fidelity",
+  );
+  const [globalCrf, setGlobalCrf] = useState(() => Number(workspacePrefs.videoEditorCrf ?? 14));
+  const [globalPreset, setGlobalPreset] = useState(() => String(workspacePrefs.videoEditorPreset ?? "slow"));
+  const [globalAudioPassthrough, setGlobalAudioPassthrough] = useState(
+    () => workspacePrefs.videoEditorAudioPassthrough !== false,
+  );
+  const [globalRatio, setGlobalRatio] = useState(() => String(workspacePrefs.videoEditorRatio ?? "original"));
 
   // Scan state
   const [scanJobId, setScanJobId] = useState<number | null>(null);
@@ -212,15 +225,30 @@ export function VideoEditorPage() {
 
   // Tag filter for queue display
   type TagFilter = "all" | "letterboxed" | "manual";
-  const [tagFilter, setTagFilter] = useState<TagFilter>("all");
+  const [tagFilter, setTagFilter] = useState<TagFilter>(() => (workspacePrefs.videoEditorTagFilter as TagFilter) || "all");
 
   // Queue display: sorting and pagination
   type SortField = "artist" | "album" | "title" | "created_at" | "editor_order";
   type SortDir = "asc" | "desc";
-  const [sortBy, setSortBy] = useState<SortField>("editor_order");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [pageSize, setPageSize] = useState<number>(10);
+  const [sortBy, setSortBy] = useState<SortField>(() => (workspacePrefs.videoEditorSort as SortField) || "editor_order");
+  const [sortDir, setSortDir] = useState<SortDir>(() => (workspacePrefs.videoEditorDirection as SortDir) || "asc");
+  const [pageSize, setPageSize] = useState<number>(() => Number(workspacePrefs.videoEditorPageSize ?? 10));
   const [currentPage, setCurrentPage] = useState(1);
+
+  useEffect(() => {
+    setPref("workspace", {
+      ...getPref<Record<string, unknown>>("workspace", {}),
+      videoEditorTagFilter: tagFilter,
+      videoEditorSort: sortBy,
+      videoEditorDirection: sortDir,
+      videoEditorPageSize: pageSize,
+      videoEditorProfile: globalProfile,
+      videoEditorCrf: globalCrf,
+      videoEditorPreset: globalPreset,
+      videoEditorAudioPassthrough: globalAudioPassthrough,
+      videoEditorRatio: globalRatio,
+    });
+  }, [tagFilter, sortBy, sortDir, pageSize, globalProfile, globalCrf, globalPreset, globalAudioPassthrough, globalRatio]);
 
   // Encode job tracking: list of { videoId, jobId } — persisted so it survives page navigation
   const [encodeJobs, setEncodeJobs] = useState<{ videoId: number; jobId: number }[]>([]);
@@ -603,7 +631,7 @@ export function VideoEditorPage() {
 
   // ── Get settings for a specific item ────────────────────
   const getItemSettings = useCallback((videoId: number) => {
-    return itemSettings[videoId] ?? {
+    const defaults = {
       profile: globalProfile,
       ratio: globalRatio,
       customRatioW: 16,
@@ -614,11 +642,12 @@ export function VideoEditorPage() {
       trimEnabled: false,
       trimStart: 0,
       trimEnd: 0,
-      audioCodec: "aac",
+      audioCodec: "auto",
       audioBitrate: "auto",
       cropLinkLR: false,
       cropLinkTB: false,
     };
+    return Object.assign(defaults, itemSettings[videoId] || {});
   }, [itemSettings, globalProfile, globalRatio, globalCrf, globalPreset, globalAudioPassthrough]);
 
   const settingsSaveTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
@@ -1050,7 +1079,7 @@ export function VideoEditorPage() {
     }
     // Audio codec/bitrate apply whenever audio is re-encoded (not only for trim)
     if (!s.audioPassthrough) {
-      req.audio_codec = s.audioCodec;
+      req.audio_codec = s.audioCodec !== "auto" ? s.audioCodec : undefined;
       req.audio_bitrate = s.audioBitrate !== "auto" ? s.audioBitrate : undefined;
     }
     return req;
@@ -1278,7 +1307,7 @@ export function VideoEditorPage() {
                 <option value="balanced">Balanced (8-bit SDR)</option>
                 <option value="custom">Custom</option>
               </select>
-              <span className="text-[10px] text-text-muted">Source fidelity preserves HDR, bit depth, timing, metadata, chapters and audio whenever possible.</span>
+              <span className="text-[10px] text-text-muted">Source fidelity keeps resolution and timing, uses source bitrate for a quality-safe rate envelope, preserves HDR/bit depth, and uses lossless audio when stream copy is unavailable.</span>
             </label>
             <div className="grid grid-cols-2 gap-2">
               <label className="text-xs text-text-secondary">
@@ -1290,7 +1319,7 @@ export function VideoEditorPage() {
                   onChange={e => setGlobalCrf(Number(e.target.value))}
                   className="input-sm w-full mt-1"
                 />
-                <span className="text-[10px] text-text-muted">Lower = better (18 = visually lossless)</span>
+                <span className="text-[10px] text-text-muted">Lower = better (14 is the high-fidelity default)</span>
               </label>
               <label className="text-xs text-text-secondary">
                 Preset
@@ -1785,22 +1814,24 @@ export function VideoEditorPage() {
                     {/* Audio re-encode options — shown whenever audio passthrough is off */}
                     {!(selectedSettings?.audioPassthrough ?? globalAudioPassthrough) && (
                       <>
-                        <Tooltip content="AAC: universally compatible. Opus: better quality at low bitrates. FLAC: lossless (larger files).">
+                        <Tooltip content="Auto uses lossless ALAC for Source fidelity. Choose a lossy codec only when smaller files are more important than preserving the decoded source audio.">
                           <label className="text-xs text-text-secondary">
                             Audio codec
                             <select
-                              value={selectedSettings?.audioCodec ?? "aac"}
+                              value={selectedSettings?.audioCodec ?? "auto"}
                               onChange={e => updateItemSetting(selectedItem.video_id, { audioCodec: e.target.value })}
                               className="input-sm w-auto mt-1 block"
                             >
+                              <option value="auto">Auto (profile default)</option>
                               <option value="aac">AAC</option>
                               <option value="opus">Opus</option>
                               <option value="flac">FLAC (lossless)</option>
+                              <option value="alac">ALAC (lossless)</option>
                             </select>
                           </label>
                         </Tooltip>
 
-                        {(selectedSettings?.audioCodec ?? "aac") !== "flac" && (
+                        {["aac", "opus"].includes(selectedSettings?.audioCodec ?? "auto") && (
                           <Tooltip content="Auto matches the source bitrate. Higher values preserve more audio quality but increase file size.">
                             <label className="text-xs text-text-secondary">
                               Bitrate
@@ -2129,7 +2160,9 @@ export function VideoEditorPage() {
               preset: s.preset,
               audioText: s.audioPassthrough
                 ? "Copy original (passthrough)"
-                : `Re-encode ${s.audioCodec.toUpperCase()}${s.audioBitrate !== "auto" ? ` @ ${s.audioBitrate}` : " (auto bitrate)"}`,
+                : s.audioCodec === "auto"
+                  ? `Profile default (${encodeConfirmPlans[id]?.output.audio_codec?.toUpperCase() ?? "lossless"})`
+                  : `Re-encode ${s.audioCodec.toUpperCase()}${s.audioBitrate !== "auto" ? ` @ ${s.audioBitrate}` : " (auto bitrate)"}`,
               hasEdits: hasCrop || !!s.targetDar || hasTrim,
             };
           })}
@@ -2211,6 +2244,15 @@ function EncodeConfirmDialog({ rows, onCancel, onConfirm }: {
                   <li className="text-text-muted">
                     Profile: {r.plan.profile.replace("_", " ")} · {r.plan.output.video_encoder}/{r.plan.output.pixel_format}
                     {r.plan.source.hdr ? " · HDR retained" : ""} · {r.plan.output.extension} · timing/metadata/chapters preserved
+                  </li>
+                )}
+                {r.plan?.output.target_video_bitrate && (
+                  <li className="text-text-muted">
+                    Bitrate: source {formatBitrate(r.plan.source.video_bitrate)}
+                    {r.plan.output.adjusted_source_bitrate && r.plan.output.adjusted_source_bitrate !== r.plan.source.video_bitrate
+                      ? ` / codec-adjusted ${formatBitrate(r.plan.output.adjusted_source_bitrate)}` : ""}
+                    {` / quality reference ${formatBitrate(r.plan.output.target_video_bitrate)}`}
+                    {r.plan.output.maxrate ? ` / peak envelope ${formatBitrate(Number(r.plan.output.maxrate))}` : ""}
                   </li>
                 )}
                 {r.cropText && <li className="flex items-center gap-1.5"><Scissors size={10} className="text-accent flex-shrink-0" /> Crop: {r.cropText}</li>}
