@@ -50,6 +50,12 @@ def test_openapi_builds_and_static_command_routes_are_not_shadowed():
     assert "/api/resolve/videos/{video_id}" in paths
     assert "/api/resolve/{video_id}" not in paths
 
+    # UI-only routes are registered only when a frontend build is present, so
+    # they must never make the generated API contract environment-dependent.
+    assert "/" not in paths
+    assert "/vite.svg" not in paths
+    assert "/favicon.ico" not in paths
+
 
 def test_kodi_addon_and_export_routes_are_retired():
     paths = app.openapi()["paths"]

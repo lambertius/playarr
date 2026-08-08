@@ -11337,22 +11337,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/": {
-      "get": {
-        "operationId": "serve_index__get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Serve Index"
-      }
-    },
     "/api/ai/batch/enrich": {
       "post": {
         "description": "Batch AI enrichment for multiple videos.",
@@ -25873,38 +25857,6 @@
         "tags": [
           "Video Editor"
         ]
-      }
-    },
-    "/favicon.ico": {
-      "get": {
-        "operationId": "serve_favicon_favicon_ico_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Serve Favicon"
-      }
-    },
-    "/vite.svg": {
-      "get": {
-        "operationId": "serve_vite_svg_vite_svg_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Serve Vite Svg"
       }
     }
   }

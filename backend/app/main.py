@@ -1600,14 +1600,14 @@ if _frontend_dist is not None:
     app.add_middleware(SPAFallbackMiddleware)
 
     # Serve root-level static files (vite.svg, favicon.ico, etc.)
-    @app.get("/vite.svg")
+    @app.get("/vite.svg", include_in_schema=False)
     async def serve_vite_svg():
         svg = _frontend_dist / "vite.svg"
         if svg.is_file():
             return FileResponse(str(svg))
         return FileResponse(str(_index_html))
 
-    @app.get("/favicon.ico")
+    @app.get("/favicon.ico", include_in_schema=False)
     async def serve_favicon():
         fav = _frontend_dist / "favicon.ico"
         if fav.is_file():
@@ -1618,7 +1618,7 @@ if _frontend_dist is not None:
         return FileResponse(str(_index_html))
 
     # Root route — serves index.html directly (ensures / works without middleware)
-    @app.get("/")
+    @app.get("/", include_in_schema=False)
     async def serve_index():
         return FileResponse(str(_index_html))
 else:
