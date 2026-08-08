@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.11.1] - 2026-08-08
+
+### Fixed
+- **Windows console flashes while Playarr is open** — Queue health polling now launches ffmpeg, ffprobe and yt-dlp with `CREATE_NO_WINDOW`, and startup orphan-process cleanup is hidden too.
+
 ## [1.11.0] - 2026-08-01
 
 ### Added

@@ -17,6 +17,7 @@ from app.models import (
 )
 from app.services.mutation_coordinator import backlog_stats
 from app.services.sidecar_outbox import outbox_stats
+from app.subprocess_utils import HIDE_WINDOW
 
 router = APIRouter(prefix="/api/operations", tags=["Operations"])
 
@@ -24,7 +25,13 @@ router = APIRouter(prefix="/api/operations", tags=["Operations"])
 def _tool_version(path_resolver, *args: str) -> dict:
     try:
         path = path_resolver()
-        result = subprocess.run([path, *args], capture_output=True, text=True, timeout=8)
+        result = subprocess.run(
+            [path, *args],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            **HIDE_WINDOW,
+        )
         line = (result.stdout or result.stderr or "").splitlines()[0][:300]
         return {"available": result.returncode == 0, "version": line}
     except Exception as exc:

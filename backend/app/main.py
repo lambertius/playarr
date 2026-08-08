@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 
 from app.database import engine, Base
 from app.config import get_settings
+from app.subprocess_utils import HIDE_WINDOW
 from app.version import APP_VERSION
 from app.routers import library, jobs, playback, settings as settings_router
 from app.routers import preferences as preferences_router
@@ -492,6 +493,7 @@ def _kill_zombie_ffmpeg():
         result = _sp.run(
             ["taskkill", "/F", "/IM", "ffmpeg.exe"],
             capture_output=True, text=True, timeout=10,
+            **HIDE_WINDOW,
         )
         # taskkill returns 0 on success, 128 if no matching processes
         if result.returncode == 0:
