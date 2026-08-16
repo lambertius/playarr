@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.12.0] - 2026-08-16
+
+### Fixed
+- **TV playback no longer restarts a track after buffering** — transformed streams now retain one byte-stable, range-addressable representation across browser reconnects, and the TV player preserves its playhead if a media engine reports a same-track rollback or premature end.
+
 ## [1.11.1] - 2026-08-08
 
 ### Fixed

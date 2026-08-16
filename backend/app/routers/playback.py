@@ -9,7 +9,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from typing import Optional
 
 _POPEN_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
@@ -21,6 +20,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
 from app.models import VideoItem, PlaybackHistory, MediaAsset, AppSetting
+from app.runtime_dirs import get_runtime_dirs
+from app.services.playback_stream_cache import serve_transformed_media
 from app.services.preview_generator import generate_preview
 
 router = APIRouter(prefix="/api/playback", tags=["Playback"])
@@ -228,7 +229,9 @@ async def stream_video(
 
     # Compatibility mode: full video+audio transcode regardless of source codec.
     if transcode:
-        return _stream_compat(file_path, with_audio=True, audio_bitrate=_audio_bitrate(db))
+        return await _stream_compat(
+            request, file_path, with_audio=True, audio_bitrate=_audio_bitrate(db)
+        )
 
     # Check if container/codec combo needs remuxing for browser playback
     qs = item.quality_signature
@@ -254,7 +257,9 @@ async def stream_video(
             AppSetting.user_id.is_(None),
         ).first()
         bitrate = f"{row.value}k" if row else "256k"
-        return _stream_remuxed(file_path, transcode_audio=needs_audio_transcode, audio_bitrate=bitrate)
+        return await _stream_remuxed(
+            request, file_path, transcode_audio=needs_audio_transcode, audio_bitrate=bitrate
+        )
 
     if audio_codec and audio_codec.lower() not in _BROWSER_SAFE_AUDIO:
         row = db.query(AppSetting).filter(
@@ -262,7 +267,7 @@ async def stream_video(
             AppSetting.user_id.is_(None),
         ).first()
         bitrate = f"{row.value}k" if row else "256k"
-        return _stream_transcoded(file_path, audio_bitrate=bitrate)
+        return await _stream_transcoded(request, file_path, audio_bitrate=bitrate)
 
     # --- Standard raw streaming (browser-safe audio) ---
     stat = os.stat(file_path)
@@ -358,11 +363,11 @@ async def stream_video_only(
 
     # Compatibility mode: full video transcode (no audio), regardless of source.
     if transcode:
-        return _stream_compat(file_path, with_audio=False)
+        return await _stream_compat(request, file_path, with_audio=False)
 
     # MKV needs remux to MP4 (video-only, no audio transcode)
     if ext_lower in (".mkv",):
-        return _stream_remuxed_video_only(file_path)
+        return await _stream_remuxed_video_only(request, file_path)
 
     # MP4/WebM: serve raw file — muted element ignores audio track
     file_size = os.path.getsize(file_path)
@@ -788,7 +793,6 @@ def client_metrics(m: ClientPlaybackMetrics):
 _MAX_CONCURRENT_TRANSCODES = 3
 _transcode_sem = threading.BoundedSemaphore(_MAX_CONCURRENT_TRANSCODES)
 
-
 def _audio_bitrate(db: Session, default: str = "256k") -> str:
     """Configured AAC transcode bitrate (e.g. '256k')."""
     row = db.query(AppSetting).filter(
@@ -832,96 +836,34 @@ def _spawn_ffmpeg(cmd: list) -> subprocess.Popen:
     return process
 
 
-def _streaming_response(cmd: list, file_path: str, label: str, heavy: bool = False) -> StreamingResponse:
-    """Spawn an ffmpeg pipe lazily and wrap its stdout as a StreamingResponse
-    with throughput diagnostics and guaranteed cleanup on client disconnect.
-
-    ffmpeg is spawned *inside* the generator rather than eagerly: if the client
-    disconnects before the body is consumed, the generator is never iterated and
-    no process is ever started — so there is no orphaned ffmpeg to leak.
-
-    `heavy` marks a full re-encode (libx264); those acquire the transcode
-    semaphore so a burst of compat streams can't saturate the CPU. The acquire
-    runs on the threadpool thread that pumps this generator, so a queued request
-    simply holds its connection open without blocking the event loop.
-
-    The end-of-stream log line (throughput, time-to-first-byte, whether the
-    client read the whole thing) is a key signal for diagnosing network
-    drop-outs/hangs: a low sustained Mbps with an early disconnect points at the
-    client stalling, while a high ttfb points at slow transcode start-up.
-    """
-    name = os.path.basename(file_path)
-
-    def _generate():
-        acquired = False
-        if heavy:
-            _transcode_sem.acquire()
-            acquired = True
-        process = None
-        sent = 0
-        ttfb = None
-        natural_eof = False
-        start = time.monotonic()
-        try:
-            process = _spawn_ffmpeg(cmd)
-            _register_stream(file_path, process)
-            while True:
-                chunk = process.stdout.read(1024 * 1024)  # 1MB chunks
-                if not chunk:
-                    natural_eof = True
-                    break
-                if ttfb is None:
-                    ttfb = time.monotonic() - start
-                sent += len(chunk)
-                yield chunk
-        finally:
-            elapsed = time.monotonic() - start
-            if process is not None:
-                _unregister_stream(file_path, process)
-                # Force-kill immediately on disconnect to prevent orphaned processes
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                try:
-                    process.stdout.close()
-                except OSError:
-                    pass
-                try:
-                    process.wait(timeout=5)
-                except Exception:
-                    pass
-                mbps = (sent * 8 / 1_000_000 / elapsed) if elapsed > 0.01 else 0.0
-                logger.info(
-                    "Stream end [%s] %s: %.1f MB in %.1fs (%.1f Mbps), ttfb=%.2fs, ffmpeg_rc=%s",
-                    label, name, sent / 1_000_000, elapsed, mbps,
-                    (ttfb if ttfb is not None else -1.0), process.returncode,
-                )
-                # If ffmpeg ended on its own with a nonzero code (not because we
-                # killed it on a client disconnect), surface the stderr tail —
-                # the only signal for a failed transcode (bad codec, etc.).
-                if natural_eof and process.returncode not in (0, None):
-                    tail = getattr(process, "_stderr_tail", None)
-                    if tail:
-                        logger.error(
-                            "FFmpeg [%s] %s exited rc=%s; stderr tail:\n%s",
-                            label, name, process.returncode, "\n".join(tail),
-                        )
-            if acquired:
-                _transcode_sem.release()
-
-    return StreamingResponse(
-        _generate(),
-        media_type="video/mp4",
-        headers={"Content-Type": "video/mp4", "Cache-Control": "no-cache"},
+async def _streaming_response(
+    request: Request,
+    cmd: list,
+    file_path: str,
+    label: str,
+    heavy: bool = False,
+) -> Response:
+    """Serve one byte-stable transformed representation with ranged retries."""
+    return await serve_transformed_media(
+        request,
+        cmd=cmd,
+        file_path=file_path,
+        label=label,
+        heavy=heavy,
+        cache_root=get_runtime_dirs().cache_dir,
+        spawn_process=_spawn_ffmpeg,
+        register_process=_register_stream,
+        unregister_process=_unregister_stream,
+        heavy_semaphore=_transcode_sem,
     )
 
 
-def _stream_remuxed(
+async def _stream_remuxed(
+    request: Request,
     file_path: str,
     transcode_audio: bool = False,
     audio_bitrate: str = "256k",
-) -> StreamingResponse:
+) -> Response:
     """Remux a video (e.g. H.264+MKV) to fragmented MP4 for browser playback.
     Video is always stream-copied; audio is copied or transcoded to AAC."""
     from app.config import get_settings
@@ -934,10 +876,10 @@ def _stream_remuxed(
         "-f", "mp4", "-v", "warning", "pipe:1",
     ]
     logger.info(f"Remux-streaming (H.264+MKV→MP4): {os.path.basename(file_path)}")
-    return _streaming_response(cmd, file_path, "remux")
+    return await _streaming_response(request, cmd, file_path, "remux")
 
 
-def _stream_remuxed_video_only(file_path: str) -> StreamingResponse:
+async def _stream_remuxed_video_only(request: Request, file_path: str) -> Response:
     """Remux video stream only (no audio) from MKV to fragmented MP4 — for the
     muted visual feed; avoids audio transcoding overhead."""
     from app.config import get_settings
@@ -949,10 +891,14 @@ def _stream_remuxed_video_only(file_path: str) -> StreamingResponse:
         "-f", "mp4", "-v", "warning", "pipe:1",
     ]
     logger.info(f"Video-only remux (MKV→MP4, no audio): {os.path.basename(file_path)}")
-    return _streaming_response(cmd, file_path, "remux-vo")
+    return await _streaming_response(request, cmd, file_path, "remux-vo")
 
 
-def _stream_transcoded(file_path: str, audio_bitrate: str = "256k") -> StreamingResponse:
+async def _stream_transcoded(
+    request: Request,
+    file_path: str,
+    audio_bitrate: str = "256k",
+) -> Response:
     """Stream with on-the-fly audio transcode to AAC; video is stream-copied."""
     from app.config import get_settings
     ffmpeg = get_settings().resolved_ffmpeg
@@ -964,10 +910,15 @@ def _stream_transcoded(file_path: str, audio_bitrate: str = "256k") -> Streaming
         "-f", "mp4", "-v", "warning", "pipe:1",
     ]
     logger.info(f"Transcode-streaming (audio): {os.path.basename(file_path)}")
-    return _streaming_response(cmd, file_path, "atranscode")
+    return await _streaming_response(request, cmd, file_path, "atranscode")
 
 
-def _stream_compat(file_path: str, with_audio: bool = True, audio_bitrate: str = "192k") -> StreamingResponse:
+async def _stream_compat(
+    request: Request,
+    file_path: str,
+    with_audio: bool = True,
+    audio_bitrate: str = "192k",
+) -> Response:
     """Full compatibility transcode: re-encode video to H.264 (High profile,
     8-bit yuv420p), capped to 1080p with a bounded bitrate, and audio to AAC.
 
@@ -992,7 +943,13 @@ def _stream_compat(file_path: str, with_audio: bool = True, audio_bitrate: str =
     ]
     logger.info("Compat-transcode streaming (%s): %s",
                 "A/V" if with_audio else "video-only", os.path.basename(file_path))
-    return _streaming_response(cmd, file_path, "compat" if with_audio else "compat-vo", heavy=True)
+    return await _streaming_response(
+        request,
+        cmd,
+        file_path,
+        "compat" if with_audio else "compat-vo",
+        heavy=True,
+    )
 
 
 def _tag_mp3(mp3_path: str, item: "VideoItem", db: Session):

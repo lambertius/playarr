@@ -6,10 +6,10 @@
 ;   2. Run `python -c "..."` icon generation (or build_installer.py does it)
 ;   3. Compile with: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ;
-; Output: Output\PlayarrSetup-1.11.1.exe
+; Output: Output\PlayarrSetup-1.12.0.exe
 
 #define MyAppName "Playarr"
-#define MyAppVersion "1.11.1"
+#define MyAppVersion "1.12.0"
 #define MyAppPublisher "Playarr Contributors"
 #define MyAppURL "https://github.com/lambertius/playarr"
 #define MyAppExeName "Playarr.exe"

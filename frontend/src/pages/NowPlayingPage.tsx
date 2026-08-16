@@ -5,14 +5,14 @@ import { Tooltip } from "@/components/Tooltip";
 import { usePlaybackStore, type PlaybackTrack } from "@/stores/playbackStore";
 import { useArtworkSettings } from "@/stores/artworkSettingsStore";
 import { playbackApi, libraryApi } from "@/lib/api";
-import { usePlaybackDiagnostics } from "@/hooks/usePlaybackDiagnostics";
+import { usePlaybackMediaSession } from "@/hooks/usePlaybackMediaSession";
 import { useUpdateVideo } from "@/hooks/queries";
 import { PlaylistPicker } from "@/components/PlaylistPicker";
 import { addToVideoEditorQueue } from "@/pages/VideoEditorPage";
 import { useToast } from "@/components/Toast";
 import { FullscreenControls, RemoteTransportControls } from "@/components/FullscreenControls";
 import type { VideoItemDetail } from "@/types";
-import { classifyFullscreenChange, PlaybackSessionGuard } from "@/lib/playbackSession";
+import { classifyFullscreenChange } from "@/lib/playbackSession";
 
 // ── Animated artwork grid background ──────────────────────
 type TransitionKind = "fade" | "flip" | "spin";
@@ -454,107 +454,25 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
 
   // TV/kiosk mode: the <video> plays a single combined stream (its own audio),
   // is its own master clock, and advances the queue itself.
-  const setCurrentTime = usePlaybackStore((s) => s.setCurrentTime);
   const setDuration = usePlaybackStore((s) => s.setDuration);
-  const [needsGesture, setNeedsGesture] = useState(false);
-  const [playbackState, setPlaybackState] = useState<"loading" | "playing" | "buffering" | "error">("loading");
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const {
+    needsGesture,
+    playbackState,
+    playbackError,
+    startPlayback: startTv,
+    retryPlayback,
+    handleCanPlay: handleTvCanPlay,
+    handlePlaying: handleVideoPlaying,
+    markBuffering,
+  } = usePlaybackMediaSession({
+    videoRef,
+    track,
+    profile,
+    transcode,
+    videoSurfaceEpoch,
+    onNeedsGesture,
+  });
 
-  // Let a host surface (TV mode) know when a manual "Press OK" gesture is
-  // required, so it can move its own "Starting…" overlay out of the way.
-  useEffect(() => {
-    onNeedsGesture?.(needsGesture);
-  }, [needsGesture, onNeedsGesture]);
-
-  // Playback-health diagnostics → server log (frame drops, stalls, buffer).
-  usePlaybackDiagnostics(videoRef, { videoId: track?.videoId ?? null, mode: profile });
-
-  // Attempt autoplay-with-sound; only a genuine autoplay block needs the
-  // one-tap prompt — transient AbortErrors during a fresh load() are retried
-  // by onCanPlay.
-  const tryTvPlay = useCallback(() => {
-    const el = videoRef.current;
-    if (!el) return;
-    el.play()
-      .then(() => {
-        setNeedsGesture(false);
-        setPlaybackState("playing");
-      })
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === "NotAllowedError") setNeedsGesture(true);
-      });
-  }, []);
-
-  const handleTvCanPlay = useCallback(() => {
-    setPlaybackState("playing");
-    if (tvMode) tryTvPlay();
-  }, [tvMode, tryTvPlay]);
-
-  const handleTvTimeUpdate = useCallback(() => {
-    const el = videoRef.current;
-    if (el) setCurrentTime(el.currentTime);
-  }, [setCurrentTime]);
-
-  const startTv = useCallback(() => { tryTvPlay(); }, [tryTvPlay]);
-  const retryPlayback = useCallback(() => {
-    const el = videoRef.current;
-    if (!el) return;
-    setPlaybackState("loading");
-    setPlaybackError(null);
-    el.load();
-    el.play().then(() => setPlaybackState("playing")).catch(() => {
-      if (tvMode) setNeedsGesture(true);
-    });
-  }, [tvMode]);
-  // Every source assignment gets a session token. Event handlers close over
-  // that token, so a delayed ended/error from the previous stream cannot
-  // restart the current occurrence or advance twice.
-  const mediaSessionRef = useRef(new PlaybackSessionGuard());
-  useEffect(() => {
-    const el = videoRef.current;
-    if (!el || !track) return;
-    const session = mediaSessionRef.current.begin();
-    setPlaybackState("loading");
-    setPlaybackError(null);
-
-    const onEnded = () => {
-      if (!mediaSessionRef.current.claimTransition(session)) return;
-      const state = usePlaybackStore.getState();
-      if (state.individualTrack) {
-        state.stopIndividual();
-        return;
-      }
-      // Desktop audio is the master clock and advances the queue itself.
-      if (!tvMode) return;
-      if (state.repeat === "one") {
-        mediaSessionRef.current.releaseTransition(session);
-        el.currentTime = 0;
-        el.play().catch(() => {});
-        return;
-      }
-      state.next();
-    };
-    const onError = () => {
-      if (!mediaSessionRef.current.isCurrent(session)) return;
-      setPlaybackState("error");
-      setPlaybackError("This stream could not be decoded. Retry keeps the current queue occurrence.");
-    };
-    el.addEventListener("ended", onEnded);
-    el.addEventListener("error", onError);
-    el.src = tvMode
-      ? playbackApi.streamUrl(track.videoId, transcode)
-      : playbackApi.videoOnlyStreamUrl(track.videoId, transcode);
-    el.load();
-    if (usePlaybackStore.getState().isPlaying) {
-      el.play().then(() => setPlaybackState("playing")).catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === "NotAllowedError") setNeedsGesture(true);
-      });
-    }
-    return () => {
-      el.removeEventListener("ended", onEnded);
-      el.removeEventListener("error", onError);
-    };
-  }, [tvMode, track?.queueEntryId, track?.videoId, transcode, videoSurfaceEpoch]);
 
   const [videoHovered, setVideoHovered] = useState(false);
   const [, setVideoAspect] = useState("16 / 9");
@@ -725,18 +643,6 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
     return unsub;
   }, [tvMode]);
 
-  // Immediate sync when video starts playing (desktop only)
-  const handleVideoPlaying = useCallback(() => {
-    setPlaybackState("playing");
-    if (tvMode) return;
-    const el = videoRef.current;
-    if (!el) return;
-    const audioTime = usePlaybackStore.getState().currentTime;
-    if (Math.abs(el.currentTime - audioTime) > 0.05) {
-      el.currentTime = audioTime;
-    }
-  }, [tvMode]);
-
   // Detect native video aspect ratio from metadata
   const handleLoadedMetadata = useCallback(() => {
     const el = videoRef.current;
@@ -853,9 +759,8 @@ export function NowPlayingPage({ profile = "browser", tvCanvasHeight = 0, onNeed
                 onPlaying={handleVideoPlaying}
                 onLoadedMetadata={handleLoadedMetadata}
                 onCanPlay={tvMode ? handleTvCanPlay : undefined}
-                onTimeUpdate={tvMode ? handleTvTimeUpdate : undefined}
-                onWaiting={() => setPlaybackState("buffering")}
-                onStalled={() => setPlaybackState("buffering")}
+                onWaiting={markBuffering}
+                onStalled={markBuffering}
               />
             ) : (
               <div className="flex items-center justify-center text-white/50 text-lg h-full w-full">
