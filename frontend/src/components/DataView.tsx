@@ -24,6 +24,8 @@ interface PanelPreferences {
   navPageSizes?: Record<string, number>;
 }
 
+const PAGE_SIZE_OPTIONS = [0, 25, 50, 100, 200];
+
 interface DataViewProps<T> {
   rows: T[];
   rowKey: (row: T) => string | number;
@@ -31,8 +33,6 @@ interface DataViewProps<T> {
   renderCard: (row: T) => ReactNode;
   /** Optional grouped/specialised grid renderer. List view remains shared. */
   renderGrid?: (rows: T[]) => ReactNode;
-  /** Set false when a grouped grid should remain intact rather than split across pages. */
-  paginateGrid?: boolean;
   preferenceKey: string;
   defaultSort: string;
   defaultDirection?: "asc" | "desc";
@@ -44,14 +44,20 @@ interface DataViewProps<T> {
 /** Shared grid/list query, sorting, paging and alignment primitive. */
 export function DataView<T>({
   rows, rowKey, columns, renderCard, preferenceKey, defaultSort, defaultDirection = "asc", empty,
-  renderFilterTile, renderGrid, paginateGrid = true,
+  renderFilterTile, renderGrid,
 }: DataViewProps<T>) {
   const [params, setParams] = useSearchParams();
   const prefs = getPref<PanelPreferences>("panels", {});
   const view = (params.get("view") as ViewMode | null) ?? prefs.navViews?.[preferenceKey] ?? "grid";
   const sort = params.get("sort") ?? prefs.navSorts?.[preferenceKey] ?? defaultSort;
   const direction = (params.get("dir") as "asc" | "desc" | null) ?? prefs.navDirections?.[preferenceKey] ?? defaultDirection;
-  const pageSize = Number(params.get("page_size")) || prefs.navPageSizes?.[preferenceKey] || 50;
+  const queryPageSize = params.get("page_size");
+  const storedPageSize = prefs.navPageSizes?.[preferenceKey];
+  const pageSize = queryPageSize !== null && PAGE_SIZE_OPTIONS.includes(Number(queryPageSize))
+    ? Number(queryPageSize)
+    : storedPageSize !== undefined && PAGE_SIZE_OPTIONS.includes(storedPageSize)
+      ? storedPageSize
+      : 0;
   const requestedPage = Number(params.get("page")) || 1;
 
   const update = (patch: Record<string, string>) => setParams((previous) => {
@@ -76,10 +82,9 @@ export function DataView<T>({
       return direction === "asc" ? result : -result;
     });
   }, [columns, direction, rows, sort]);
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const totalPages = pageSize === 0 ? 1 : Math.max(1, Math.ceil(sorted.length / pageSize));
   const page = Math.min(requestedPage, totalPages);
-  const pagingEnabled = view !== "grid" || paginateGrid;
-  const visible = pagingEnabled ? sorted.slice((page - 1) * pageSize, page * pageSize) : sorted;
+  const visible = pageSize === 0 ? sorted : sorted.slice((page - 1) * pageSize, page * pageSize);
   const template = columns.map((column) => column.width ?? "minmax(8rem,1fr)").join(" ");
 
   const changeView = (next: ViewMode) => {
@@ -101,11 +106,11 @@ export function DataView<T>({
 
   const navigationControls = (
     <div className="ml-auto flex items-end gap-2">
-      {pagingEnabled && <label className="flex flex-col gap-1 text-xs text-text-muted">Page size
+      <label className="flex flex-col gap-1 text-xs text-text-muted">Page size
         <select value={pageSize} onChange={(event) => changePageSize(Number(event.target.value))} className="input-field py-1 text-xs w-auto">
-          {[25, 50, 100, 200].map((size) => <option key={size} value={size}>{size}</option>)}
+          {PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size === 0 ? "All" : size}</option>)}
         </select>
-      </label>}
+      </label>
       <ViewToggle value={view} onChange={changeView} label={`${preferenceKey} layout`} />
     </div>
   );
@@ -132,7 +137,7 @@ export function DataView<T>({
         </div>)}
       </div>
     )}
-    {pagingEnabled && totalPages > 1 && <div className="flex justify-center items-center gap-3 mt-4 text-sm text-text-muted">
+    {pageSize > 0 && totalPages > 1 && <div className="flex justify-center items-center gap-3 mt-4 text-sm text-text-muted">
       <button className="btn-ghost btn-sm" disabled={page <= 1} onClick={() => update({ page: String(page - 1) })}><ChevronLeft size={15} /> Previous</button>
       <span>Page {page} of {totalPages}</span>
       <button className="btn-ghost btn-sm" disabled={page >= totalPages} onClick={() => update({ page: String(page + 1) })}>Next <ChevronRight size={15} /></button>

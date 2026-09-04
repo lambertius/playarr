@@ -14210,13 +14210,15 @@
             }
           },
           {
+            "description": "Items per page; 0 returns all items",
             "in": "query",
             "name": "page_size",
             "required": false,
             "schema": {
               "default": 50,
+              "description": "Items per page; 0 returns all items",
               "maximum": 200,
-              "minimum": 1,
+              "minimum": 0,
               "title": "Page Size",
               "type": "integer"
             }

@@ -96,9 +96,9 @@ def _register(name: str, defaults: dict[str, Any], validators: dict[str, Validat
     REGISTRY[name] = PreferenceDefinition(name, 1, scope, defaults, validators)
 
 
-_register("library", {"view": "grid", "sort": "artist", "dir": "asc", "pageSize": 50}, {
+_register("library", {"view": "grid", "sort": "artist", "dir": "asc", "pageSize": 48}, {
     "view": _enum("grid", "list"), "sort": _is_str, "dir": _enum("asc", "desc"),
-    "pageSize": _int_range(10, 500),
+    "pageSize": _int_range(0, 500),
 })
 _register("queue-v2", {"status": "active", "category": "all", "pageSize": 50}, {
     "status": _enum("active", "complete", "failed", "cancelled", "skipped"),

@@ -210,7 +210,6 @@ export function YearsPage() {
           defaultDirection="desc"
           empty={<EmptyState icon={<CalendarDays size={48} />} title="No years yet" />}
           renderFilterTile={(controls) => <FilterBar filters={filters} onChange={setFilters} hideYearRange>{controls}</FilterBar>}
-          paginateGrid={false}
           columns={[
             { id: "year", label: "Year", width: "minmax(10rem,1fr)", sortValue: (year) => year.year, render: (year) => <button className="hover:text-accent" onClick={() => navigate(`/library?year=${year.year}`)}>{year.year}</button> },
             { id: "decade", label: "Decade", width: "8rem", sortValue: (year) => Math.floor(year.year / 10) * 10, render: (year) => `${Math.floor(year.year / 10) * 10}s` },

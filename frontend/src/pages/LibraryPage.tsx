@@ -84,7 +84,10 @@ export function LibraryPage() {
       return next;
     });
   }, [setSearchParams]);
-  const pageSize = Number(searchParams.get("page_size")) || getLibraryPrefs().pageSize;
+  const queryPageSize = searchParams.get("page_size");
+  const pageSize = queryPageSize !== null && PAGE_SIZE_OPTIONS.includes(Number(queryPageSize))
+    ? Number(queryPageSize)
+    : getLibraryPrefs().pageSize;
   const setPageSize = useCallback((n: number) => {
     patchLibraryPrefs({ pageSize: n });
     setSearchParams((prev) => {
@@ -416,7 +419,7 @@ export function LibraryPage() {
         <label className="flex flex-col gap-1 text-xs text-text-muted">
           Page size
           <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))} className="input-field w-auto py-1 text-xs">
-            {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+            {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n === 0 ? "All" : n}</option>)}
           </select>
         </label>
         <ViewToggle value={view} onChange={setView} label="Library layout" />

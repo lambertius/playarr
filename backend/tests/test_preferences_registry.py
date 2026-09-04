@@ -53,3 +53,12 @@ def test_unknown_or_invalid_fields_are_rejected():
     with pytest.raises(HTTPException) as invalid:
         patch_preference("library", PreferencePatch(patch={"view": "cards"}, revision=0), db)
     assert invalid.value.status_code == 422
+
+
+def test_library_page_size_accepts_all():
+    db = _db()
+    result = patch_preference(
+        "library", PreferencePatch(patch={"pageSize": 0}, revision=0), db,
+    )
+
+    assert result["value"]["pageSize"] == 0

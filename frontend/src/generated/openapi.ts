@@ -11862,6 +11862,7 @@ export interface operations {
         parameters: {
             query?: {
                 page?: number;
+                /** @description Items per page; 0 returns all items */
                 page_size?: number;
                 search?: string | null;
                 artist?: string | null;

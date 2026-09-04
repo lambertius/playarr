@@ -253,7 +253,7 @@ def _weighted_shuffle(tracks: list[dict], era_weights: Optional[dict[int, float]
 @router.get("/", response_model=PaginatedResponse)
 def list_videos(
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
+    page_size: int = Query(50, ge=0, le=200, description="Items per page; 0 returns all items"),
     search: Optional[str] = None,
     artist: Optional[str] = None,
     album: Optional[str] = None,
@@ -274,6 +274,8 @@ def list_videos(
     db: Session = Depends(get_db),
 ):
     """List video items with pagination, search, and filters."""
+    if page_size == 0:
+        page = 1
     query = db.query(VideoItem)
 
     # Filters
@@ -341,7 +343,7 @@ def list_videos(
 
     # Total count
     total = query.count()
-    total_pages = math.ceil(total / page_size) if total > 0 else 1
+    total_pages = math.ceil(total / page_size) if page_size > 0 and total > 0 else 1
 
     # Sorting — when the client omits sort, fall back to the saved library
     # preference so fresh browser, TV and Cast clients order alike.
@@ -365,7 +367,10 @@ def list_videos(
     query = query.order_by(sort_col)
 
     # Pagination
-    items = query.options(selectinload(VideoItem.quality_signature)).offset((page - 1) * page_size).limit(page_size).all()
+    query = query.options(selectinload(VideoItem.quality_signature))
+    if page_size > 0:
+        query = query.offset((page - 1) * page_size).limit(page_size)
+    items = query.all()
 
     # Convert to summary models with an explainable enrichment lifecycle.
     summaries = []

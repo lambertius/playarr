@@ -30,13 +30,13 @@ function LocationProbe() {
   return <output aria-label="location">{useLocation().search}</output>;
 }
 
-function subject(initialEntry = "/artists?view=list&sort=artist&dir=asc") {
+function subject(initialEntry = "/artists?view=list&sort=artist&dir=asc", subjectRows = rows) {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/artists" element={<>
           <DataView
-            rows={rows}
+            rows={subjectRows}
             rowKey={(row) => row.id}
             columns={columns}
             renderCard={(row) => <article>{row.artist}</article>}
@@ -84,6 +84,29 @@ describe("DataView", () => {
     await user.click(screen.getByRole("button", { name: "Grid view" }));
     expect(screen.getByLabelText("location")).toHaveTextContent("view=grid");
     expect(screen.getAllByRole("article")).toHaveLength(2);
+  });
+
+  it("shows all rows by default and lets the user enable or disable pagination", async () => {
+    const user = userEvent.setup();
+    const manyRows = Array.from({ length: 30 }, (_, index) => ({
+      id: String(index), artist: `Artist ${index}`, year: 2000 + index,
+    }));
+    subject("/artists?view=grid&sort=artist&dir=asc", manyRows);
+
+    const pageSize = screen.getByRole("combobox", { name: "Page size" });
+    expect(pageSize).toHaveValue("0");
+    expect(screen.getAllByRole("article")).toHaveLength(30);
+    expect(screen.queryByText(/Page 1 of/)).not.toBeInTheDocument();
+
+    await user.selectOptions(pageSize, "25");
+    expect(screen.getAllByRole("article")).toHaveLength(25);
+    expect(screen.getByText("Page 1 of 2")).toBeInTheDocument();
+    expect(screen.getByLabelText("location")).toHaveTextContent("page_size=25");
+
+    await user.selectOptions(pageSize, "0");
+    expect(screen.getAllByRole("article")).toHaveLength(30);
+    expect(screen.queryByText(/Page 1 of/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("location")).toHaveTextContent("page_size=0");
   });
 
   it("can place view controls inside the page filter tile", () => {
